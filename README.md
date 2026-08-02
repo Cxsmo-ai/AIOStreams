@@ -68,36 +68,17 @@ Add any Stremio addon you already use - Torrentio, Comet, MediaFusion, and many 
 
 </p>
 
-### 🧩 Built-in Addons
+### 🧩 Built-in Addons & Indexers
 
-AIOStreams ships with a suite of its own addons - search engines and integrations that are hosted alongside AIOStreams itself and available exclusively to your instance. They're configured and used just like any other addon in the marketplace.
+AIOStreams includes built-in search engines, indexers, and integrations hosted directly alongside your instance:
+
+- **TorrentClaw Integration**: Advanced cache detection (`[Cached]` / `[Uncached]`), automatic title remapping, season pack sizing, and custom TorrentClaw formatting hooks for clean, standardized stream layouts across torrent and Usenet results.
+- **TorrentClaw Usenet Indexer**: Toggle allowing TorrentClaw to serve as a Usenet indexer for AIOStreams (supporting NNTP, Unarr indexer integration, and smart quota optimization designed to sustain 200GB download limits through heavy monthly usage).
+- **Unarr Indexer**: Native Usenet indexer support with per-config key validation.
+- **Built-in Search Engines & Integrations**: Support for Google Drive, TorBox Search, Knaben, Easynews, SeaDex, Prowlarr, Jackett, Newznab, Torznab, and library browsing.
 
 > [!NOTE]
-> Built-in addons that search for torrents require a debrid service. Usenet results can be streamed by AIOStreams' own built-in usenet engine, via external tools like [NzbDAV](https://github.com/nzbdav-dev/nzbdav) or [AltMount](https://github.com/javi11/altmount), natively by Stremio itself, or through TorBox (Pro plan) - see the [Usenet guide](https://docs.aiostreams.viren070.me/guides/usenet). All built-in addons support anime and Kitsu/MAL catalogs.
-
-The built-in addons include:
-
-| Addon               | Description                                                      |
-| ------------------- | ---------------------------------------------------------------- |
-| **TorrentClaw**     | Advanced cache detection, season sizes, remapping, and indexer. |
-| **Unarr Indexer**   | Usenet indexer integration with per-config key validation.       |
-| **Stremio GDrive**  | Stream files directly from your Google Drive.                    |
-| **TorBox Search**   | Search TorBox's index with more options than the official addon. |
-| **Knaben**          | Proxy search across The Pirate Bay, 1337x, Nyaa.si, and more.    |
-| **Zilean**          | Scrape a Zilean DMM hashlist instance.                           |
-| **AnimeTosho**      | Mirror of most Nyaa.si and TokyoTosho anime releases.            |
-| **Torrent Galaxy**  | Search Torrent Galaxy for results.                               |
-| **Easynews Search** | Text-based search of Easynews' Usenet index.                     |
-| **SeaDex**          | Best-release database for anime (community curated).             |
-| **NekoBT**          | Anime results via nekoBT.                                        |
-| **EZTV**            | TV show torrent search via EZTV.                                 |
-| **Bitmagnet**       | Connect your self-hosted Bitmagnet DHT crawler.                  |
-| **Jackett**         | Connect your Jackett instance by URL and API key.                |
-| **Prowlarr**        | Connect your Prowlarr instance by URL and API key.               |
-| **NZBHydra2**       | Connect your NZBHydra2 instance to search Usenet indexers.       |
-| **Newznab**         | Directly configure any Newznab-compatible Usenet indexer.        |
-| **Torznab**         | Configure any Torznab API to search torrent results.             |
-| **Library**         | Browse and stream content from your debrid/usenet library        |
+> Built-in addons that search for torrents require a debrid service. Usenet results can be streamed by AIOStreams' built-in usenet engine, via external tools like [NzbDAV](https://github.com/nzbdav-dev/nzbdav) or [AltMount](https://github.com/javi11/altmount), natively by Stremio itself, or through TorBox.
 
 ### 🌐 Debrid & Usenet Service Support
 
