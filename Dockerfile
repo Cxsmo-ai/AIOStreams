@@ -45,7 +45,7 @@ COPY resources ./resources
 
 
 # Build the project.
-RUN pnpm run metadata && pnpm run build
+RUN rm -rf packages/core/dist packages/server/dist packages/frontend/dist packages/seanime-extensions/dist && pnpm run metadata && pnpm run build
 
 # Remove development dependencies.
 RUN rm -rf node_modules
