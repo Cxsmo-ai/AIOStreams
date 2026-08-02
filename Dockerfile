@@ -45,7 +45,7 @@ COPY resources ./resources
 
 
 # Build the project.
-RUN pnpm run build
+RUN pnpm run metadata && pnpm run build
 
 # Remove development dependencies.
 RUN rm -rf node_modules
