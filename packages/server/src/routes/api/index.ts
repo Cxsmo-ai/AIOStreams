@@ -1,0 +1,16 @@
+export { default as userApi } from './user.js';
+export { default as healthApi } from './health.js';
+export { default as statusApi } from './status.js';
+export { default as formatApi } from './format.js';
+export { default as catalogApi } from './catalog.js';
+export { default as postersApi } from './posters.js';
+export { default as gdriveApi } from './gdrive.js';
+export { default as debridApi } from './debrid.js';
+export { default as searchApi } from './search.js';
+export { default as animeApi } from './anime.js';
+export { default as proxyApi } from './proxy.js';
+export { default as templatesApi } from './templates.js';
+export { default as syncApi } from './sync.js';
+export { default as authApi } from './auth.js';
+export { default as dashboardApi } from './dashboard.js';
+export { default as usenetApi } from './usenet.js';

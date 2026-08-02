@@ -1,0 +1,212 @@
+import { config as appConfig } from '../config/index.js';
+import { ParsedStream, StreamProxyConfig, UserData } from '../db/schemas.js';
+import { constants, createLogger } from '../utils/index.js';
+import { takeBasicAuthFromUrl } from '../utils/http.js';
+import { createProxy } from '../proxy/index.js';
+import { PLAYBACK_PATH_PREFIX } from '../debrid/utils.js';
+
+const logger = createLogger('proxy');
+
+export type ProxyStreamDecision = 'proxy' | 'mark-proxied' | 'skip';
+
+/**
+ * Make a proxy decision (see {@link ProxyStreamDecision}) for a single stream.
+ *  - `proxy`        - generate a proxied URL for this stream
+ *  - `mark-proxied` - the stream URL is already on the proxy host; treat as proxied
+ *  - `skip`         - do not proxy
+ */
+export function evaluateProxyStream(
+  stream: ParsedStream,
+  proxy: StreamProxyConfig | undefined
+): ProxyStreamDecision {
+  const streamService = stream.service ? stream.service.id : 'none';
+  if (!stream.url || !proxy?.enabled || !proxy.url) {
+    return 'skip';
+  }
+  if (stream.proxied) {
+    return 'skip';
+  }
+  // Native usenet streams are served directly from this instance's byte
+  // endpoint (under BASE_URL) and must never be routed through any proxy.
+  if (stream.service && stream.service.id === constants.AIOSTREAMS_SERVICE) {
+    return 'skip';
+  }
+  let streamUrl: URL;
+  let proxyUrl: URL;
+  try {
+    streamUrl = new URL(stream.url);
+    proxyUrl = new URL(proxy.url);
+  } catch (error) {
+    logger.error(
+      {
+        err: error instanceof Error ? (error as Error).message : String(error),
+      },
+      'failed to parse url for proxy check'
+    );
+    return 'skip';
+  }
+  // do not proxy the stream if it is a nzbdav/altmount stream from a built-in addon and the proxy is not the built-in proxy (i.e. only allow using built-in proxy for these)
+  if (
+    stream.service &&
+    [constants.NZBDAV_SERVICE, constants.ALTMOUNT_SERVICE].includes(
+      stream.service.id
+    ) &&
+    (streamUrl.host == new URL(appConfig.bootstrap.internalUrl).host ||
+      streamUrl.host == new URL(appConfig.bootstrap.baseUrl).host) &&
+    proxy.id !== 'builtin'
+  ) {
+    return 'skip';
+  }
+  if (
+    streamUrl.host === proxyUrl.host &&
+    // check for proxy endpoint for stremthru, not needed for mediaflow as all mediaflow links are proxied
+    (proxy.id === 'mediaflow' || streamUrl.pathname.includes('/v0/proxy'))
+  ) {
+    return 'mark-proxied';
+  }
+
+  const proxyAddon =
+    !proxy.proxiedAddons?.length ||
+    proxy.proxiedAddons.includes(stream.addon.preset.id);
+  const proxyService =
+    !proxy.proxiedServices?.length ||
+    proxy.proxiedServices.includes(streamService);
+
+  if (proxy.enabled && proxyAddon && proxyService) {
+    return 'proxy';
+  }
+
+  return 'skip';
+}
+
+/** Whether this stream (and any URL it ultimately resolves to) should be proxied. */
+export function shouldProxyStream(
+  stream: ParsedStream,
+  proxy: StreamProxyConfig | undefined
+): boolean {
+  return evaluateProxyStream(stream, proxy) === 'proxy';
+}
+
+class Proxifier {
+  private userData: UserData;
+
+  constructor(userData: UserData) {
+    this.userData = userData;
+  }
+
+  public async proxify(
+    streams: ParsedStream[]
+  ): Promise<{ streams: ParsedStream[]; error?: string }> {
+    if (!this.userData.proxy?.enabled) {
+      return { streams };
+    }
+
+    const streamsToProxy: { stream: ParsedStream; index: number }[] = [];
+    streams.forEach((stream, index) => {
+      if (!stream.url) return;
+      const decision = evaluateProxyStream(stream, this.userData.proxy);
+      if (decision === 'mark-proxied') {
+        stream.proxied = true;
+      } else if (decision === 'proxy') {
+        streamsToProxy.push({ stream, index });
+      }
+    });
+
+    if (streamsToProxy.length === 0) {
+      return { streams };
+    }
+
+    const normaliseHeaders = (
+      headers: Record<string, string> | undefined
+    ): Record<string, string> | undefined => {
+      if (!headers) {
+        return undefined;
+      }
+      const normalisedHeaders: Record<string, string> = {};
+      for (const [key, value] of Object.entries(headers)) {
+        normalisedHeaders[key.trim().toLowerCase()] = value.trim();
+      }
+      return normalisedHeaders;
+    };
+    logger.debug({ count: streamsToProxy.length }, 'proxying streams');
+
+    const proxy = createProxy(this.userData.proxy);
+
+    const proxiedUrls = streamsToProxy.length
+      ? await proxy.generateUrls(
+          streamsToProxy.map(({ stream }) => {
+            let url: string = stream.url!;
+            let parsedUrl: URL | undefined;
+
+            try {
+              parsedUrl = new URL(url);
+            } catch {}
+
+            const headers = {
+              response: normaliseHeaders(stream.responseHeaders),
+              request: normaliseHeaders(stream.requestHeaders),
+            };
+            const basicAuth = parsedUrl
+              ? takeBasicAuthFromUrl(parsedUrl)
+              : undefined;
+            if (parsedUrl && basicAuth) {
+              headers.request = {
+                ...headers.request,
+                authorization: basicAuth,
+              };
+              url = parsedUrl.toString();
+            }
+            // Tag owned-playback URLs so the playback route can detect that a
+            // request arrived through our proxy and avoid double-proxying a
+            // failover-produced URL.
+            if (url.includes(PLAYBACK_PATH_PREFIX)) {
+              url += `${url.includes('?') ? '&' : '?'}${constants.INTERNAL_PROXY_MARKER}=1`;
+            }
+            return {
+              url,
+              filename: stream.filename,
+              headers,
+            };
+          })
+        )
+      : [];
+
+    logger.debug(
+      {
+        count:
+          proxiedUrls && !('error' in proxiedUrls) ? proxiedUrls.length : 0,
+      },
+      'proxy url generation complete'
+    );
+
+    const removeIndexes = new Set<number>();
+
+    streamsToProxy.forEach(({ stream, index }, i) => {
+      if (proxiedUrls && !('error' in proxiedUrls)) {
+        const proxiedUrl = proxiedUrls?.[i];
+        stream.url = proxiedUrl;
+        stream.proxied = true;
+        // proxy will handle request headers, can be removed here
+        stream.requestHeaders = undefined;
+      } else {
+        removeIndexes.add(index);
+      }
+    });
+
+    if (removeIndexes.size > 0) {
+      logger.warn(
+        { count: removeIndexes.size },
+        'failed to proxy streams, removing them'
+      );
+      streams = streams.filter((_, index) => !removeIndexes.has(index));
+    }
+
+    return {
+      streams,
+      error:
+        proxiedUrls && 'error' in proxiedUrls ? proxiedUrls.error : undefined,
+    };
+  }
+}
+
+export default Proxifier;

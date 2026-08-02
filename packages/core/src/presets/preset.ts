@@ -1,0 +1,315 @@
+import {
+  Option,
+  Resource,
+  Stream,
+  ParsedStream,
+  UserData,
+  PresetMetadata,
+  Addon,
+} from '../db/index.js';
+import { StreamParser } from '../parser/index.js';
+import { ServiceId, constants, toUrlSafeBase64 } from '../utils/index.js';
+import { config as appConfig } from '../config/index.js';
+
+export interface PresetGenerationContext {
+  presetInstanceId?: string;
+}
+/**
+ *
+ * What modifications are needed for each preset:
+ *
+ * dmm cast:  need to split title by newline, replace trailing dashes, excluding lines with box emoji, and
+ *           then joining the array back together.
+ * easynews,easynews+,easynews++: need to set type as usenet
+ * mediafusion: need to add hint for folder name, 📁 emoji, and split on arrow, take last index.
+ * stremio-jacektt: need to inspect stream urls to extract service info.
+ * stremthruStore: need to mark each stream as 'inLibrary' and unset any parsed 'indexer'
+ * torbox: need to use different regex for probably everything.
+ * torrentio: extract folder name from first line
+ */
+
+// name: z.string().min(1),
+// enabled: z.boolean().optional(),
+// baseUrl: z.string().url().optional(),
+// timeout: z.number().min(1).optional(),
+// resources: ResourceList.optional(),
+
+export const baseOptions = (
+  name: string,
+  resources: Resource[],
+  timeout: number = appConfig.presets.defaultTimeout,
+  baseUrls?: readonly string[]
+): Option[] => {
+  const urlOption: Option = {
+    id: 'url',
+    name: 'URL',
+    description:
+      'Optionally override either the manifest generated, or override the base url used when generating the manifests',
+    type: 'url',
+    required: false,
+    showInSimpleMode: false,
+    default: undefined,
+  };
+  if (baseUrls && baseUrls.length > 1) {
+    urlOption.default = 'undefined';
+    urlOption.type = 'select-with-custom';
+    urlOption.options = [
+      {
+        label: baseUrls[0],
+        value: 'undefined',
+      },
+      ...baseUrls.slice(1).map((url) => ({
+        label: url,
+        value: url,
+      })),
+    ];
+    urlOption.showInSimpleMode = true;
+  }
+  return [
+    {
+      id: 'name',
+      name: 'Name',
+      description: 'What to call this addon',
+      type: 'string',
+      required: true,
+      default: name,
+    },
+    {
+      id: 'timeout',
+      name: 'Timeout (ms)',
+      description: 'The timeout for this addon',
+      type: 'number',
+      required: true,
+      default: timeout,
+      constraints: {
+        min: appConfig.userLimits.timeouts.minTimeout,
+        max: appConfig.userLimits.timeouts.maxTimeout,
+        forceInUi: false, // large ranges don't work well
+      },
+    },
+    {
+      id: 'resources',
+      name: 'Resources',
+      description: 'Optionally override the resources to use ',
+      type: 'multi-select',
+      required: false,
+      showInSimpleMode: false,
+      default: resources,
+      options: resources.map((resource) => ({
+        label: constants.RESOURCE_LABELS[resource],
+        value: resource,
+      })),
+    },
+    urlOption,
+  ];
+};
+
+export interface CacheKeyRequestOptions {
+  resource: Resource | 'manifest';
+  type: string;
+  id: string;
+  options: Record<string, any>;
+  headers: Record<string, string> | undefined;
+  extras?: string;
+}
+
+export interface StreamResponseHookOptions {
+  addon: Addon;
+  type: string;
+  id: string;
+  streams: Stream[];
+  fetchStreams: (id: string) => Promise<Stream[]>;
+}
+
+export abstract class Preset {
+  static get METADATA(): PresetMetadata {
+    throw new Error('METADATA must be implemented by derived classes');
+  }
+
+  static get DEFAULT_URL(): string {
+    return this.METADATA.URL[0] ?? '';
+  }
+
+  static getParser(): typeof StreamParser {
+    return StreamParser;
+  }
+
+  static getCacheKey(options: CacheKeyRequestOptions): string | undefined {
+    return undefined;
+  }
+
+  /**
+   * Optional preset-specific processing after a stream response has been
+   * validated but before individual streams are parsed by AIOStreams.
+   */
+  static async transformStreamResponse(
+    options: StreamResponseHookOptions
+  ): Promise<Stream[]> {
+    return options.streams;
+  }
+
+  /**
+   * Optional hook called with this preset's streams after filtering and sorting (final order).
+   * Only invoked for presets that contributed to the response. Fire-and-forget use is fine.
+   */
+  static onStreamsReady?(_streams: ParsedStream[]): void | Promise<void>;
+
+  /**
+   * Creates a preset from a preset id.
+   * @param presetId - The id of the preset to create.
+   * @returns The preset.
+   */
+
+  static generateAddons(
+    userData: UserData,
+    options: Record<string, any>,
+    _context?: PresetGenerationContext
+  ): Promise<Addon[]> {
+    throw new Error('generateAddons must be implemented by derived classes');
+  }
+
+  // Utility functions for generating config strings
+  /**
+   * Encodes a JSON object into a base64 encoded string.
+   * @param json - The JSON object to encode.
+   * @returns The base64 encoded string.
+   */
+  protected static base64EncodeJSON(
+    json: any,
+    mode: 'urlEncode' | 'urlSafe' | 'default' = 'default'
+  ) {
+    let jsonStr = JSON.stringify(json);
+    switch (mode) {
+      case 'urlEncode':
+        return encodeURIComponent(Buffer.from(jsonStr).toString('base64'));
+      case 'urlSafe':
+        return toUrlSafeBase64(jsonStr);
+      case 'default':
+        return Buffer.from(jsonStr).toString('base64');
+    }
+  }
+
+  protected static urlEncodeJSON(json: any) {
+    return encodeURIComponent(JSON.stringify(json));
+  }
+
+  /**
+   * Transforms key-value pairs into a url encoded string
+   * @param options - The key-value pair object to encode.
+   * @returns The encoded string.
+   */
+  protected static urlEncodeKeyValuePairs(
+    options: Record<string, string> | string[][],
+    separator: string = '|',
+    encode: boolean = true
+  ) {
+    const string = (Array.isArray(options) ? options : Object.entries(options))
+      .map(([key, value]) => `${key}=${value}`)
+      .join(separator);
+    return encode ? encodeURIComponent(string) : string;
+  }
+
+  protected static getUsableServices(
+    userData: UserData,
+    specifiedServices?: ServiceId[],
+    addonName?: string
+  ) {
+    let usableServices = userData.services?.filter(
+      (service) =>
+        this.METADATA.SUPPORTED_SERVICES.includes(service.id) && service.enabled
+    );
+
+    if (specifiedServices) {
+      // Validate specified services exist and are enabled
+      for (const service of specifiedServices) {
+        const userService = userData.services?.find((s) => s.id === service);
+        const meta = Object.values(constants.SERVICE_DETAILS).find(
+          (s) => s.id === service
+        );
+        if (!userService || !userService.enabled || !userService.credentials) {
+          const sameTypeCount =
+            userData.presets?.filter((p) => p.type === this.METADATA.ID)
+              .length ?? 0;
+          // When multiple instances of the same preset exist (e.g. Newznab),
+          // prefer the user-configured name so the error identifies which one.
+          const displayName =
+            sameTypeCount > 1 && addonName ? addonName : this.METADATA.NAME;
+          throw new Error(
+            `You have specified ${meta?.name || service} in your configuration for ${displayName}, but it is not enabled or has missing credentials`
+          );
+        }
+      }
+      // Filter to only specified services
+      usableServices = usableServices?.filter((service) =>
+        specifiedServices.includes(service.id)
+      );
+    }
+
+    return usableServices;
+  }
+
+  protected static getServiceCredential(
+    serviceId: ServiceId,
+    userData: UserData,
+    specialCases?: Partial<Record<ServiceId, (credentials: any) => any>>
+  ) {
+    const service = constants.SERVICE_DETAILS[serviceId];
+    if (!service) {
+      throw new Error(`Service ${serviceId} not found`);
+    }
+
+    const serviceCredentials = userData.services?.find(
+      (service) => service.id === serviceId
+    )?.credentials;
+
+    if (!serviceCredentials) {
+      throw new Error(`No credentials found for service ${serviceId}`);
+    }
+
+    // Handle special cases if provided
+    if (specialCases?.[serviceId]) {
+      return specialCases[serviceId](serviceCredentials);
+    }
+
+    // handle seedr
+    if (serviceId === constants.SEEDR_SERVICE) {
+      if (serviceCredentials.encodedToken) {
+        return serviceCredentials.encodedToken;
+      }
+      throw new Error(
+        `Missing encoded token for ${serviceId}. Please add an encoded token using MediaFusion`
+      );
+    }
+    // handle easynews
+    if (serviceId === constants.EASYNEWS_SERVICE) {
+      if (!serviceCredentials.username || !serviceCredentials.password) {
+        throw new Error(
+          `Missing username or password for ${serviceId}. Please add a username and password.`
+        );
+      }
+      return {
+        username: serviceCredentials.username,
+        password: serviceCredentials.password,
+      };
+    }
+    if (serviceId === constants.PIKPAK_SERVICE) {
+      if (!serviceCredentials.email || !serviceCredentials.password) {
+        throw new Error(
+          `Missing email or password for ${serviceId}. Please add an email and password.`
+        );
+      }
+      return {
+        email: serviceCredentials.email,
+        password: serviceCredentials.password,
+      };
+    }
+    // Default case - API key
+    const { apiKey } = serviceCredentials;
+    if (!apiKey) {
+      throw new Error(
+        `Missing credentials for ${serviceId}. Please add an API key.`
+      );
+    }
+    return apiKey;
+  }
+}

@@ -1,0 +1,281 @@
+{
+  "metadata": {
+    "id": "builtin.debrid-starter",
+    "name": "Debrid Starter",
+    "description": "A starter template for Debrid users.",
+    "source": "external",
+    "author": "Viren",
+    "version": "1.0.1",
+    "category": "Debrid",
+    "serviceRequired": true,
+    "services": [
+      "realdebrid",
+      "torbox",
+      "premiumize",
+      "alldebrid",
+      "debridlink",
+      "easydebrid",
+      "debrider",
+      "offcloud",
+      "pikpak"
+    ]
+  },
+  "config": {
+    "presets": [
+      {
+        "type": "torrentio",
+        "instanceId": "80c",
+        "enabled": true,
+        "options": {
+          "name": "Torrentio",
+          "timeout": 5000,
+          "resources": ["stream"],
+          "providers": [],
+          "useMultipleInstances": false
+        }
+      },
+      {
+        "type": "comet",
+        "instanceId": "c9f",
+        "enabled": true,
+        "options": {
+          "name": "Comet",
+          "timeout": 7000,
+          "resources": ["stream"],
+          "includeP2P": false,
+          "removeTrash": true,
+          "mediaTypes": []
+        }
+      },
+      {
+        "type": "stremthruTorz",
+        "instanceId": "29d",
+        "enabled": true,
+        "options": {
+          "name": "StremThru Torz",
+          "timeout": 7000,
+          "resources": ["stream"],
+          "mediaTypes": [],
+          "includeP2P": false,
+          "useMultipleInstances": false
+        }
+      },
+      {
+        "type": "animetosho",
+        "instanceId": "137",
+        "enabled": true,
+        "options": {
+          "name": "AnimeTosho",
+          "timeout": 7000,
+          "mediaTypes": ["anime"],
+          "useMultipleInstances": false
+        }
+      },
+      {
+        "type": "knaben",
+        "instanceId": "534",
+        "enabled": true,
+        "options": {
+          "name": "Knaben",
+          "timeout": 7000,
+          "mediaTypes": [],
+          "useMultipleInstances": false
+        }
+      },
+      {
+        "type": "mediafusion",
+        "instanceId": "224",
+        "enabled": true,
+        "options": {
+          "name": "MediaFusion",
+          "timeout": 7000,
+          "resources": ["stream", "catalog", "meta"],
+          "useCachedResultsOnly": true,
+          "enableWatchlistCatalogs": false,
+          "downloadViaBrowser": false,
+          "contributorStreams": false,
+          "certificationLevelsFilter": [],
+          "nudityFilter": [],
+          "mediaTypes": []
+        }
+      }
+    ],
+    "formatter": {
+      "id": "prism",
+      "definition": {
+        "name": "",
+        "description": ""
+      }
+    },
+    "preferredQualities": [
+      "BluRay REMUX",
+      "BluRay",
+      "WEB-DL",
+      "WEBRip",
+      "HDRip",
+      "HC HD-Rip",
+      "DVD REMUX",
+      "DVDRip",
+      "HDTV",
+      "CAM",
+      "TS",
+      "TC",
+      "SCR",
+      "Unknown"
+    ],
+    "preferredResolutions": [
+      "2160p",
+      "1440p",
+      "1080p",
+      "720p",
+      "576p",
+      "480p",
+      "360p",
+      "240p",
+      "144p",
+      "Unknown"
+    ],
+    "excludedQualities": ["CAM", "SCR", "TS", "TC"],
+    "excludedVisualTags": ["3D"],
+    "sortCriteria": {
+      "global": [
+        {
+          "key": "cached",
+          "direction": "desc"
+        },
+        {
+          "key": "resolution",
+          "direction": "desc"
+        },
+        {
+          "key": "library",
+          "direction": "desc"
+        },
+        {
+          "key": "regexPatterns",
+          "direction": "desc"
+        },
+        {
+          "key": "streamType",
+          "direction": "desc"
+        },
+        {
+          "key": "visualTag",
+          "direction": "desc"
+        },
+        {
+          "key": "audioTag",
+          "direction": "desc"
+        },
+        {
+          "key": "audioChannel",
+          "direction": "desc"
+        },
+        {
+          "key": "encode",
+          "direction": "desc"
+        },
+        {
+          "key": "language",
+          "direction": "desc"
+        },
+        {
+          "key": "size",
+          "direction": "desc"
+        }
+      ]
+    },
+    "deduplicator": {
+      "enabled": true,
+      "multiGroupBehaviour": "aggressive",
+      "keys": ["filename", "infoHash"],
+      "cached": "single_result",
+      "uncached": "per_service",
+      "p2p": "single_result"
+    },
+    "excludedResolutions": [],
+    "includedResolutions": [],
+    "requiredResolutions": [],
+    "includedQualities": [],
+    "requiredQualities": [],
+    "excludedLanguages": [],
+    "includedLanguages": [],
+    "requiredLanguages": [],
+    "preferredLanguages": [],
+    "includedVisualTags": [],
+    "requiredVisualTags": [],
+    "preferredVisualTags": [],
+    "excludedAudioTags": [],
+    "includedAudioTags": [],
+    "requiredAudioTags": [],
+    "preferredAudioTags": [],
+    "excludedStreamTypes": [],
+    "includedStreamTypes": [],
+    "requiredStreamTypes": [],
+    "preferredStreamTypes": [],
+    "excludedEncodes": [],
+    "includedEncodes": [],
+    "requiredEncodes": [],
+    "preferredEncodes": [],
+    "seederRangeTypes": [],
+    "digitalReleaseFilter": {
+      "enabled": true,
+      "tolerance": 0,
+      "requestTypes": [],
+      "addons": []
+    },
+    "excludeCachedFromAddons": [],
+    "excludeCachedFromServices": [],
+    "excludeCachedFromStreamTypes": [],
+    "excludeUncachedFromAddons": [],
+    "excludeUncachedFromServices": [],
+    "excludeUncachedFromStreamTypes": [],
+    "proxy": {
+      "proxiedAddons": [],
+      "proxiedServices": [],
+      "id": "builtin"
+    },
+    "hideErrorsForResources": [],
+    "statistics": {
+      "statsToShow": ["addon", "filter"]
+    },
+    "tmdbApiKey": "<template_placeholder>",
+    "yearMatching": {
+      "enabled": true,
+      "requestTypes": [],
+      "addons": []
+    },
+    "titleMatching": {
+      "similarityThreshold": 1,
+      "enabled": true,
+      "requestTypes": ["movie", "series"],
+      "addons": []
+    },
+    "seasonEpisodeMatching": {
+      "enabled": true,
+      "requestTypes": ["movie", "series"],
+      "addons": []
+    },
+    "autoPlay": {
+      "attributes": [
+        "service",
+        "proxied",
+        "resolution",
+        "quality",
+        "encode",
+        "audioTags",
+        "visualTags",
+        "languages",
+        "releaseGroup"
+      ]
+    },
+    "catalogModifications": [],
+    "cacheAndPlay": {
+      "enabled": true,
+      "streamTypes": ["usenet"]
+    },
+    "excludedStreamExpressions": [
+      "queryType == 'anime.series' ? resolution(streams, '2160p') : []"
+    ]
+  }
+}

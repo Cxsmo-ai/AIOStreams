@@ -1,0 +1,1149 @@
+import pLimit from 'p-limit';
+import {
+  Cache,
+  createLogger,
+  constants,
+  Env,
+  ExtrasParser,
+  getSimpleTextHash,
+  makeUrlLogSafe,
+} from '../utils/index.js';
+import { config as appConfig } from '../config/index.js';
+import { getAddonName } from '../utils/general.js';
+import { Wrapper } from './wrapper.js';
+import { PresetManager } from '../presets/index.js';
+import { FeatureControl } from '../utils/feature.js';
+import { StreamContext, StreamUtils } from '../streams/index.js';
+import { buildPlayChain, type FailoverContentType } from './play-chain.js';
+import { resolveServiceWrappedStreams } from './serviceWrapper.js';
+import type { ServiceWrapServiceTiming } from './serviceWrapper.js';
+import type { PrecomputeSubTimings } from '../streams/precomputer.js';
+import { StreamSelector } from '../parser/streamExpression.js';
+import type {
+  ParsedMeta,
+  ParsedStream,
+  Subtitle,
+  AddonCatalog,
+  UserData,
+} from '../db/schemas.js';
+import type { Addon } from '../db/index.js';
+import type { Metadata } from '../metadata/utils.js';
+import type {
+  AIOStreamsContext,
+  AIOStreamsError,
+  AIOStreamsResponse,
+} from './types.js';
+import { buildStatistics } from './statistics.js';
+import { precacheCache } from './caches.js';
+import {
+  applyPosterModifications,
+  convertDiscoverDeepLinks,
+} from './catalog.js';
+import {
+  hmac,
+  sampleConfigFeatures,
+  track,
+  userAnalyticsEnabled,
+  type AnalyticsServiceBreakdown,
+} from '../analytics/index.js';
+import type { AddonDispositionMap } from '../streams/fetcher.js';
+
+const logger = createLogger('core');
+
+const PING_TIMEOUT_MS = 10_000;
+
+/** Shape returned by getStreams */
+type StreamsResponse = AIOStreamsResponse<{
+  streams: ParsedStream[];
+  statistics: { title: string; description: string; forced?: boolean }[];
+}>;
+
+/**
+ * Full-pipeline result cache: caches the final processed response for a whole
+ * request
+ */
+const pipelineResultCache = Cache.getInstance<string, StreamsResponse>(
+  'pipeline-result',
+  () => appConfig.resources.cache.pipeline.maxSize,
+  appConfig.bootstrap.redisUri ? undefined : 'memory'
+);
+
+async function pingStream(stream: ParsedStream, timeoutMs = PING_TIMEOUT_MS) {
+  if (!stream.url) {
+    throw new Error('pingStream: stream has no URL');
+  }
+  const wrapper = new Wrapper(stream.addon);
+  return wrapper.makeRequest(stream.url, {
+    timeout: timeoutMs,
+    rawOptions: { redirect: 'manual' },
+  });
+}
+
+async function pingStreamUrls(streams: ParsedStream[]): Promise<void> {
+  const eligible = streams.filter((s) => s.url);
+  if (eligible.length === 0) {
+    logger.debug('No streams to ping');
+    return;
+  }
+  logger.debug({ count: eligible.length }, 'pinging stream urls');
+  const limit = pLimit(appConfig.resources.preload.streamsConcurrency);
+  await Promise.all(
+    eligible.map((stream) =>
+      limit(async () => {
+        try {
+          const response = await pingStream(stream);
+          response.body?.cancel().catch(() => undefined);
+          logger.debug('Ping request sent', {
+            url: makeUrlLogSafe(stream.url!),
+            status: response.status,
+            redirectHost: (() => {
+              const location = response.headers.get('location');
+              if (!location) return 'no redirect';
+              try {
+                return new URL(location).host;
+              } catch {
+                return 'invalid URL';
+              }
+            })(),
+          });
+        } catch (error) {
+          logger.debug('Ping request failed', {
+            url: makeUrlLogSafe(stream.url!),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })
+    )
+  );
+}
+
+/**
+ * Returns all addons that support the given resource name, type, and id.
+ * An addon is included if it has a matching resource where either:
+ *  - it declares idPrefixes and at least one matches the id, or
+ *  - it declares no idPrefixes (accepts all ids)
+ */
+function getAddonsForResource(
+  ctx: Pick<AIOStreamsContext, 'supportedResources' | 'addons'>,
+  resourceName: string,
+  type: string,
+  id: string
+): Addon[] {
+  const addons: Addon[] = [];
+  for (const [instanceId, resources] of Object.entries(
+    ctx.supportedResources
+  )) {
+    const supported = resources.find(
+      (r) =>
+        r.name === resourceName &&
+        r.types.includes(type) &&
+        (r.idPrefixes ? r.idPrefixes.some((p) => id.startsWith(p)) : true)
+    );
+    if (supported) {
+      const addon = ctx.addons.find((a) => a.instanceId === instanceId);
+      if (addon) addons.push(addon);
+    }
+  }
+  return addons;
+}
+
+/**
+ * Returns candidate addons for a meta request in two priority tiers:
+ *  1. Addons with a matching idPrefix (tried first, errors are reported)
+ *  2. Addons with general type support and no idPrefixes (fallback, errors are silently skipped)
+ */
+function getMetaCandidates(
+  ctx: Pick<AIOStreamsContext, 'supportedResources' | 'addons'>,
+  type: string,
+  id: string
+): Array<{
+  addon: Addon;
+  instanceId: string;
+  reason: 'matching id prefix' | 'general type support';
+}> {
+  const results: Array<{
+    addon: Addon;
+    instanceId: string;
+    reason: 'matching id prefix' | 'general type support';
+  }> = [];
+
+  for (const [instanceId, resources] of Object.entries(
+    ctx.supportedResources
+  )) {
+    if (
+      resources.find(
+        (r) =>
+          r.name === 'meta' &&
+          r.types.includes(type) &&
+          r.idPrefixes?.some((p) => id.startsWith(p))
+      )
+    ) {
+      const addon = ctx.addons.find((a) => a.instanceId === instanceId);
+      if (addon)
+        results.push({ addon, instanceId, reason: 'matching id prefix' });
+    }
+  }
+
+  for (const [instanceId, resources] of Object.entries(
+    ctx.supportedResources
+  )) {
+    if (results.some((r) => r.instanceId === instanceId)) continue;
+    if (
+      resources.find(
+        (r) =>
+          r.name === 'meta' && r.types.includes(type) && !r.idPrefixes?.length
+      )
+    ) {
+      const addon = ctx.addons.find((a) => a.instanceId === instanceId);
+      if (addon)
+        results.push({ addon, instanceId, reason: 'general type support' });
+    }
+  }
+
+  return results;
+}
+
+function getNextEpisode(
+  currentSeason: number | undefined,
+  currentEpisode: number,
+  metadata?: Metadata
+): { season: number | undefined; episode: number } {
+  let season = currentSeason;
+  let episode = currentEpisode + 1;
+  if (!currentSeason) return { season, episode };
+  const episodeCount = metadata?.seasons?.find(
+    (s) => s.season_number === season
+  )?.episode_count;
+
+  if (episodeCount && currentEpisode === episodeCount) {
+    const nextSeasonNumber = currentSeason + 1;
+    if (metadata?.seasons?.find((s) => s.season_number === nextSeasonNumber)) {
+      logger.debug(
+        { currentSeason, nextSeason: nextSeasonNumber },
+        'current episode is last of season, advancing to next'
+      );
+      season = nextSeasonNumber;
+      episode = 1;
+    }
+  }
+  return { season, episode };
+}
+
+export async function processStreams(
+  ctx: AIOStreamsContext,
+  streams: ParsedStream[],
+  context: StreamContext,
+  isMeta: boolean = false,
+  failoverOpts?: {
+    maxAttempts: number;
+    position: 'beforeLimiting' | 'beforeSEL' | 'last';
+    contentTypes: FailoverContentType[];
+    allowCrossType: boolean;
+    parallel: number;
+    staggerMs: number;
+    preferredGraceMs: number;
+    maxWaitMs: number;
+    proxyConfig?: UserData['proxy'];
+    includeExternalFailover?: boolean;
+    sameReleaseLimit: number;
+    duplicateStaggerMs: number;
+  }
+): Promise<{
+  streams: ParsedStream[];
+  errors: AIOStreamsError[];
+  timings: {
+    metaFilterMs: number;
+    serviceWrapMs: number;
+    serviceWrapTimings?: Record<string, ServiceWrapServiceTiming>;
+    filterMs: number;
+    deduplicationMs: number;
+    precomputeMs: number;
+    precomputeSubTimings?: PrecomputeSubTimings;
+    sortMs: number;
+    limitMs: number;
+    selMs: number;
+  };
+}> {
+  const { type, id } = context;
+  let processedStreams = streams;
+  let errors: AIOStreamsError[] = [];
+
+  let metaFilterMs = 0;
+  let serviceWrapMs = 0;
+  let serviceWrapTimings: Record<string, ServiceWrapServiceTiming> | undefined;
+  let filterMs = 0;
+  let deduplicationMs = 0;
+  let precomputeMs = 0;
+  let precomputeSubTimings: PrecomputeSubTimings | undefined;
+  let sortMs = 0;
+  let limitMs = 0;
+  let selMs = 0;
+
+  if (isMeta) {
+    await ctx.precomputer.precomputeSeaDexOnly(processedStreams, context);
+    const metaFilterStart = Date.now();
+    processedStreams = await ctx.filterer.filter(processedStreams, context);
+    metaFilterMs = Date.now() - metaFilterStart;
+  }
+
+  const preServiceWrapIds = new Set(processedStreams.map((s) => s.id));
+  const serviceWrapStart = Date.now();
+  const resolvedResults = await resolveServiceWrappedStreams(
+    processedStreams,
+    context,
+    ctx.userData,
+    ctx.addons
+  );
+  serviceWrapMs = Date.now() - serviceWrapStart;
+  processedStreams = resolvedResults.streams;
+  errors.push(...resolvedResults.errors);
+  if (resolvedResults.serviceTimings) {
+    serviceWrapTimings = resolvedResults.serviceTimings;
+  }
+
+  if (resolvedResults.hasNewStreams) {
+    const filterStart = Date.now();
+    processedStreams = await ctx.filterer.filter(processedStreams, context);
+    filterMs = Date.now() - filterStart;
+  }
+
+  // The fetcher path already blocklist-filtered its streams; this pass only
+  // covers streams that appeared after it (meta requests and service
+  // wrapping), and runs before dedup for the same failover-variant reason.
+  if (isMeta || resolvedResults.hasNewStreams) {
+    processedStreams = await ctx.filterer.filterBlocklisted(processedStreams);
+  }
+
+  const dedupStart = Date.now();
+  processedStreams = await ctx.deduplicator.deduplicate(processedStreams);
+  deduplicationMs = Date.now() - dedupStart;
+
+  if (isMeta || resolvedResults.hasNewStreams) {
+    const skipPerStreamIds =
+      !isMeta && resolvedResults.hasNewStreams ? preServiceWrapIds : undefined;
+    const precomputeStart = Date.now();
+    precomputeSubTimings = await ctx.precomputer.precomputePreferred(
+      processedStreams,
+      context,
+      skipPerStreamIds
+    );
+    precomputeMs = Date.now() - precomputeStart;
+  }
+
+  const sortStart = Date.now();
+  let finalStreams = await ctx.sorter.sort(processedStreams, context);
+  sortMs = Date.now() - sortStart;
+
+  if (failoverOpts?.position === 'beforeSEL') {
+    await buildPlayChain(
+      finalStreams,
+      {
+        maxAttempts: failoverOpts.maxAttempts,
+        contentTypes: failoverOpts.contentTypes,
+        allowCrossType: failoverOpts.allowCrossType,
+        parallel: failoverOpts.parallel,
+        staggerMs: failoverOpts.staggerMs,
+        preferredGraceMs: failoverOpts.preferredGraceMs,
+        maxWaitMs: failoverOpts.maxWaitMs,
+        proxyConfig: failoverOpts.proxyConfig,
+        includeExternal: failoverOpts.includeExternalFailover,
+        sameReleaseLimit: failoverOpts.sameReleaseLimit,
+        duplicateStaggerMs: failoverOpts.duplicateStaggerMs,
+      },
+      ctx.userData.uuid
+    ).catch((error) => {
+      logger.error(
+        {
+          err: error instanceof Error ? error.message : String(error),
+          position: 'beforeSEL',
+        },
+        'error during play chain population'
+      );
+    });
+  }
+
+  const selStart = Date.now();
+  finalStreams = await ctx.filterer.applyStreamExpressionFilters(
+    finalStreams,
+    context
+  );
+  selMs = Date.now() - selStart;
+
+  if (failoverOpts?.position === 'beforeLimiting') {
+    await buildPlayChain(
+      finalStreams,
+      {
+        maxAttempts: failoverOpts.maxAttempts,
+        contentTypes: failoverOpts.contentTypes,
+        allowCrossType: failoverOpts.allowCrossType,
+        parallel: failoverOpts.parallel,
+        staggerMs: failoverOpts.staggerMs,
+        preferredGraceMs: failoverOpts.preferredGraceMs,
+        maxWaitMs: failoverOpts.maxWaitMs,
+        proxyConfig: failoverOpts.proxyConfig,
+        includeExternal: failoverOpts.includeExternalFailover,
+        sameReleaseLimit: failoverOpts.sameReleaseLimit,
+        duplicateStaggerMs: failoverOpts.duplicateStaggerMs,
+      },
+      ctx.userData.uuid
+    ).catch((error) => {
+      logger.error(
+        {
+          err: error instanceof Error ? error.message : String(error),
+          position: 'beforeLimiting',
+        },
+        'error during play chain population'
+      );
+    });
+  }
+
+  const limitStart = Date.now();
+  finalStreams = await ctx.limiter.limit(finalStreams);
+  limitMs = Date.now() - limitStart;
+
+  if (!failoverOpts?.position || failoverOpts.position === 'last') {
+    if (failoverOpts) {
+      await buildPlayChain(
+        finalStreams,
+        {
+          maxAttempts: failoverOpts.maxAttempts,
+          contentTypes: failoverOpts.contentTypes,
+          allowCrossType: failoverOpts.allowCrossType,
+          parallel: failoverOpts.parallel,
+          staggerMs: failoverOpts.staggerMs,
+          preferredGraceMs: failoverOpts.preferredGraceMs,
+          maxWaitMs: failoverOpts.maxWaitMs,
+          proxyConfig: failoverOpts.proxyConfig,
+          includeExternal: failoverOpts.includeExternalFailover,
+          sameReleaseLimit: failoverOpts.sameReleaseLimit,
+          duplicateStaggerMs: failoverOpts.duplicateStaggerMs,
+        },
+        ctx.userData.uuid
+      ).catch((error) => {
+        logger.error(
+          {
+            err: error instanceof Error ? error.message : String(error),
+            position: 'last',
+          },
+          'error during play chain population'
+        );
+      });
+    }
+  }
+
+  ctx.filterer.generateFilterSummary(streams, finalStreams, type, id);
+
+  const { streams: proxiedStreams, error } =
+    await ctx.proxifier.proxify(finalStreams);
+
+  if (error) {
+    errors.push({ title: `Proxifier Error`, description: error });
+  }
+  finalStreams = proxiedStreams.map((stream) => {
+    if (stream.parsedFile) {
+      stream.parsedFile.visualTags = stream.parsedFile.visualTags.filter(
+        (tag) => !constants.FAKE_VISUAL_TAGS.includes(tag as any)
+      );
+      stream.parsedFile.languages = stream.parsedFile.languages.filter(
+        (lang) => !['Original'].includes(lang as any)
+      );
+    }
+    return stream;
+  });
+
+  if (ctx.userData.externalDownloads) {
+    const streamsWithExternalDownloads: ParsedStream[] = [];
+    for (const stream of finalStreams) {
+      streamsWithExternalDownloads.push(stream);
+      if (stream.url) {
+        streamsWithExternalDownloads.push(
+          StreamUtils.createDownloadableStream(stream)
+        );
+      }
+    }
+    logger.debug(
+      { added: streamsWithExternalDownloads.length - finalStreams.length },
+      'added external download streams'
+    );
+    finalStreams = streamsWithExternalDownloads;
+  }
+
+  return {
+    streams: finalStreams,
+    errors,
+    timings: {
+      metaFilterMs,
+      serviceWrapMs,
+      serviceWrapTimings,
+      filterMs,
+      deduplicationMs,
+      precomputeMs,
+      precomputeSubTimings,
+      sortMs,
+      limitMs,
+      selMs,
+    },
+  };
+}
+
+async function precacheNextEpisode(
+  ctx: AIOStreamsContext,
+  context: StreamContext
+): Promise<void> {
+  const { type, id, parsedId } = context;
+  if (!parsedId) return;
+
+  const currentSeason = parsedId.season ? Number(parsedId.season) : undefined;
+  const currentEpisode = parsedId.episode
+    ? Number(parsedId.episode)
+    : undefined;
+  if (!currentEpisode) return;
+
+  const metadata = await context.getMetadata();
+  const { season: seasonToPrecache, episode: episodeToPrecache } =
+    getNextEpisode(currentSeason, currentEpisode, metadata);
+
+  const precacheId = parsedId.generator(
+    parsedId.value,
+    seasonToPrecache?.toString(),
+    episodeToPrecache?.toString()
+  );
+  logger.debug(
+    {
+      titleId: parsedId.value,
+      currentSeason,
+      currentEpisode,
+      episodeToPrecache,
+      seasonToPrecache,
+      precacheId,
+    },
+    'pre-caching next episode'
+  );
+
+  // Temporarily mutate userData to remove excludeUncached filter for background precache.
+  // Preserve original to restore after getStreams returns.
+  const originalUserData = ctx.userData;
+  const userData = structuredClone(ctx.userData);
+  userData.excludeUncached = false;
+  userData.groups = undefined;
+  userData.dynamicAddonFetching = { enabled: false };
+  ctx.userData = userData;
+
+  const nextStreamsResponse = await getStreams(ctx, precacheId, type, true);
+  ctx.userData = originalUserData;
+
+  if (!nextStreamsResponse.success) {
+    logger.error(
+      { id, errors: nextStreamsResponse.errors },
+      'failed to get streams during precaching'
+    );
+    return;
+  }
+
+  const nextStreams = nextStreamsResponse.data.streams;
+
+  let selectedStreams: ParsedStream[] = [];
+  const selector =
+    ctx.userData.precacheSelector || constants.DEFAULT_PRECACHE_SELECTOR;
+  try {
+    const streamSelector = new StreamSelector(context.toExpressionContext());
+    selectedStreams = await streamSelector.select(nextStreams, selector);
+    logger.debug(
+      { selector, resultCount: selectedStreams.length },
+      'precache selector evaluated'
+    );
+  } catch (error) {
+    logger.error(
+      { selector, err: error instanceof Error ? error.message : String(error) },
+      'failed to evaluate precache selector'
+    );
+  }
+
+  if (selectedStreams.length === 0) {
+    logger.debug(
+      { id },
+      'skipping precaching, precache selector returned no streams'
+    );
+    return;
+  }
+
+  const singleStreamOnly = ctx.userData.precacheSingleStream !== false;
+  const streamsToCache = selectedStreams
+    .filter((s) => s.url)
+    .slice(0, singleStreamOnly ? 1 : appConfig.userLimits.maxBackgroundPings);
+
+  if (streamsToCache.length === 0) {
+    logger.debug({ id }, 'skipping precaching, no selected stream had a url');
+    return;
+  }
+
+  logger.debug(
+    { count: streamsToCache.length, id, type },
+    'precaching streams'
+  );
+
+  const cacheKey = `precache-${type}-${id}-${ctx.userData.uuid}`;
+  await precacheCache.set(
+    cacheKey,
+    true,
+    appConfig.resources.precache.nextEpisodeMinInterval
+  );
+
+  await pingStreamUrls(streamsToCache);
+
+  logger.debug(
+    { count: streamsToCache.length, id, type },
+    'precaching complete'
+  );
+}
+
+/**
+ * Emit one `addon_contribution` event per addon for the current stream
+ * request. Gated by the per-user analytics flag and only fires when the
+ * request has an attributable user (no anonymous attribution). All work is
+ * O(addons + finalStreams) and stays on the hot path's caller (no I/O).
+ */
+function emitAddonContributions(args: {
+  ctx: AIOStreamsContext;
+  dispositions: AddonDispositionMap;
+  byManifestUrl: Map<string, ParsedStream[]>;
+}): void {
+  if (!userAnalyticsEnabled()) return;
+  const uuid = args.ctx.userData?.uuid;
+  if (!uuid) return; // anonymous/probe traffic — nothing to attribute
+  let uuidHash: string;
+  try {
+    uuidHash = hmac(uuid);
+  } catch {
+    return;
+  }
+
+  for (const [manifestUrl, info] of args.dispositions) {
+    const survivors = args.byManifestUrl.get(manifestUrl) ?? [];
+
+    // Build per-service breakdown over the surviving streams.
+    let serviceBreakdown: AnalyticsServiceBreakdown | null = null;
+    if (survivors.length > 0) {
+      const map: AnalyticsServiceBreakdown = {};
+      for (const s of survivors) {
+        const id = s.service?.id ?? 'none';
+        const slot = map[id] ?? { ok: 0, cached: 0, uncached: 0 };
+        slot.ok += 1;
+        if (s.service) {
+          if (s.service.cached) slot.cached += 1;
+          else slot.uncached += 1;
+        }
+        map[id] = slot;
+      }
+      serviceBreakdown = map;
+    }
+
+    let addonName: string | null = null;
+    if (info.addon.name) {
+      addonName = info.addon.name;
+      if (info.addon.displayIdentifier) {
+        addonName += ` (${info.addon.displayIdentifier})`;
+      }
+    }
+    track({
+      event_type: 'addon_contribution',
+      resource: 'stream',
+      uuid_hash: uuidHash,
+      preset_id: info.addon.preset?.type ?? null,
+      addon_instance_hash: hmac(manifestUrl),
+      addon_name: addonName,
+      url_overridden: false,
+      status: info.status,
+      error_kind: info.errorKind ?? null,
+      latency_ms: info.latencyMs || null,
+      result_count: info.rawCount,
+      final_count: survivors.length,
+      disposition: info.disposition,
+      service_breakdown: serviceBreakdown,
+    });
+  }
+}
+
+export async function getStreams(
+  ctx: AIOStreamsContext,
+  id: string,
+  type: string,
+  preCaching: boolean = false
+): Promise<StreamsResponse> {
+  logger.debug({ type, id }, 'handling stream request');
+  const statistics: { title: string; description: string; forced?: boolean }[] =
+    [];
+
+  const supportedAddons = getAddonsForResource(ctx, 'stream', type, id);
+
+  logger.debug(
+    {
+      count: supportedAddons.length,
+      addons: supportedAddons.map((a) => a.name),
+    },
+    'found addons for stream resource'
+  );
+
+  const context = StreamContext.create(type, id, ctx.userData);
+  ctx.streamContext = context;
+
+  const pipelineTtl = appConfig.resources.cache.pipeline.ttl;
+  const usePipelineCache = !preCaching && pipelineTtl > 0;
+  // Hash the full userData: it captures everything the pipeline output depends
+  // on
+  const pipelineCacheKey = `${getSimpleTextHash(
+    JSON.stringify(ctx.userData)
+  )}:${type}:${id}`;
+  if (usePipelineCache) {
+    const cached = await pipelineResultCache.get(pipelineCacheKey);
+    if (cached !== undefined) {
+      // The fetch pipeline that normally populates the context's backing fields
+      // was skipped, so await the ones toFormatterContext()/toExpressionContext()
+      // read directly manually.
+      await Promise.all([
+        context.getMetadata(),
+        context.getSeaDex(),
+        context.getEpisodeRuntime(),
+      ]);
+      logger.debug({ type, id }, 'pipeline result cache hit');
+      return cached;
+    }
+  }
+
+  ctx.filterer.resetFilterTimings();
+  ctx.precomputer.resetPrecomputeTimings();
+
+  const fetchStart = Date.now();
+  const {
+    streams,
+    errors,
+    statistics: addonStatistics,
+    dispositions,
+  } = await ctx.fetcher.fetch(supportedAddons, context);
+  const fetchMs = Date.now() - fetchStart;
+
+  if (
+    ctx.userData.statistics?.enabled &&
+    ctx.userData.statistics?.statsToShow?.includes('addon')
+  ) {
+    statistics.push(...addonStatistics);
+  }
+
+  errors.push(
+    ...ctx.addonInitialisationErrors.map((e) => ({
+      title: `[❌] ${getAddonName(e.addon)}`,
+      description: e.error,
+    }))
+  );
+
+  const processResults = await processStreams(
+    ctx,
+    streams,
+    context,
+    false,
+    ctx.userData.failover?.enabled &&
+      (!preCaching || ctx.userData.failover?.precacheFailover)
+      ? {
+          maxAttempts: Math.min(
+            ctx.userData.failover.maxAttempts ??
+              constants.DEFAULT_FAILOVER_MAX_ATTEMPTS,
+            appConfig.userLimits.maxFailoverAttempts
+          ),
+          position: ctx.userData.failover.position ?? 'last',
+          contentTypes: (ctx.userData.failover.contentTypes ?? [
+            ...constants.DEFAULT_FAILOVER_CONTENT_TYPES,
+          ]) as FailoverContentType[],
+          allowCrossType: ctx.userData.failover.allowCrossType ?? false,
+          parallel: Math.min(
+            ctx.userData.failover.parallel ??
+              constants.DEFAULT_FAILOVER_PARALLEL,
+            appConfig.userLimits.maxParallelAttempts
+          ),
+          staggerMs:
+            ctx.userData.failover.staggerMs ??
+            constants.DEFAULT_FAILOVER_STAGGER_MS,
+          preferredGraceMs:
+            ctx.userData.failover.preferredGraceMs ??
+            constants.DEFAULT_FAILOVER_PREFERRED_GRACE_MS,
+          maxWaitMs:
+            ctx.userData.failover.maxWaitMs ??
+            constants.DEFAULT_FAILOVER_MAX_WAIT_MS,
+          proxyConfig: ctx.userData.proxy,
+          includeExternalFailover:
+            ctx.userData.failover.includeExternalFailover ??
+            constants.DEFAULT_FAILOVER_INCLUDE_EXTERNAL,
+          sameReleaseLimit:
+            ctx.userData.failover.sameReleaseLimit ??
+            constants.DEFAULT_FAILOVER_SAME_RELEASE_LIMIT,
+          duplicateStaggerMs:
+            ctx.userData.failover.duplicateStaggerMs ??
+            constants.DEFAULT_FAILOVER_DUPLICATE_STAGGER_MS,
+        }
+      : undefined
+  );
+  let finalStreams = processResults.streams;
+  const pipelineTimings = processResults.timings;
+  errors.push(...processResults.errors);
+
+  if (FeatureControl.disabledStreamTypes.size > 0) {
+    const removedByType = new Map<string, number>();
+    finalStreams = finalStreams.filter((stream) => {
+      if (FeatureControl.disabledStreamTypes.has(stream.type)) {
+        removedByType.set(
+          stream.type,
+          (removedByType.get(stream.type) ?? 0) + 1
+        );
+        return false;
+      }
+      return true;
+    });
+    if (removedByType.size > 0) {
+      const total = [...removedByType.values()].reduce((a, b) => a + b, 0);
+      const lines: string[] = [
+        `⚠️ The following stream types have been disabled by the instance owner.`,
+        `📌 Disabled Stream Types (${total})`,
+      ];
+      for (const [type, count] of removedByType.entries()) {
+        lines.push(`    • ${count}× ${type}`);
+      }
+      statistics.push({
+        title: '🚫 Removal Reasons',
+        description: lines.join('\n').trim(),
+        forced: true,
+      });
+    }
+  }
+
+  if (ctx.userData.precacheNextEpisode && !preCaching) {
+    let precache = false;
+    const cacheKey = `precache-${type}-${id}-${ctx.userData.uuid}`;
+    const cachedNextEpisode = await precacheCache.get(cacheKey, false);
+    if (cachedNextEpisode) {
+      logger.debug(
+        { type, id, ttl: precacheCache.getTTL(cacheKey) },
+        'skipping precache, already precached recently'
+      );
+      precache = false;
+    } else {
+      precache = true;
+    }
+    if (precache) {
+      setImmediate(() => {
+        precacheNextEpisode(ctx, context).catch((error) => {
+          logger.error('Error during precaching:', {
+            error: error instanceof Error ? error.message : String(error),
+            type,
+            id,
+          });
+        });
+      });
+    }
+  }
+
+  if (ctx.userData.preloadStreams?.enabled && !preCaching) {
+    let shouldPreload = true;
+    if (appConfig.resources.preload.minInterval > 0) {
+      const preloadCooldownKey = `preload-${type}-${id}-${ctx.userData.uuid}`;
+      const recentlyPreloaded = await precacheCache.get(
+        preloadCooldownKey,
+        false
+      );
+      if (recentlyPreloaded) {
+        logger.debug(
+          { type, id, ttl: precacheCache.getTTL(preloadCooldownKey) },
+          'preload skipped, within cooldown'
+        );
+        shouldPreload = false;
+      } else {
+        await precacheCache.set(
+          preloadCooldownKey,
+          true,
+          appConfig.resources.preload.minInterval
+        );
+      }
+    }
+
+    if (shouldPreload) {
+      const preloadSelector =
+        ctx.userData.preloadStreams.selector ??
+        constants.DEFAULT_PRELOAD_SELECTOR;
+      const streamSelector = new StreamSelector(context.toExpressionContext());
+      let streamsToPreload: ParsedStream[];
+      const preloadSingleStream =
+        ctx.userData.preloadStreams?.singleStream !== false;
+      try {
+        streamsToPreload = (
+          await streamSelector.select(finalStreams, preloadSelector)
+        )
+          .filter((s) => s.url)
+          .slice(
+            0,
+            preloadSingleStream ? 1 : appConfig.userLimits.maxBackgroundPings
+          );
+      } catch (selectorError) {
+        logger.warn('Preload selector evaluation failed', {
+          selector: preloadSelector,
+          error:
+            selectorError instanceof Error
+              ? selectorError.message
+              : String(selectorError),
+        });
+        streamsToPreload = [];
+      }
+      if (streamsToPreload.length > 0) {
+        // mark streams as preloading for formatter
+        for (const s of streamsToPreload) {
+          // cant mutate as select returns copys via zod parsing, so we need to find the original stream via ID.
+          const originalStream = finalStreams.find((fs) => fs.id === s.id);
+          if (originalStream) {
+            originalStream.preloading = true;
+          }
+        }
+        setImmediate(() => {
+          pingStreamUrls(streamsToPreload).catch((error) => {
+            logger.error('Error during stream preloading:', {
+              error: error instanceof Error ? error.message : String(error),
+              type,
+              id,
+            });
+          });
+        });
+      }
+    }
+  }
+
+  statistics.push(
+    ...buildStatistics(
+      {
+        userData: ctx.userData,
+        filterer: ctx.filterer,
+        precomputer: ctx.precomputer,
+      },
+      finalStreams,
+      fetchMs,
+      pipelineTimings
+    )
+  );
+
+  const byPresetType = new Map<string, ParsedStream[]>();
+  const byManifestUrl = new Map<string, ParsedStream[]>();
+  for (const s of finalStreams) {
+    const t = s.addon?.preset?.type ?? '';
+    if (t) {
+      const list = byPresetType.get(t) ?? [];
+      list.push(s);
+      byPresetType.set(t, list);
+    }
+    const m = s.addon?.manifestUrl;
+    if (m) {
+      const list = byManifestUrl.get(m) ?? [];
+      list.push(s);
+      byManifestUrl.set(m, list);
+    }
+  }
+  for (const [presetType, list] of byPresetType) {
+    const PresetClass = PresetManager.fromId(presetType);
+    if (typeof PresetClass.onStreamsReady === 'function') {
+      PresetClass.onStreamsReady(list);
+    }
+  }
+
+  emitAddonContributions({
+    ctx,
+    dispositions,
+    byManifestUrl,
+  });
+
+  if (ctx.userData?.uuid) {
+    const serviceIds: string[] = [];
+    for (const s of ctx.userData.services ?? []) {
+      if (s.enabled !== false && s.id) serviceIds.push(s.id);
+    }
+    const presetTypes: string[] = [];
+    for (const p of ctx.userData.presets ?? []) {
+      if (p.enabled !== false && p.type) presetTypes.push(p.type);
+    }
+    sampleConfigFeatures({
+      uuid: ctx.userData.uuid,
+      serviceIds,
+      formatterId: ctx.userData.formatter?.id ?? null,
+      presetTypes,
+    });
+  }
+
+  logger.debug(
+    {
+      streams: finalStreams.length,
+      errors: errors.length,
+      statistics: statistics.length,
+    },
+    'stream request complete'
+  );
+  const response: StreamsResponse = {
+    success: true,
+    data: { streams: finalStreams, statistics },
+    errors,
+  };
+  if (usePipelineCache) {
+    await pipelineResultCache.set(pipelineCacheKey, response, pipelineTtl);
+  }
+  return response;
+}
+
+export async function getMeta(
+  ctx: AIOStreamsContext,
+  type: string,
+  id: string
+): Promise<AIOStreamsResponse<ParsedMeta | null>> {
+  logger.debug({ type, id }, 'handling meta request');
+
+  const candidates = getMetaCandidates(ctx, type, id);
+
+  if (candidates.length === 0) {
+    logger.warn({ type, id }, 'no supported addon found for meta request');
+    return { success: false, data: null, errors: [] };
+  }
+
+  const errors: Array<{ title: string; description: string }> = [];
+
+  for (const candidate of candidates) {
+    logger.debug(
+      {
+        addon: candidate.addon.name,
+        instanceId: candidate.instanceId,
+        reason: candidate.reason,
+      },
+      'trying addon for meta resource'
+    );
+    try {
+      const meta = await new Wrapper(candidate.addon).getMeta(type, id);
+      logger.debug(
+        { addon: candidate.addon.name, instanceId: candidate.instanceId },
+        'successfully got meta from addon'
+      );
+      if (ctx.userData.usePosterServiceForMeta) {
+        await applyPosterModifications(ctx, [meta], type, true);
+      } else {
+        meta.links = convertDiscoverDeepLinks(ctx, meta.links);
+      }
+      if (meta.videos) {
+        const context = StreamContext.create(type, id, ctx.userData);
+        ctx.streamContext = context;
+        meta.videos = await Promise.all(
+          meta.videos.map(async (video) => {
+            if (!video.streams) return video;
+            video.streams = (
+              await processStreams(ctx, video.streams, context, true)
+            ).streams;
+            return video;
+          })
+        );
+      }
+      return { success: true, data: meta, errors: [] };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logger.warn(
+        {
+          addon: candidate.addon.name,
+          err: errorMessage,
+          reason: candidate.reason,
+        },
+        'failed to get meta from addon'
+      );
+      if (candidate.reason === 'general type support') continue;
+      errors.push({
+        title: `[❌] ${candidate.addon.name}`,
+        description: errorMessage,
+      });
+    }
+  }
+
+  logger.error(
+    { candidates: candidates.length, type, id },
+    'all candidate addons failed for meta request'
+  );
+  return { success: false, data: null, errors };
+}
+
+export async function getSubtitles(
+  ctx: AIOStreamsContext,
+  type: string,
+  id: string,
+  extras?: string
+): Promise<AIOStreamsResponse<Subtitle[]>> {
+  logger.debug({ type, id, extras }, 'handling subtitle request');
+
+  const supportedAddons = getAddonsForResource(ctx, 'subtitles', type, id);
+  const parsedExtras = new ExtrasParser(extras);
+
+  let errors: AIOStreamsError[] = ctx.addonInitialisationErrors.map(
+    (error) => ({
+      title: `[❌] ${getAddonName(error.addon)}`,
+      description: error.error,
+    })
+  );
+  let allSubtitles: Subtitle[] = [];
+
+  await Promise.all(
+    supportedAddons.map(async (addon) => {
+      try {
+        const subtitles = await new Wrapper(addon).getSubtitles(
+          type,
+          id,
+          parsedExtras.toString()
+        );
+        if (subtitles) allSubtitles.push(...subtitles);
+      } catch (error) {
+        errors.push({
+          title: `[❌] ${getAddonName(addon)}`,
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })
+  );
+
+  return { success: true, data: allSubtitles, errors };
+}
+
+export async function getAddonCatalog(
+  ctx: AIOStreamsContext,
+  type: string,
+  id: string
+): Promise<AIOStreamsResponse<AddonCatalog[]>> {
+  logger.debug({ type, id }, 'handling addon catalog request');
+  const addonInstanceId = id.split('.', 2)[0];
+  const addon = ctx.addons.find((a) => a.instanceId === addonInstanceId);
+  if (!addon) {
+    return {
+      success: false,
+      data: [],
+      errors: [
+        {
+          title: `Addon ${addonInstanceId} not found`,
+          description: 'Addon not found',
+        },
+      ],
+    };
+  }
+  const actualAddonCatalogId = id.split('.').slice(1).join('.');
+  let addonCatalogs: AddonCatalog[] = [];
+  try {
+    addonCatalogs = await new Wrapper(addon).getAddonCatalog(
+      type,
+      actualAddonCatalogId
+    );
+  } catch (error) {
+    return {
+      success: false,
+      data: [],
+      errors: [
+        {
+          title: `[❌] ${getAddonName(addon)}`,
+          description: error instanceof Error ? error.message : String(error),
+        },
+      ],
+    };
+  }
+  return { success: true, data: addonCatalogs, errors: [] };
+}

@@ -1,0 +1,1488 @@
+﻿import {
+  appConfig,
+  ServiceId,
+  createLogger,
+  getTimeTakenSincePoint,
+  maskSensitiveInfo,
+  Cache,
+  DistributedLock,
+  fromUrlSafeBase64,
+  formatZodError,
+  getSimpleTextHash,
+  makeUrlLogSafe,
+  Time,
+} from '../utils/index.js';
+import {
+  isVideoFile,
+  selectFileInTorrentOrNZB,
+  hashNzbUrl,
+  buildResolveKey,
+} from './utils.js';
+import {
+  DebridServiceConfig,
+  DebridDownload,
+  PlaybackInfo,
+  DebridError,
+  DebridFile,
+  UsenetDebridService,
+  DebridFailureCache,
+} from './base.js';
+import { ParsedResult, parseTorrentTitle } from '@viren070/parse-torrent-title';
+import z, { ZodError } from 'zod';
+import { createClient, WebDAVClient, FileStat } from 'webdav';
+import { fetch } from 'undici';
+import { BuiltinProxy } from '../proxy/builtin.js';
+import { createProxy } from '../proxy/index.js';
+import { basename } from 'path';
+import type { Logger } from '../logging/logger.js';
+
+// Zod schemas for SABnzbd-compatible API responses (used by streaming usenet services)
+const AddUrlResponseSchema = z.object({
+  status: z.boolean(),
+  nzo_ids: z.array(z.string()).optional(),
+  error: z.string().nullable().optional(),
+});
+
+const HistorySlotSchema = z.object({
+  nzo_id: z.string(),
+  status: z.string().optional(),
+  name: z.string().optional(),
+  category: z.string().optional(),
+  storage: z.string().nullable().optional(),
+  fail_message: z.string().optional(),
+  bytes: z.number().int().optional(),
+});
+
+const HistoryResponseSchema = z.object({
+  status: z.boolean().optional(),
+  history: z
+    .object({
+      slots: z.array(HistorySlotSchema),
+    })
+    .optional(),
+  error: z.string().nullable().optional(),
+});
+
+// Transform API responses to camelCase
+const transformAddUrlResponse = (
+  data: z.infer<typeof AddUrlResponseSchema>
+) => ({
+  status: data.status,
+  nzoIds: data.nzo_ids,
+  error: data.error,
+});
+
+const transformHistorySlot = (slot: z.infer<typeof HistorySlotSchema>) => ({
+  nzoId: slot.nzo_id,
+  status: slot.status?.toLowerCase(),
+  name: slot.name,
+  category: slot.category,
+  storage: slot.storage,
+  failMessage: slot.fail_message,
+  bytes: slot.bytes,
+});
+
+const transformHistoryResponse = (
+  data: z.infer<typeof HistoryResponseSchema>
+) => ({
+  status: data.status,
+  history: {
+    slots: data.history?.slots.map(transformHistorySlot) ?? [],
+  },
+  error: data.error,
+});
+
+const convertStatusCodeToError = (code: number): DebridError['code'] => {
+  switch (code) {
+    case 400:
+      return 'BAD_REQUEST';
+    case 401:
+      return 'UNAUTHORIZED';
+    case 403:
+      return 'FORBIDDEN';
+    case 404:
+      return 'NOT_FOUND';
+    case 429:
+      return 'TOO_MANY_REQUESTS';
+    case 500:
+      return 'INTERNAL_SERVER_ERROR';
+    case 501:
+      return 'NOT_IMPLEMENTED';
+    case 503:
+      return 'SERVICE_UNAVAILABLE';
+    default:
+      return 'UNKNOWN';
+  }
+};
+
+/**
+ * API client for SABnzbd APIs
+ */
+export class SABnzbdApi {
+  private readonly logger: Logger;
+  constructor(
+    protected readonly apiUrl: string,
+    protected readonly apiKey: string,
+    protected readonly serviceName: string,
+    logger: Logger
+  ) {
+    this.logger = logger;
+  }
+
+  protected async request<T extends z.ZodType>(
+    params: Record<
+      string,
+      string | undefined | number | boolean | null | string[]
+    >,
+    schema: T,
+    timeoutMs: number = 80000
+  ): Promise<{
+    data: z.infer<T>;
+    statusCode: number;
+    statusText: string;
+    headers: Record<string, string>;
+  }> {
+    const url = new URL(this.apiUrl);
+    Object.entries(params).forEach(([key, value]) => {
+      if (!value) return;
+      const val = Array.isArray(value) ? value.join(',') : String(value);
+      url.searchParams.append(key, val);
+    });
+
+    // `name` is the NZB URL for addUrl requests and can embed credentials in
+    // its path (query-param and apikey-field redaction happen in the logger).
+    this.logger.debug(
+      {
+        service: this.serviceName,
+        ...params,
+        ...(typeof params.name === 'string'
+          ? { name: makeUrlLogSafe(params.name) }
+          : {}),
+      },
+      'making api request'
+    );
+
+    try {
+      const response = await fetch(url.toString(), {
+        method: 'GET',
+        headers: {
+          'x-api-key': this.apiKey,
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+        // redirect: 'manual',
+      });
+      let data;
+
+      try {
+        data = await response.json();
+      } catch (error) {
+        if (!response.ok) {
+          throw new DebridError(
+            `${this.serviceName} API error: ${response.statusText}`,
+            {
+              statusCode: response.status,
+              statusText: response.statusText,
+              code: convertStatusCodeToError(response.status),
+              headers: Object.fromEntries(response.headers.entries()),
+              body: null,
+              type: 'api_error',
+            }
+          );
+        }
+      }
+
+      try {
+        const parsed = schema.parse(data);
+        return {
+          data: parsed,
+          statusCode: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+        };
+      } catch (error) {
+        if (!response.ok) {
+          throw new DebridError(
+            `${this.serviceName} API error: ${response.statusText}`,
+            {
+              statusCode: response.status,
+              statusText: response.statusText,
+              code: convertStatusCodeToError(response.status),
+              headers: Object.fromEntries(response.headers.entries()),
+              body: data,
+              type: 'api_error',
+            }
+          );
+        }
+
+        if (error instanceof ZodError) {
+          this.logger.error(
+            { service: this.serviceName, err: formatZodError(error) },
+            'failed to parse api response'
+          );
+          throw new DebridError(`Invalid ${this.serviceName} API response`, {
+            statusCode: response.status,
+            statusText: response.statusText,
+            code: 'UNKNOWN',
+            headers: Object.fromEntries(response.headers.entries()),
+            body: JSON.stringify(data),
+            type: 'api_error',
+          });
+        }
+
+        throw new DebridError(`Invalid ${this.serviceName} API response`, {
+          statusCode: response.status,
+          statusText: response.statusText,
+          code: 'UNKNOWN',
+          headers: Object.fromEntries(response.headers.entries()),
+          body: data,
+          type: 'api_error',
+        });
+      }
+    } catch (error) {
+      if (error instanceof DebridError) {
+        throw error;
+      }
+
+      if (
+        (error as Error).name === 'AbortError' ||
+        (error as Error).name === 'TimeoutError'
+      ) {
+        throw new DebridError('Request timeout', {
+          statusCode: 504,
+          statusText: 'Gateway Timeout',
+          code: 'UNKNOWN',
+          headers: {},
+          body: null,
+          type: 'api_error',
+          cause: error,
+        });
+      }
+
+      throw new DebridError(`Request failed: ${(error as Error).message}`, {
+        statusCode: 500,
+        statusText: 'Internal Server Error',
+        code: 'UNKNOWN',
+        headers: {},
+        body: error,
+        type: 'api_error',
+        cause: error,
+      });
+    }
+  }
+
+  async addUrl(
+    nzbUrl: string,
+    category: string,
+    jobLabel: string
+  ): Promise<{ nzoId: string }> {
+    const params = {
+      mode: 'addurl',
+      apikey: this.apiKey,
+      name: nzbUrl,
+      cat: category,
+      nzbname: jobLabel,
+      output: 'json',
+    };
+
+    const {
+      data: parsed,
+      statusCode,
+      statusText,
+      headers,
+    } = await this.request(params, AddUrlResponseSchema, 80000);
+    const transformed = transformAddUrlResponse(parsed);
+
+    if (!transformed.status) {
+      throw new DebridError(
+        `Failed to queue NZB: ${transformed.error || 'Unknown error'}`,
+        {
+          statusCode,
+          statusText,
+          code: convertStatusCodeToError(statusCode),
+          headers,
+          body: parsed,
+          type: 'api_error',
+        }
+      );
+    }
+
+    const nzoId = transformed.nzoIds?.[0];
+    if (!nzoId) {
+      throw new DebridError('addurl succeeded but no nzo_id returned', {
+        statusCode: 400,
+        statusText: 'Bad Request',
+        code: 'UNKNOWN',
+        headers: {},
+        body: parsed,
+        type: 'api_error',
+      });
+    }
+
+    this.logger.debug({ nzoId }, 'nzb job added');
+    return { nzoId };
+  }
+
+  async history(
+    params: {
+      start?: number;
+      limit?: number;
+      nzoIds?: string[];
+      category?: string;
+    } = {}
+  ) {
+    const tParams = {
+      mode: 'history',
+      apikey: this.apiKey,
+      start: params.start,
+      limit: params.limit,
+      nzo_ids: params.nzoIds ? params.nzoIds.join(',') : undefined,
+      category: params.category,
+    };
+
+    const {
+      data: parsed,
+      statusCode,
+      statusText,
+      headers,
+    } = await this.request(tParams, HistoryResponseSchema, 60000);
+    const transformed = transformHistoryResponse(parsed);
+
+    if (transformed.status === false || !transformed.history) {
+      throw new DebridError(
+        `Failed to query history: ${transformed.error || 'Unknown error'}`,
+        {
+          statusCode,
+          statusText,
+          code: convertStatusCodeToError(statusCode),
+          headers,
+          body: JSON.stringify(parsed),
+          type: 'api_error',
+        }
+      );
+    }
+    return transformed.history;
+  }
+
+  async waitForHistorySlot(
+    nzoId: string,
+    category: string,
+    timeoutMs: number = 80000,
+    pollIntervalMs: number = 2000
+  ): Promise<ReturnType<typeof transformHistorySlot>> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const history = await this.history({
+        nzoIds: [nzoId],
+        category,
+      });
+
+      const slot = history.slots.find((entry) => entry.nzoId === nzoId);
+
+      if (slot) {
+        if (slot.status === 'completed') {
+          return slot;
+        }
+        if (slot.status === 'failed') {
+          const failMessage =
+            slot.failMessage || `Unknown ${this.serviceName} error`;
+          throw new DebridError(`NZB failed: ${failMessage}`, {
+            statusCode: 400,
+            statusText: 'Bad Request',
+            code: 'UNKNOWN',
+            headers: {},
+            type: 'api_error',
+          });
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    throw new DebridError(
+      'Timeout while waiting for NZB to become streamable',
+      {
+        statusCode: 504,
+        statusText: 'Gateway Timeout',
+        code: 'TIMEOUT',
+        headers: {},
+        body: { nzoId, category },
+        type: 'api_error',
+      }
+    );
+  }
+}
+
+/**
+ * Configuration for streaming usenet services that use SABnzbd-compatible APIs
+ */
+export interface UsenetStreamServiceConfig {
+  webdavUrl: string;
+  publicWebdavUrl: string;
+  webdavUser?: string;
+  webdavPassword?: string;
+  apiUrl: string;
+  apiKey: string;
+  aiostreamsAuth?: string;
+  cacheAndPlayOptions?: {
+    pollingInterval?: number;
+    maxWaitTime?: number;
+  };
+}
+
+enum Category {
+  MOVIES = 'Movies',
+  TV = 'TV',
+}
+
+const CATEGORIES_CACHE_TTL = Time.Hour;
+
+/**
+ * WebDAV `FileStat` paths are URL-decoded, so characters like `?` and `#`
+ * must be percent-encoded per segment before being placed in a URL.
+ */
+function encodeWebdavPath(path: string): string {
+  return path
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+/**
+ * Base class for streaming usenet services (NzbDAV, Altmount).
+ * These services accept NZBs via a SABnzbd-compatible API and stream content
+ * directly from usenet providers via WebDAV, rather than downloading to disk.
+ */
+export abstract class UsenetStreamService implements UsenetDebridService {
+  protected readonly webdavClient: WebDAVClient;
+  protected readonly api: SABnzbdApi;
+  protected static resolveCache = Cache.getInstance<string, string>(
+    'usenet-stream:link'
+  );
+  protected static libraryCache = Cache.getInstance<string, DebridDownload[]>(
+    'usenet-stream:library'
+  );
+  protected static categoriesCache = Cache.getInstance<string, string[]>(
+    'usenet-stream:categories'
+  );
+
+  abstract readonly serviceName: ServiceId;
+  readonly capabilities = { torrents: false, usenet: true };
+
+  protected readonly auth: UsenetStreamServiceConfig;
+  protected readonly serviceLogger: Logger;
+  protected readonly pollInterval: number;
+  protected readonly maxWaitTime: number;
+  protected static readonly MIN_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
+  protected static readonly MAX_DEPTH = 6;
+
+  /**
+   * Get the content path prefix for this service
+   * NzbDAV uses '/content', Altmount uses '/complete'
+   */
+  protected abstract getContentPathPrefix(): string;
+
+  /**
+   * Get the expected folder name for a given NZB URL
+   * NzbDAV uses the filename parameter, Altmount uses basename of URL
+   */
+  protected abstract getExpectedFolderName(
+    nzb: PlaybackInfo & { type: 'usenet' }
+  ): string;
+
+  constructor(
+    protected readonly config: DebridServiceConfig,
+    serviceConfig: UsenetStreamServiceConfig,
+    serviceName: ServiceId
+  ) {
+    this.auth = serviceConfig;
+    this.serviceLogger = createLogger(serviceName);
+    this.webdavClient = createClient(serviceConfig.webdavUrl, {
+      username: serviceConfig.webdavUser,
+      password: serviceConfig.webdavPassword,
+    });
+    this.api = new SABnzbdApi(
+      serviceConfig.apiUrl,
+      serviceConfig.apiKey,
+      serviceName,
+      this.serviceLogger
+    );
+
+    this.pollInterval =
+      serviceConfig.cacheAndPlayOptions?.pollingInterval ?? Time.Second * 2;
+    this.maxWaitTime =
+      serviceConfig.cacheAndPlayOptions?.maxWaitTime ?? Time.Second * 90;
+  }
+
+  protected async collectFiles(
+    path: string
+  ): Promise<{ files: FileStat[]; depth: number }> {
+    // First, try using deep mode (recursive)
+    try {
+      const contents = (await this.webdavClient.getDirectoryContents(path, {
+        deep: true,
+      })) as FileStat[];
+
+      const files = contents.filter((item) => item.type === 'file');
+
+      return { files, depth: 0 };
+    } catch (error) {
+      this.serviceLogger.warn(
+        `Deep listing failed, falling back to manual traversal`,
+        {
+          path,
+          error: (error as Error).message,
+        }
+      );
+      // Fall back to manual traversal
+      return this.collectFilesManually(path, 0);
+    }
+  }
+
+  protected async collectFilesManually(
+    path: string,
+    currentDepth: number = 0
+  ): Promise<{ files: FileStat[]; depth: number }> {
+    if (currentDepth >= UsenetStreamService.MAX_DEPTH) {
+      this.serviceLogger.warn(`Max depth reached at ${path}`);
+      return { files: [], depth: currentDepth };
+    }
+
+    let contents: FileStat[];
+    try {
+      contents = (await this.webdavClient.getDirectoryContents(
+        path
+      )) as FileStat[];
+    } catch (error: any) {
+      const status = typeof error.status === 'number' ? error.status : 500;
+      throw new DebridError(
+        `Failed to list WebDAV directory: ${(error as Error).message}`,
+        {
+          statusCode: status,
+          statusText: status
+            ? error.message.match(/response: \d+ (.*)/)?.[1] ||
+              'Internal Server Error'
+            : 'Internal Server Error',
+          code: convertStatusCodeToError(status),
+          headers: {},
+          type: 'api_error',
+        }
+      );
+    }
+
+    const files = contents.filter((item) => item.type === 'file');
+    const directories = contents.filter((item) => item.type === 'directory');
+
+    // Check if we should stop traversing based on criteria
+    const hasVideoFile = files.some((file) => isVideoFile(file));
+    const hasLargeFile = files.some(
+      (file) => file.size >= UsenetStreamService.MIN_FILE_SIZE
+    );
+
+    // If we found video files or large files, we're in the right place
+    if (hasVideoFile || hasLargeFile) {
+      return { files, depth: currentDepth };
+    }
+
+    // If no directories exist, return the files we have
+    if (directories.length === 0) {
+      return { files, depth: currentDepth };
+    }
+
+    // Otherwise, recurse into subdirectories
+    const allFiles: FileStat[] = [...files];
+
+    for (const dir of directories) {
+      const { files: subFiles } = await this.collectFilesManually(
+        dir.filename,
+        currentDepth + 1
+      );
+      currentDepth = currentDepth + 1;
+      allFiles.push(...subFiles);
+
+      // If we found video files or large files in a subdirectory, stop searching other directories
+      const hasVideoInSub = subFiles.some((file) => isVideoFile(file));
+      const hasLargeInSub = subFiles.some(
+        (file) => file.size >= UsenetStreamService.MIN_FILE_SIZE
+      );
+
+      if (hasVideoInSub || hasLargeInSub) {
+        break;
+      }
+    }
+
+    return { files: allFiles, depth: currentDepth };
+  }
+
+  /**
+   * Get a specific NZB item by its serviceItemId ("category/basename" or
+   * legacy bare basename). Lists files within the folder via WebDAV.
+   */
+  public async getNzb(nzbId: string): Promise<DebridDownload> {
+    const contentPath = await this.resolveContentPath(nzbId);
+    const folderName = basename(contentPath);
+    const { files: allFiles } = await this.collectFiles(contentPath);
+    const debridFiles: DebridFile[] = allFiles.map((file, index) => ({
+      id: index,
+      name: file.basename,
+      size: file.size,
+      path: file.filename,
+      index,
+    }));
+    return {
+      id: nzbId,
+      name: folderName,
+      hash: folderName,
+      status: 'downloaded',
+      size: debridFiles.reduce((sum, f) => sum + f.size, 0),
+      files: debridFiles,
+    };
+  }
+
+  /**
+   * Resolve a "category/basename" id (or legacy bare basename) to an absolute
+   * WebDAV content path. For category-qualified ids the path is constructed
+   * directly; for bare basenames all dynamic categories are searched.
+   */
+  private async resolveContentPath(id: string): Promise<string> {
+    const prefix = this.getContentPathPrefix();
+
+    if (id.includes('/')) {
+      // New format: id already encodes the exact category
+      return `${prefix}/${id}`;
+    }
+
+    // Legacy / bare basename: search all dynamic categories
+    const categories = await this.getCategories();
+    for (const category of categories) {
+      const candidatePath = `${prefix}/${category}/${id}`;
+      try {
+        const stat = await this.webdavClient.stat(candidatePath);
+        const statData = 'data' in stat ? stat.data : stat;
+        if (statData.type === 'directory') return candidatePath;
+      } catch {
+        // not in this category
+      }
+    }
+
+    throw new DebridError(`NZB item not found: ${id}`, {
+      statusCode: 404,
+      statusText: 'Not found',
+      code: 'NOT_FOUND',
+      headers: {},
+      body: { id },
+      type: 'api_error',
+    });
+  }
+
+  private async listWebdavFolders(path: string): Promise<FileStat[]> {
+    let contents: FileStat[];
+    const start = Date.now();
+    try {
+      contents = (await this.webdavClient.getDirectoryContents(
+        path
+      )) as FileStat[];
+    } catch (error: any) {
+      const status = typeof error.status === 'number' ? error.status : 500;
+      throw new DebridError(
+        `Failed to list WebDAV directory: ${(error as Error).message}`,
+        {
+          statusCode: status,
+          statusText: status
+            ? error.message.match(/response: \d+ (.*)/)?.[1] ||
+              'Internal Server Error'
+            : 'Internal Server Error',
+          code: convertStatusCodeToError(status),
+          headers: {},
+          type: 'api_error',
+        }
+      );
+    }
+    const directories = contents.filter((item) => item.type === 'directory');
+    this.serviceLogger.debug(`Listed WebDAV folders at ${path}`, {
+      count: directories.length,
+      timeTaken: getTimeTakenSincePoint(start),
+    });
+    return directories;
+  }
+
+  // Token hashed: library keys reach distributed-lock log lines and file
+  // lock paths.
+  private getLibraryCacheKey(): string {
+    return `${this.serviceName}:${getSimpleTextHash(this.config.token)}`;
+  }
+
+  /**
+   * Fetch the category folders under the content path prefix by listing the
+   * base WebDAV directory.
+   */
+  private async getCategories(): Promise<string[]> {
+    const cacheKey = `${this.getLibraryCacheKey()}:categories`;
+    const cached = await UsenetStreamService.categoriesCache.get(cacheKey);
+    if (cached) return cached;
+
+    const prefix = this.getContentPathPrefix();
+    try {
+      const contents = (await this.webdavClient.getDirectoryContents(
+        prefix
+      )) as FileStat[];
+      const categories = contents
+        .filter((item) => item.type === 'directory')
+        .map((item) => item.basename);
+      await UsenetStreamService.categoriesCache.set(
+        cacheKey,
+        categories,
+        CATEGORIES_CACHE_TTL,
+        true
+      );
+      this.serviceLogger.debug(`Fetched WebDAV categories`, {
+        prefix,
+        categories,
+      });
+      return categories;
+    } catch (error: any) {
+      const status = typeof error.status === 'number' ? error.status : 500;
+      if (status === 401) {
+        throw new DebridError(`Could not access WebDAV: Unauthorized`, {
+          statusCode: 401,
+          statusText: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+          headers: {},
+          body: null,
+          type: 'api_error',
+        });
+      }
+      this.serviceLogger.warn(
+        `Failed to list WebDAV categories, falling back to empty list`,
+        { error: (error as Error).message }
+      );
+      return [];
+    }
+  }
+
+  public async listNzbs(): Promise<DebridDownload[]> {
+    const cacheKey = this.getLibraryCacheKey();
+
+    // Check for stale cache before acquiring the lock
+    const cached = await UsenetStreamService.libraryCache.get(cacheKey);
+    if (cached) {
+      const remainingTTL =
+        await UsenetStreamService.libraryCache.getTTL(cacheKey);
+      if (remainingTTL !== null && remainingTTL > 0) {
+        const age = appConfig.builtins.debrid.libraryCacheTtl - remainingTTL;
+        if (age > appConfig.builtins.debrid.libraryStaleThreshold) {
+          this.serviceLogger.debug(
+            `Library cache for ${this.serviceName} is stale (age: ${age}s), triggering background refresh`
+          );
+          this.refreshNzbsInBackground(cacheKey).catch((err) =>
+            this.serviceLogger.error(
+              `Background library refresh failed for ${this.serviceName}`,
+              err
+            )
+          );
+        }
+        return cached;
+      }
+    }
+
+    const { result } = await DistributedLock.getInstance().withLock(
+      `uss:library:${cacheKey}`,
+      async () => {
+        const cachedNzbs = await UsenetStreamService.libraryCache.get(cacheKey);
+        if (cachedNzbs) {
+          this.serviceLogger.debug(
+            `Using cached NZB list for ${this.serviceName}`
+          );
+          return cachedNzbs;
+        }
+
+        return this.fetchAndCacheNzbs(cacheKey);
+      },
+      {
+        type: 'memory',
+        timeout: 5000,
+      }
+    );
+    return result;
+  }
+
+  private async fetchAndCacheNzbs(cacheKey: string): Promise<DebridDownload[]> {
+    const start = Date.now();
+    const prefix = this.getContentPathPrefix();
+
+    const [historyData, categories] = await Promise.all([
+      this.api.history({ limit: 1000 }),
+      this.getCategories(),
+    ]);
+
+    const categoryResults = await Promise.allSettled(
+      categories.map((cat) =>
+        this.listWebdavFolders(`${prefix}/${cat}`).then((files) => ({
+          cat,
+          files,
+        }))
+      )
+    );
+
+    const categoryFiles: { category: string; file: FileStat }[] = [];
+    for (const result of categoryResults) {
+      if (result.status === 'fulfilled') {
+        for (const file of result.value.files) {
+          categoryFiles.push({ category: result.value.cat, file });
+        }
+      } else {
+        const err = result.reason;
+        const status = typeof err?.status === 'number' ? err.status : 500;
+        if (status === 401) {
+          throw new DebridError(`Could not access WebDAV: Unauthorized`, {
+            statusCode: 401,
+            statusText: 'Unauthorized',
+            code: 'UNAUTHORIZED',
+            headers: {},
+            body: null,
+            type: 'api_error',
+          });
+        }
+        this.serviceLogger.warn(`Failed to list WebDAV category`, {
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    const nzbs: DebridDownload[] = categoryFiles.map(({ category, file }) => {
+      const matchingSlot = historyData?.slots.find(
+        (slot) => slot.name === file.basename
+      );
+      return {
+        // id = "category/basename" so _resolveLibraryItem can reconstruct the
+        // exact WebDAV path
+        id: `${category}/${file.basename}`,
+        status: matchingSlot?.status !== 'failed' ? 'cached' : 'failed',
+        name: file.basename,
+        size: file.size > 0 ? file.size : (matchingSlot?.bytes ?? 0),
+        hash: file.basename,
+        addedAt: file.lastmod ?? undefined,
+        files: [],
+      };
+    });
+
+    // Also include failed entries from history that don't have WebDAV folders
+    // so they can be detected and filtered out by processNZBs
+    if (historyData?.slots) {
+      const webdavNames = new Set(
+        categoryFiles.map(({ file }) => file.basename)
+      );
+      for (const slot of historyData.slots) {
+        if (
+          slot.status === 'failed' &&
+          slot.name &&
+          !webdavNames.has(slot.name)
+        ) {
+          nzbs.push({
+            id: nzbs.length,
+            status: 'failed',
+            name: slot.name,
+            size: slot.bytes ?? 0,
+            hash: slot.name,
+            files: [],
+          });
+        }
+      }
+    }
+
+    this.serviceLogger.debug(`Listed NZBs from combined history and WebDAV`, {
+      count: nzbs.length,
+      timeTaken: getTimeTakenSincePoint(start),
+    });
+    await UsenetStreamService.libraryCache.set(
+      cacheKey,
+      nzbs,
+      appConfig.builtins.debrid.libraryCacheTtl,
+      true
+    );
+
+    return nzbs;
+  }
+
+  private async refreshNzbsInBackground(cacheKey: string): Promise<void> {
+    const lockKey = `uss:library:refresh:${cacheKey}`;
+    await DistributedLock.getInstance().withLock(
+      lockKey,
+      async () => {
+        await UsenetStreamService.libraryCache.delete(cacheKey);
+        return this.fetchAndCacheNzbs(cacheKey);
+      },
+      { type: 'memory', timeout: 1000 }
+    );
+  }
+
+  public async refreshLibraryCache(
+    sources?: ('torrent' | 'nzb')[]
+  ): Promise<void> {
+    const cacheKey = this.getLibraryCacheKey();
+    await UsenetStreamService.libraryCache.delete(cacheKey);
+    await this.fetchAndCacheNzbs(cacheKey);
+  }
+
+  public async checkNzbs(
+    nzbs: { name?: string; hash?: string }[],
+    checkOwned: boolean = true
+  ): Promise<DebridDownload[]> {
+    // if aiostreamsAuth is present, validate it.
+    if (this.auth.aiostreamsAuth) {
+      try {
+        BuiltinProxy.validateAuth(this.auth.aiostreamsAuth);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Invalid AIOStreams Proxy Auth';
+        throw new DebridError(message, {
+          statusCode: 401,
+          statusText: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+          headers: {},
+          body: null,
+          type: 'api_error',
+        });
+      }
+    }
+    let libraryNzbs: DebridDownload[] = [];
+
+    try {
+      libraryNzbs = checkOwned ? await this.listNzbs() : [];
+    } catch (error) {
+      this.serviceLogger.warn(`Failed to list library NZBs for checkNzbs`, {
+        error: (error as Error).message,
+      });
+    }
+
+    // All NZBs are "cached" since it's streaming-based
+    return nzbs.map(({ hash: h, name: n }, index) => {
+      const libraryNzb = libraryNzbs.find(
+        (nzb) => nzb.name === n || nzb.name === h
+      );
+      return {
+        id: index,
+        status: libraryNzb?.status === 'failed' ? 'failed' : 'cached',
+        library: !!libraryNzb,
+        hash: h,
+        name: n,
+      };
+    });
+  }
+
+  public async resolve(
+    playbackInfo: PlaybackInfo,
+    filename: string,
+    cacheAndPlay: boolean
+  ): Promise<string | undefined> {
+    if (playbackInfo.type === 'torrent') {
+      throw new Error('Unsupported operation');
+    }
+    const { result } = await DistributedLock.getInstance().withLock(
+      buildResolveKey(
+        'uss:lock',
+        this.serviceName,
+        playbackInfo,
+        filename,
+        this.config.token,
+        this.config.clientIp,
+        { cacheAndPlay }
+      ),
+      () => this._resolve(playbackInfo, filename),
+      {
+        timeout: this.maxWaitTime + this.pollInterval,
+        ttl: this.maxWaitTime + this.pollInterval + 10000,
+      }
+    );
+    // Proxy the resolved WebDAV URL through the builtin proxy when the service
+    // is configured with aiostreamsAuth.
+    if (!result || !this.auth.aiostreamsAuth) return result;
+    return this.proxyResolvedUrl(result, filename);
+  }
+
+  /**
+   * Wrap a resolved WebDAV stream URL in a builtin-proxy URL using the service's
+   * `aiostreamsAuth`, carrying the WebDAV Basic auth in the (encrypted) proxy
+   * payload. On any failure, falls back to serving the direct URL.
+   */
+  private async proxyResolvedUrl(
+    url: string,
+    filename: string
+  ): Promise<string> {
+    const aiostreamsAuth = this.auth.aiostreamsAuth;
+    if (!aiostreamsAuth) return url;
+    const basic =
+      this.auth.webdavUser && this.auth.webdavPassword
+        ? `Basic ${Buffer.from(
+            `${this.auth.webdavUser}:${this.auth.webdavPassword}`
+          ).toString('base64')}`
+        : undefined;
+    try {
+      const proxied = await createProxy({
+        id: 'builtin',
+        enabled: true,
+        credentials: aiostreamsAuth,
+      }).generateUrls([
+        {
+          url,
+          filename,
+          headers: basic ? { request: { Authorization: basic } } : undefined,
+        },
+      ]);
+      if (proxied && !('error' in proxied) && proxied[0]) {
+        return proxied[0];
+      }
+      this.serviceLogger.warn(
+        'failed to proxy resolved stream url; serving direct'
+      );
+      return url;
+    } catch (error) {
+      this.serviceLogger.warn(
+        {
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'error proxying resolved stream url; serving direct'
+      );
+      return url;
+    }
+  }
+
+  protected async _resolve(
+    playbackInfo: PlaybackInfo & { type: 'usenet' },
+    filename: string
+  ): Promise<string | undefined> {
+    const { nzb, metadata, hash } = playbackInfo;
+
+    const cacheKey = buildResolveKey(
+      'uss:cache',
+      this.serviceName,
+      playbackInfo,
+      filename,
+      this.config.token,
+      this.config.clientIp
+    );
+
+    const cachedResponse = await UsenetStreamService.resolveCache.get(cacheKey);
+
+    if (cachedResponse) {
+      this.serviceLogger.debug(
+        `Using cached stream URL for ${makeUrlLogSafe(nzb)}`
+      );
+      return cachedResponse;
+    }
+
+    // Check global failure cache
+    if (nzb) {
+      await DebridFailureCache.check(
+        this.serviceName,
+        'usenet',
+        hashNzbUrl(nzb, false)
+      );
+    }
+
+    this.serviceLogger.debug(`Resolving NZB`, {
+      hash,
+      filename,
+      nzbUrl: maskSensitiveInfo(nzb),
+      serviceItemId: playbackInfo.serviceItemId,
+      fileIndex: playbackInfo.fileIndex,
+    });
+
+    // For catalog items with serviceItemId, the serviceItemId IS the folder name (basename)
+    // We need to search both TV and Movies categories to find it
+    if (playbackInfo.serviceItemId && !nzb) {
+      return this._resolveLibraryItem(playbackInfo, filename, cacheKey);
+    }
+
+    const category =
+      metadata?.season || metadata?.episode ? Category.TV : Category.MOVIES;
+    const expectedFolderName = this.getExpectedFolderName(playbackInfo);
+
+    // Check if content already exists at the expected path
+    const expectedContentPath = `${this.getContentPathPrefix()}/${category}/${expectedFolderName}`;
+    let contentPath: string | undefined;
+    let jobName: string | undefined;
+    let jobCategory: string | undefined;
+    let nzoId: string | undefined;
+    let alreadyExists = false;
+
+    try {
+      const stat = await this.webdavClient.stat(expectedContentPath);
+      const statData = 'data' in stat ? stat.data : stat;
+      if (statData.type === 'directory') {
+        alreadyExists = true;
+        contentPath = expectedContentPath;
+        jobName = expectedFolderName;
+        jobCategory = category;
+        this.serviceLogger.debug(`Content already exists`, {
+          path: expectedContentPath,
+        });
+      }
+    } catch (error: any) {
+      // if error is a 401, rethrow as DebridError
+      const status = typeof error.status === 'number' ? error.status : 500;
+      if (status === 401) {
+        throw new DebridError(`Could not access WebDAV: Unauthorized`, {
+          statusCode: 401,
+          statusText: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+          headers: {},
+          body: null,
+          type: 'api_error',
+          cause: error.message,
+        });
+      }
+      this.serviceLogger.debug(`Content path does not exist, will add NZB`, {
+        path: expectedContentPath,
+        error: (error as Error).message,
+      });
+    }
+
+    // Only add NZB if content doesn't already exist
+    if (!alreadyExists) {
+      try {
+        const addResult = await this.api.addUrl(
+          nzb,
+          category,
+          expectedFolderName
+        );
+        nzoId = addResult.nzoId;
+      } catch (addError) {
+        throw addError;
+      }
+    }
+
+    // If we added the NZB (not already existing), wait for it to complete
+    if (!alreadyExists && nzoId) {
+      // Poll history until download is complete
+      const pollStartTime = Date.now();
+      let slot: ReturnType<typeof transformHistorySlot>;
+      try {
+        slot = await this.api.waitForHistorySlot(
+          nzoId,
+          category,
+          this.maxWaitTime,
+          this.pollInterval
+        );
+      } catch (error) {
+        if (!(error instanceof DebridError)) {
+          throw error;
+        }
+        DebridFailureCache.mark(
+          this.serviceName,
+          'usenet',
+          hashNzbUrl(nzb, false),
+          error
+        ).catch(() => {});
+        throw error;
+      }
+
+      // Use slot.storage as source of truth for the content path
+      jobName = slot.storage ? basename(slot.storage) : slot.name || filename;
+      jobCategory = slot.category || category;
+      contentPath = `${this.getContentPathPrefix()}/${jobCategory}/${jobName}`;
+
+      this.serviceLogger.debug(`NZB download completed`, {
+        nzoId,
+        jobName,
+        jobCategory,
+        contentPath,
+        timeTaken: getTimeTakenSincePoint(pollStartTime),
+      });
+    }
+
+    // Ensure we have a content path
+    if (!contentPath || !jobName || !jobCategory) {
+      throw new DebridError('Failed to determine content path', {
+        statusCode: 500,
+        statusText: 'Internal Server Error',
+        code: 'UNKNOWN',
+        headers: {},
+        body: { expectedContentPath, alreadyExists },
+        type: 'api_error',
+      });
+    }
+
+    // Get list of all files in the content folder recursively, stopping when we find video files
+    const listStartTime = Date.now();
+
+    const { files: allFiles, depth } = await this.collectFiles(contentPath);
+
+    if (allFiles.length === 0) {
+      throw new DebridError('No files found in NZB download', {
+        statusCode: 400,
+        statusText: 'Bad Request',
+        code: 'NO_MATCHING_FILE',
+        headers: {},
+        body: { contentPath },
+        type: 'api_error',
+      });
+    }
+
+    const debridFiles: DebridFile[] = allFiles.map((file, index) => ({
+      id: index,
+      name: file.basename,
+      size: file.size,
+      path: file.filename,
+      index,
+    }));
+
+    this.serviceLogger.debug(`Collected files from path`, {
+      nzoId,
+      jobName,
+      contentPath,
+      depth,
+      timeTaken: getTimeTakenSincePoint(listStartTime),
+      count: debridFiles.length,
+      files: debridFiles.map((f) => f.name),
+    });
+
+    const debridDownload: DebridDownload = {
+      id: nzoId || `cached-${hash}`,
+      hash,
+      name: jobName,
+      status: 'downloaded' as const,
+      files: debridFiles,
+    };
+
+    let selectedFile;
+
+    if (playbackInfo.fileIndex !== undefined) {
+      // Direct file index specified (e.g. from catalog meta)
+      selectedFile = debridFiles.find(
+        (f) => f.index === playbackInfo.fileIndex
+      );
+      if (!selectedFile) {
+        throw new DebridError(
+          `File with index ${playbackInfo.fileIndex} not found`,
+          {
+            statusCode: 400,
+            statusText: 'File not found',
+            code: 'NO_MATCHING_FILE',
+            headers: {},
+            body: {
+              fileIndex: playbackInfo.fileIndex,
+              availableFiles: debridFiles.map((f) => f.index),
+            },
+            type: 'api_error',
+          }
+        );
+      }
+      this.serviceLogger.debug(`Using specified fileIndex`, {
+        fileIndex: playbackInfo.fileIndex,
+        fileName: selectedFile.name,
+      });
+    } else if (debridFiles.length === 1) {
+      selectedFile = debridFiles[0];
+    } else {
+      // Parse all file names for matching
+      const allStrings = [jobName, ...debridFiles.map((f) => f.name ?? '')];
+      const parseResults: ParsedResult[] = allStrings.map((string) =>
+        parseTorrentTitle(string)
+      );
+      const parsedFiles = new Map<string, ParsedResult>();
+      for (const [index, result] of parseResults.entries()) {
+        parsedFiles.set(allStrings[index], result);
+      }
+
+      const nzbInfo = {
+        type: 'usenet' as const,
+        nzb,
+        hash,
+        title: jobName,
+        metadata,
+        size: debridFiles.reduce((sum, f) => sum + f.size, 0),
+      };
+
+      // Select a file based on the available metadata and files
+      selectedFile = await selectFileInTorrentOrNZB(
+        nzbInfo,
+        debridDownload,
+        parsedFiles,
+        metadata
+      );
+    }
+
+    if (!selectedFile) {
+      throw new DebridError('No matching file found', {
+        statusCode: 400,
+        statusText: 'Bad Request',
+        code: 'NO_MATCHING_FILE',
+        headers: {},
+        body: { availableFiles: debridFiles.map((f) => f.name) },
+        type: 'api_error',
+      });
+    }
+
+    this.serviceLogger.debug(`Selected file for playback`, {
+      chosenFile: selectedFile.name,
+      chosenPath: selectedFile.path,
+      availableFiles: debridFiles.length,
+    });
+
+    const filePath = selectedFile.path || `${contentPath}/${selectedFile.name}`;
+    const playbackLink = `${this.getPublicWebdavUrlWithAuth()}${encodeWebdavPath(filePath)}`;
+
+    this.serviceLogger.debug(`Generated playback link`, { playbackLink });
+
+    // Cache the result
+    await UsenetStreamService.resolveCache.set(
+      cacheKey,
+      playbackLink,
+      appConfig.builtins.debrid.playbackLinkCacheTtl,
+      true
+    );
+
+    return playbackLink;
+  }
+
+  /**
+   * Resolve a library item by serviceItemId and optionally fileIndex.
+   * serviceItemId is "category/basename" (new format) or a bare basename
+   * (legacy). resolveContentPath handles both cases.
+   */
+  protected async _resolveLibraryItem(
+    playbackInfo: PlaybackInfo & { type: 'usenet' },
+    filename: string,
+    cacheKey: string
+  ): Promise<string | undefined> {
+    const serviceItemId = playbackInfo.serviceItemId!;
+    const contentPath = await this.resolveContentPath(serviceItemId);
+
+    this.serviceLogger.debug(`Found library item folder`, { contentPath });
+
+    const { files: allFiles, depth } = await this.collectFiles(contentPath);
+
+    if (allFiles.length === 0) {
+      throw new DebridError('No files found in library item', {
+        statusCode: 400,
+        statusText: 'Bad Request',
+        code: 'NO_MATCHING_FILE',
+        headers: {},
+        body: { contentPath },
+        type: 'api_error',
+      });
+    }
+
+    const debridFiles: DebridFile[] = allFiles.map((file, index) => ({
+      id: index,
+      name: file.basename,
+      size: file.size,
+      path: file.filename,
+      index,
+    }));
+
+    this.serviceLogger.debug(`Collected files from library item`, {
+      contentPath,
+      depth,
+      count: debridFiles.length,
+      files: debridFiles.map((f) => f.name),
+    });
+
+    let selectedFile: DebridFile | undefined;
+
+    if (playbackInfo.fileIndex !== undefined) {
+      // Direct file index specified from catalog
+      selectedFile = debridFiles.find(
+        (f) => f.index === playbackInfo.fileIndex
+      );
+      if (!selectedFile) {
+        throw new DebridError(
+          `File with index ${playbackInfo.fileIndex} not found`,
+          {
+            statusCode: 400,
+            statusText: 'File not found',
+            code: 'NO_MATCHING_FILE',
+            headers: {},
+            body: {
+              fileIndex: playbackInfo.fileIndex,
+              availableFiles: debridFiles.map((f) => f.index),
+            },
+            type: 'api_error',
+          }
+        );
+      }
+      this.serviceLogger.debug(`Using specified fileIndex for library item`, {
+        fileIndex: playbackInfo.fileIndex,
+        fileName: selectedFile.name,
+      });
+    } else if (debridFiles.length === 1) {
+      selectedFile = debridFiles[0];
+    } else {
+      const title = playbackInfo.title ?? '';
+      const allStrings = [title, ...debridFiles.map((f) => f.name ?? '')];
+      const parseResults: ParsedResult[] = allStrings.map((string) =>
+        parseTorrentTitle(string)
+      );
+      const parsedFiles = new Map<string, ParsedResult>();
+      for (const [index, result] of parseResults.entries()) {
+        parsedFiles.set(allStrings[index], result);
+      }
+
+      const nzbInfo = {
+        type: 'usenet' as const,
+        nzb: '',
+        hash: playbackInfo.hash,
+        title,
+        metadata: playbackInfo.metadata,
+        size: debridFiles.reduce((sum, f) => sum + f.size, 0),
+      };
+
+      const debridDownload: DebridDownload = {
+        id: serviceItemId,
+        hash: playbackInfo.hash,
+        name: playbackInfo.title,
+        status: 'downloaded' as const,
+        files: debridFiles,
+      };
+
+      // Select a file based on the available metadata and files
+      selectedFile = await selectFileInTorrentOrNZB(
+        nzbInfo,
+        debridDownload,
+        parsedFiles,
+        playbackInfo.metadata
+      );
+    }
+
+    if (!selectedFile) {
+      throw new DebridError('No matching file found in library item', {
+        statusCode: 400,
+        statusText: 'Bad Request',
+        code: 'NO_MATCHING_FILE',
+        headers: {},
+        body: { availableFiles: debridFiles.map((f) => f.name) },
+        type: 'api_error',
+      });
+    }
+
+    this.serviceLogger.debug(`Selected file from library item`, {
+      chosenFile: selectedFile.name,
+      chosenPath: selectedFile.path,
+      availableFiles: debridFiles.length,
+    });
+
+    const filePath = selectedFile.path || `${contentPath}/${selectedFile.name}`;
+    const playbackLink = `${this.getPublicWebdavUrlWithAuth()}${encodeWebdavPath(filePath)}`;
+
+    await UsenetStreamService.resolveCache.set(
+      cacheKey,
+      playbackLink,
+      appConfig.builtins.debrid.playbackLinkCacheTtl,
+      true
+    );
+
+    return playbackLink;
+  }
+
+  protected getPublicWebdavUrlWithAuth(): string {
+    let url = new URL(this.auth.publicWebdavUrl);
+    if (this.auth.webdavUser && this.auth.webdavPassword) {
+      url.username = encodeURIComponent(this.auth.webdavUser);
+      url.password = encodeURIComponent(this.auth.webdavPassword);
+    }
+    return url.toString().replace(/\/+$/, ''); // Remove trailing slash
+  }
+}

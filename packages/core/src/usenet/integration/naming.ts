@@ -1,0 +1,91 @@
+import { isProbablyObfuscated } from '../index.js';
+import { MAX_ARCHIVE_PASSWORD } from '../pool/archive/crypto/password.js';
+
+/**
+ * The filename component of an archive-inner path. `name` holds the filename
+ * only (the full `path` is carried separately).
+ */
+export function baseName(p: string): string {
+  const slash = p.lastIndexOf('/');
+  return slash === -1 ? p : p.slice(slash + 1);
+}
+
+/** Strip a trailing media/archive extension from a release/job name. */
+export function stripReleaseExt(name: string): string {
+  return name.replace(
+    /\.(mkv|mp4|avi|ts|m2ts|mov|wmv|flv|rar|7z|zip|nzb)$/i,
+    ''
+  );
+}
+
+/**
+ * Strip a trailing `.nzb` from a job/display name. SABnzbd's `name` is the
+ * clean job name (the `.nzb` filename is `nzb_name`), so a stored name should
+ * never carry the extension; otherwise it shows on the dashboard and doubles
+ * up to `.nzb.nzb` in the SABnzbd `nzb_name` field.
+ */
+export function stripNzbExt(name: string): string {
+  return name.replace(/\.nzb$/i, '');
+}
+
+/**
+ * Display name for an archive inner file. When an archive holds a SINGLE file
+ * whose inner name is obfuscated (a random release-group name), show it as the
+ * release name + the inner file's real extension instead. The inner `path` (the
+ * open selector) is never changed.
+ */
+export function innerDisplayName(
+  innerPath: string,
+  innerCount: number,
+  releaseName?: string
+): string {
+  const base = baseName(innerPath);
+  if (innerCount === 1 && releaseName && isProbablyObfuscated(base)) {
+    const dot = base.lastIndexOf('.');
+    const ext = dot > 0 ? base.slice(dot) : '';
+    return `${releaseName}${ext}`;
+  }
+  return base;
+}
+
+/**
+ * Best-effort release name from an NZB's own metadata, for when the SABnzbd
+ * client supplied no name (Prowlarr's `addurl`/redirect path sends only the
+ * URL — no `nzbname`, no upload filename). Prefer `<head><meta type="name">`,
+ * but only when it looks like a real release name: some indexers stuff the raw
+ * yEnc article subject (`[002/111] "<hash>.part001.rar" yEnc`) in there, which
+ * is worse than the parsed first-file name. Falls back to the first file's
+ * filename. Returns undefined when nothing usable is present.
+ */
+export function nzbReleaseName(
+  meta: Record<string, string> | undefined,
+  firstFile?: string
+): string | undefined {
+  const metaName = meta?.name?.trim();
+  if (metaName && !looksLikeArticleSubject(metaName)) return metaName;
+  return firstFile?.trim() || metaName || undefined;
+}
+
+/** A yEnc article subject masquerading as a name (`[n/m] "..." yEnc`). */
+function looksLikeArticleSubject(s: string): boolean {
+  return /yenc/i.test(s) || /\[\d+\/\d+\]/.test(s);
+}
+
+/**
+ * Best-effort NZB password: the `<head><meta type="password">` value, else a
+ * `{{password}}` (or `{password}`) token embedded in the release name (a common
+ * indexer convention for protected archives). Values longer than
+ * {@link MAX_ARCHIVE_PASSWORD} are dropped
+ */
+export function extractNzbPassword(
+  meta: Record<string, string> | undefined,
+  name?: string
+): string | undefined {
+  const fromMeta = meta?.password?.trim();
+  const m = fromMeta
+    ? undefined
+    : (name?.match(/\{\{([^}]+)\}\}/) ?? name?.match(/\{([^}]+)\}/));
+  const password = fromMeta || m?.[1]?.trim();
+  if (!password || password.length > MAX_ARCHIVE_PASSWORD) return undefined;
+  return password;
+}

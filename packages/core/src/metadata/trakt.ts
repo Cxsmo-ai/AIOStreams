@@ -1,0 +1,101 @@
+﻿import { z } from 'zod';
+import {
+  AnimeDatabase,
+  Cache,
+  createLogger,
+  makeRequest,
+  ParsedId,
+  formatZodError,
+  Env,
+  appConfig,
+} from '../utils/index.js';
+import { MetadataTitle } from './utils.js';
+import { iso31661ToIso6391 } from '../utils/languages.js';
+
+const traktAliasCache = Cache.getInstance<string, MetadataTitle[]>(
+  'trakt-aliases'
+);
+const TRAKT_ALIAS_CACHE_TTL = 7 * 24 * 60 * 60; // 7 days
+
+const TraktAliasSchema = z.array(
+  z.object({
+    title: z.string(),
+    country: z.string(), // 2 letter country code
+  })
+);
+const TRAKT_API_BASE_URL = 'https://api.trakt.tv';
+
+const logger = createLogger('trakt');
+
+export async function getTraktAliases(
+  parsedId: ParsedId
+): Promise<MetadataTitle[] | null> {
+  const cacheKey = `${parsedId.type}:${parsedId.value}`;
+  const cachedAliases = await traktAliasCache.get(cacheKey);
+  if (cachedAliases) {
+    logger.debug(
+      `Retrieved ${cachedAliases.length} (cached) Trakt aliases for ${parsedId.value}`
+    );
+    if (cachedAliases.every((a) => typeof a === 'string')) {
+      return (cachedAliases as unknown as string[]).map((title) => ({
+        title,
+        language: undefined,
+      }));
+    }
+    return cachedAliases;
+  }
+  // need imdb id, trakt id requires authentication.
+  let imdbId = parsedId.type === 'imdbId' ? parsedId.value : null;
+  // try to get imdb ID from anime database
+  if (!imdbId) {
+    const animeEntry = AnimeDatabase.getInstance().getEntryById(
+      parsedId.type,
+      parsedId.value
+    );
+    imdbId = animeEntry?.mappings?.imdbId?.toString() ?? null;
+  }
+  if (!imdbId) {
+    return null;
+  }
+
+  try {
+    const response = await makeRequest(
+      `${TRAKT_API_BASE_URL}/${parsedId.mediaType === 'movie' ? 'movies' : 'shows'}/${imdbId}/aliases`,
+      {
+        timeout: 5000,
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': appConfig.http.defaultUserAgent,
+          'trakt-api-version': '2',
+          'trakt-api-key': appConfig.metadata.trakt.clientId ?? '',
+        },
+      }
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Failed to retrieve Trakt aliases: ${response.status} - ${response.statusText}`
+      );
+    }
+    const parsedData = TraktAliasSchema.safeParse(await response.json());
+
+    if (!parsedData.success) {
+      logger.error(
+        `Failed to parse Trakt aliases: ${formatZodError(parsedData.error)}`
+      );
+      return null;
+    }
+    // country is a 2-letter country code (e.g. "ru", "us") — convert to ISO 639-1 language code
+    const aliases: MetadataTitle[] = parsedData.data.map((alias) => ({
+      title: alias.title,
+      language: iso31661ToIso6391(alias.country) || undefined,
+    }));
+    traktAliasCache.set(cacheKey, aliases, TRAKT_ALIAS_CACHE_TTL);
+    logger.debug(
+      `Retrieved ${aliases.length} Trakt aliases for ${parsedId.value}`
+    );
+    return aliases;
+  } catch (error) {
+    logger.error(`Failed to retrieve Trakt aliases: ${error}`);
+    return null;
+  }
+}

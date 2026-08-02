@@ -1,0 +1,326 @@
+import { extract, FuzzballExtractOptions } from 'fuzzball';
+import { createLogger } from '../utils/index.js';
+import { MetadataTitle } from '../metadata/utils.js';
+
+const logger = createLogger('parser');
+
+// Language-specific digraph transliterations, applied before the generic
+// fold.
+const germanDigraphMap: Record<string, string> = {
+  Ä: 'Ae',
+  ä: 'ae',
+  Ö: 'Oe',
+  ö: 'oe',
+  Ü: 'Ue',
+  ü: 'ue',
+};
+const nordicDigraphMap: Record<string, string> = {
+  Å: 'Aa',
+  å: 'aa',
+};
+const languageDigraphMaps: Record<string, Record<string, string>> = {
+  de: germanDigraphMap,
+  da: nordicDigraphMap,
+  no: nordicDigraphMap,
+  nb: nordicDigraphMap,
+  nn: nordicDigraphMap,
+};
+
+// Base letters that NFD cannot decompose, folded to the ASCII forms release
+// names use.
+const asciiFoldMap: Record<string, string> = {
+  ß: 'ss',
+  ı: 'i',
+  ø: 'o',
+  Ø: 'O',
+  ł: 'l',
+  Ł: 'L',
+  đ: 'd',
+  Đ: 'D',
+  æ: 'ae',
+  Æ: 'Ae',
+  œ: 'oe',
+  Œ: 'Oe',
+  ð: 'd',
+  Ð: 'D',
+  þ: 'th',
+  Þ: 'Th',
+};
+
+function foldToAscii(title: string, language?: string): string {
+  const digraphMap = language ? languageDigraphMaps[language] : undefined;
+  return (
+    digraphMap ? title.replace(/[ÄäÖöÜüÅå]/g, (c) => digraphMap[c] ?? c) : title
+  )
+    .replace(/[ßıøØłŁđĐæÆœŒðÐþÞ]/g, (c) => asciiFoldMap[c])
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+type TitleMatchOptions = {
+  threshold: number;
+  limitTitles?: number;
+} & Exclude<FuzzballExtractOptions, 'returnObjects'>;
+
+interface TitleMatchInnerResult {
+  matched: boolean;
+  matchedIndex?: number;
+}
+
+/**
+ * Inner matching function shared by titleMatch and titleMatchWithLang.
+ * Returns the match result and the index of the best matching title.
+ */
+function _titleMatchInner(
+  parsedTitle: string,
+  titles: string[],
+  options: TitleMatchOptions
+): TitleMatchInnerResult {
+  const { threshold, limitTitles, ...extractOptions } = options;
+
+  if (limitTitles && titles.length > limitTitles) {
+    titles = titles.slice(0, limitTitles);
+  }
+
+  // when threshold is 1, no need to use levenshtein distance, just check for exact matches
+  if (threshold === 1 && !extractOptions.scorer) {
+    const idx = titles.findIndex(
+      (title) => title.toLowerCase() === parsedTitle.toLowerCase()
+    );
+    return { matched: idx !== -1, matchedIndex: idx !== -1 ? idx : undefined };
+  }
+
+  const results = extract(parsedTitle, titles, {
+    ...extractOptions,
+    returnObjects: true,
+  }) as { choice: string; score: number; key: number }[];
+
+  let bestScore = 0;
+  let bestKey: number | undefined;
+  for (const result of results) {
+    if (result.score > bestScore) {
+      bestScore = result.score;
+      bestKey = result.key;
+    }
+  }
+
+  const matched = bestScore / 100 >= threshold;
+  return { matched, matchedIndex: matched ? bestKey : undefined };
+}
+
+/**
+ * Check if a parsed title matches any of the provided titles.
+ * @returns true if a match is found above the threshold.
+ */
+export function titleMatch(
+  parsedTitle: string,
+  titles: string[],
+  options: TitleMatchOptions
+): boolean {
+  return _titleMatchInner(parsedTitle, titles, options).matched;
+}
+
+/**
+ * Like titleMatch, but accepts MetadataTitle[] and returns the language
+ * of the best matching title (if any). Normalises MetadataTitle strings
+ * internally so callers only need to normalise parsedTitle.
+ */
+export function titleMatchWithLang(
+  parsedTitle: string,
+  titles: MetadataTitle[],
+  options: TitleMatchOptions
+): { matched: boolean; language?: string } {
+  const normalisedTitles = titles.map((t) => normaliseTitle(t.title));
+  const result = _titleMatchInner(parsedTitle, normalisedTitles, options);
+  return {
+    matched: result.matched,
+    language:
+      result.matchedIndex !== undefined
+        ? titles[result.matchedIndex]?.language
+        : undefined,
+  };
+}
+
+export function preprocessTitle(
+  parsedTitle: string,
+  filename: string,
+  titles: string[]
+) {
+  let preprocessedTitle = parsedTitle;
+
+  const separatorPatterns = [
+    /\s*[\/\|]\s*/,
+    /[\s\.\-\(\[]+a[\s\.]?k[\s\.]?a[\s\.\)\-\]]+/i,
+    /\s*\(([^)]+)\)$/,
+  ];
+  for (const pattern of separatorPatterns) {
+    const match = preprocessedTitle.match(pattern);
+
+    if (match) {
+      // if more than 20% of titles contain the separator pattern, consider it common and do not split
+      const hasExistingTitleWithSeparator =
+        titles.filter((title) => pattern.test(title.toLowerCase())).length /
+          titles.length >
+        0.2;
+
+      if (!hasExistingTitleWithSeparator) {
+        const parts = preprocessedTitle.split(pattern);
+        if (parts.length > 1 && parts[0]?.trim()) {
+          const originalTitle = preprocessedTitle;
+          preprocessedTitle = parts[0].trim();
+          logger.silly(
+            `Updated title from "${originalTitle}" to "${preprocessedTitle}"`
+          );
+          break;
+        }
+      }
+    }
+  }
+
+  if (
+    titles.some((title) => title.toLowerCase().includes('saga')) &&
+    filename?.toLowerCase().includes('saga') &&
+    !preprocessedTitle.toLowerCase().includes('saga')
+  ) {
+    preprocessedTitle += ' Saga';
+  }
+
+  return preprocessedTitle;
+}
+
+// Collapse digraph transliterations so releases named either way
+// produce the same matching key.
+function collapseDigraphs(text: string): string {
+  return text
+    .replace(/ae/g, 'a')
+    .replace(/oe/g, 'o')
+    .replace(/ue/g, 'u')
+    .replace(/aa/g, 'a');
+}
+
+export function normaliseTitle(title: string) {
+  return collapseDigraphs(
+    foldToAscii(title)
+      .replace(/&/g, 'and')
+      .replace(/[^\p{L}\p{N}+]/gu, '')
+      .toLowerCase()
+  );
+}
+
+export function cleanTitle(title: string, language?: string) {
+  let cleaned = foldToAscii(title, language);
+
+  for (const char of ['♪', '♫', '★', '☆', '♡', '♥', '-']) {
+    cleaned = cleaned.replaceAll(char, ' ');
+  }
+
+  return cleaned
+    .replace(/&/g, 'and')
+    .replace(/[^\p{L}\p{N}\s]/gu, '') // Remove remaining special chars
+    .replace(/\s+/g, ' ') // Normalise spaces
+    .toLowerCase()
+    .trim();
+}
+
+export function parseDuration(
+  durationString: string,
+  output: 'ms' | 's' = 'ms'
+): number | undefined {
+  // Regular expression to match different formats of time durations
+  const regex =
+    /(?<![^\s\[(_\-,.])(?:(\d+)h[:\s]?(\d+)m[:\s]?(\d+)s|(\d+)h[:\s]?(\d+)m|(\d+)m[:\s]?(\d+)s|(\d+)h|(\d+)m|(\d+)s)(?=[\s\)\]_.\-,]|$)/gi;
+
+  const match = regex.exec(durationString);
+  if (!match) {
+    return 0;
+  }
+
+  const hours = parseInt(match[1] || match[4] || match[8] || '0', 10);
+  const minutes = parseInt(
+    match[2] || match[5] || match[6] || match[9] || '0',
+    10
+  );
+  const seconds = parseInt(match[3] || match[7] || match[10] || '0', 10);
+
+  // Convert to milliseconds
+  const totalMilliseconds = (hours * 3600 + minutes * 60 + seconds) * 1000;
+  if (output === 's') {
+    return Math.floor(totalMilliseconds / 1000);
+  }
+
+  return totalMilliseconds;
+}
+
+export function parseAgeString(ageString: string): number | undefined {
+  const match = ageString.match(/^(\d+)([a-zA-Z])$/);
+  if (!match) {
+    return undefined;
+  }
+
+  const value = parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+
+  switch (unit) {
+    case 'd':
+      return value * 24;
+    case 'h':
+      return value;
+    case 'm':
+      return value / 60;
+    case 'y':
+      return value * 24 * 365;
+    default:
+      return undefined;
+  }
+}
+
+export function parseBitrate(bitrateString: string): number | undefined {
+  const match = bitrateString.match(
+    /^(\d+(\.\d+)?)\s*(bps|kbps|mbps|gbps|tbps)$/i
+  );
+  if (!match) {
+    const trimmed = bitrateString.trim();
+    if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+      return undefined;
+    }
+    return parseFloat(trimmed);
+  }
+  const num = parseFloat(match[1]);
+  const unit = match[3].toLowerCase();
+  switch (unit) {
+    case 'bps':
+      return num;
+    case 'kbps':
+      return num * 1000;
+    case 'mbps':
+      return num * 1000000;
+    case 'gbps':
+      return num * 1000000000;
+    case 'tbps':
+      return num * 1000000000000;
+    default:
+      return num;
+  }
+}
+
+function base32ToHex(base32: string): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const char of base32.toUpperCase()) {
+    bits += alphabet.indexOf(char).toString(2).padStart(5, '0');
+  }
+  let hex = '';
+  for (let i = 0; i + 4 <= bits.length; i += 4) {
+    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+  }
+  return hex;
+}
+
+export function extractInfoHashFromMagnet(magnet: string): string | undefined {
+  const match = magnet.match(
+    /(?:urn(?::|%3A)btih(?::|%3A))([a-f0-9]{40}|[a-z2-7]{32})/i
+  )?.[1];
+  if (!match) return undefined;
+  if (match.length === 40) return match.toLowerCase();
+  return base32ToHex(match);
+}

@@ -1,0 +1,179 @@
+import { Addon, Option, UserData } from '../db/index.js';
+import { Preset, baseOptions } from './preset.js';
+import { appConfig, RESOURCES } from '../utils/index.js';
+import { constants } from '../utils/index.js';
+
+export class CustomPreset extends Preset {
+  static override get METADATA() {
+    const options: Option[] = [
+      {
+        id: 'name',
+        name: 'Name',
+        description: 'What to call this addon',
+        type: 'string',
+        required: true,
+        default: 'Custom Addon',
+      },
+      {
+        id: 'manifestUrl',
+        name: 'Manifest URL',
+        description: 'Provide the Manifest URL for this custom addon.',
+        type: 'url',
+        required: true,
+      },
+      {
+        id: 'timeout',
+        name: 'Timeout (ms)',
+        description: 'The timeout for this addon',
+        type: 'number',
+        default: appConfig.presets.defaultTimeout,
+        constraints: {
+          min: appConfig.userLimits.timeouts.minTimeout,
+          max: appConfig.userLimits.timeouts.maxTimeout,
+          forceInUi: false,
+        },
+      },
+      {
+        id: 'resources',
+        name: 'Resources',
+        description:
+          'Optionally override the resources that are fetched from this addon ',
+        type: 'multi-select',
+        required: false,
+        showInSimpleMode: false,
+        default: undefined,
+        options: RESOURCES.map((resource) => ({
+          label: constants.RESOURCE_LABELS[resource],
+          value: resource,
+        })),
+      },
+      {
+        id: 'mediaTypes',
+        name: 'Media Types',
+        description:
+          'Limits this addon to the selected media types for streams. For example, selecting "Movie" means this addon will only be used for movie streams (if the addon supports them). Leave empty to allow all.',
+        type: 'multi-select',
+        required: false,
+        showInSimpleMode: false,
+        default: [],
+        options: [
+          {
+            label: 'Movie',
+            value: 'movie',
+          },
+          {
+            label: 'Series',
+            value: 'series',
+          },
+          {
+            label: 'Anime',
+            value: 'anime',
+          },
+        ],
+      },
+      {
+        id: 'pinPosition',
+        name: 'Pin Position',
+        description:
+          'Pin streams from this addon to the top or bottom of the stream list. This will override the default sorting and place all streams from this addon either at the top or bottom, depending on your selection.',
+        type: 'select',
+        required: false,
+        default: undefined,
+        options: [
+          { label: 'None', value: undefined },
+          { label: 'Top', value: 'top' },
+          { label: 'Bottom', value: 'bottom' },
+        ],
+        showInSimpleMode: false,
+      },
+      {
+        id: 'libraryAddon',
+        name: 'Library Addon',
+        description:
+          'Whether to mark this addon as a library addon. This will result in all streams from this addon being marked as library streams.',
+        type: 'boolean',
+        required: false,
+        default: false,
+      },
+      {
+        id: 'formatPassthrough',
+        name: 'Format Passthrough',
+        description:
+          'Whether to pass through the stream formatting. This means your formatting will not be applied and original stream formatting is retained.',
+        type: 'boolean',
+      },
+      {
+        id: 'resultPassthrough',
+        name: 'Result Passthrough',
+        description:
+          'If enabled, all results from this addon will never be filtered out and always included in the final stream list.',
+        type: 'boolean',
+        required: false,
+        default: false,
+      },
+    ];
+
+    return {
+      ID: 'custom',
+      NAME: 'Custom',
+      LOGO: '',
+      URL: [],
+      TIMEOUT: appConfig.presets.defaultTimeout,
+      USER_AGENT: appConfig.http.defaultUserAgent,
+      SUPPORTED_SERVICES: [],
+      DESCRIPTION: 'Add your own addon by providing its Manifest URL.',
+      OPTIONS: options,
+      SUPPORTED_STREAM_TYPES: [],
+      SUPPORTED_RESOURCES: [],
+      CATEGORY: constants.PresetCategory.MISC,
+    };
+  }
+
+  static async generateAddons(
+    userData: UserData,
+    options: Record<string, any>
+  ): Promise<Addon[]> {
+    let manifestUrl = options.manifestUrl;
+    try {
+      manifestUrl = new URL(manifestUrl);
+    } catch (error) {
+      throw new Error(
+        `${options.name} has an invalid Manifest URL. It must be a valid link to a manifest.json`
+      );
+    }
+    if (!manifestUrl.pathname.endsWith('/manifest.json')) {
+      throw new Error(
+        `${options.name} has an invalid Manifest URL. It must be a valid link to a manifest.json`
+      );
+    }
+
+    return [this.generateAddon(userData, options)];
+  }
+
+  private static generateAddon(
+    userData: UserData,
+    options: Record<string, any>
+  ): Addon {
+    return {
+      name: options.name || this.METADATA.NAME,
+      manifestUrl: options.manifestUrl,
+      enabled: true,
+      library: options.libraryAddon ?? false,
+      resources: options.resources || undefined,
+      mediaTypes: options.mediaTypes || [],
+      timeout: options.timeout || this.METADATA.TIMEOUT,
+      preset: {
+        id: '',
+        type: this.METADATA.ID,
+        options: options,
+      },
+      formatPassthrough:
+        options.formatPassthrough ?? options.streamPassthrough ?? false,
+      resultPassthrough: options.resultPassthrough ?? false,
+      pinPosition: options.pinPosition || undefined,
+      headers: {
+        'User-Agent': this.METADATA.USER_AGENT,
+      },
+    };
+  }
+}

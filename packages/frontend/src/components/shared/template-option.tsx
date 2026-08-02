@@ -1,0 +1,1297 @@
+import { TextInput } from '../ui/text-input';
+import { NumberInput } from '../ui/number-input';
+import { Switch } from '../ui/switch';
+import { Select } from '../ui/select';
+import { Combobox } from '../ui/combobox';
+import { Option, NNTPServers } from '@aiostreams/core';
+import React, { useState, useEffect } from 'react';
+import MarkdownLite from './markdown-lite';
+import { Alert } from '../ui/alert';
+import { SocialIcon } from './social-icon';
+import { PasswordInput } from '../ui/password-input';
+import { Button } from '../ui/button';
+import { IconButton } from '../ui/button';
+import {
+  FaKey,
+  FaChevronUp,
+  FaChevronDown,
+  FaChevronRight,
+  FaArrowLeft,
+  FaGear,
+  FaPlus,
+  FaServer,
+  FaTrashCan,
+} from 'react-icons/fa6';
+import { BiTestTube } from 'react-icons/bi';
+import { Modal } from '../ui/modal';
+import { Tooltip } from '../ui/tooltip';
+import { toast } from 'sonner';
+// this component, accepts an option and returns a component that renders the option.
+// string - TextInput
+// number - NumberInput
+// boolean - Checkbox
+// select - Select
+// multi-select - ComboBox
+// url - TextInput (with url validation)
+
+interface SubsectionTriggerProps {
+  subsectionIntent?: string;
+  buttonIntent?: string;
+  name: string;
+  description?: string;
+  onClick: () => void;
+  disabled?: boolean;
+}
+
+function SubsectionTrigger({
+  subsectionIntent,
+  buttonIntent,
+  name,
+  description,
+  onClick,
+  disabled,
+}: SubsectionTriggerProps) {
+  if (subsectionIntent === 'block') {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="w-full text-left bg-[--background] border border-[--border] rounded-[--radius] px-4 py-3 hover:bg-[--subtle] transition-colors disabled:opacity-50 disabled:pointer-events-none shadow-sm"
+      >
+        <div className="font-semibold text-sm">{name}</div>
+        {description && (
+          <div className="text-xs text-[--muted] mt-1">
+            <MarkdownLite>{description}</MarkdownLite>
+          </div>
+        )}
+      </button>
+    );
+  }
+
+  if (subsectionIntent === 'pill') {
+    return (
+      <div>
+        <Button
+          type="button"
+          rounded
+          intent={(buttonIntent as any) ?? 'white-subtle'}
+          size="md"
+          onClick={onClick}
+          disabled={disabled}
+          className="w-full"
+        >
+          {name}
+        </Button>
+        {description && (
+          <div className="text-xs text-[--muted] mt-2">
+            <MarkdownLite>{description}</MarkdownLite>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (subsectionIntent === 'inline') {
+    return (
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <span className="font-medium text-sm">{name}</span>
+          {description && (
+            <div className="text-xs text-[--muted] mt-0.5">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+        <Button
+          type="button"
+          rounded
+          intent={(buttonIntent as any) ?? 'white'}
+          size="sm"
+          onClick={onClick}
+          disabled={disabled}
+          className="shrink-0"
+        >
+          Open
+        </Button>
+      </div>
+    );
+  }
+
+  if (subsectionIntent === 'link') {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="group text-left disabled:opacity-50 disabled:pointer-events-none"
+      >
+        <span className="inline-flex items-center gap-1 text-sm font-medium text-[--brand] group-hover:underline">
+          {name}
+          <FaChevronRight className="w-3 h-3 opacity-60 transition-transform group-hover:translate-x-0.5" />
+        </span>
+        {description && (
+          <div className="text-xs text-[--muted] mt-0.5">
+            <MarkdownLite>{description}</MarkdownLite>
+          </div>
+        )}
+      </button>
+    );
+  }
+
+  if (subsectionIntent === 'banner') {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="w-full text-left border-l-4 border-[--brand] bg-[--subtle] px-4 py-3 rounded-r-[--radius] hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:pointer-events-none"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="font-semibold text-sm">{name}</div>
+            {description && (
+              <div className="text-xs text-[--muted] mt-0.5">
+                <MarkdownLite>{description}</MarkdownLite>
+              </div>
+            )}
+          </div>
+          <FaChevronRight className="w-3 h-3 text-[--muted] shrink-0" />
+        </div>
+      </button>
+    );
+  }
+
+  // default intent
+  return (
+    <div className="flex items-center gap-3 bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
+      <div className="flex-1">
+        <h4 className="font-medium mb-1">{name}</h4>
+        {description && (
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            <MarkdownLite>{description}</MarkdownLite>
+          </p>
+        )}
+      </div>
+      <IconButton
+        icon={<FaGear />}
+        intent="primary-outline"
+        onClick={onClick}
+        disabled={disabled}
+        title={`Configure ${name}`}
+      />
+    </div>
+  );
+}
+
+interface SelectWithCustomProps {
+  label: string;
+  value: any;
+  onChange: (value: string | undefined) => void;
+  options?: { label: string; value: any }[];
+  required?: boolean;
+  disabled?: boolean;
+}
+
+/** A dropdown of known values with a `Custom` escape hatch for free text. */
+function SelectWithCustom({
+  label,
+  value,
+  onChange,
+  options,
+  required,
+  disabled,
+}: SelectWithCustomProps) {
+  const onValueChange = (val: string) => {
+    onChange(val === 'undefined' ? undefined : val);
+  };
+
+  // The select sits on 'Custom' whenever the value isn't one of the presets.
+  const isCustom = !options?.some((opt) => opt.value === value);
+
+  const handleSelectChange = (val: string) => {
+    // Selecting "Custom" clears the value to allow for new input.
+    onValueChange(val === 'Custom' ? '' : val);
+  };
+
+  const optionsWithCustom = [
+    ...(options?.map((opt) => ({ label: opt.label, value: opt.value })) ?? []),
+    { label: 'Custom', value: 'Custom' },
+  ];
+
+  return (
+    <>
+      <Select
+        label={label}
+        value={isCustom ? 'Custom' : value}
+        onValueChange={handleSelectChange}
+        options={optionsWithCustom}
+        required={required}
+        disabled={disabled}
+      />
+      {isCustom && (
+        <TextInput
+          label="Custom"
+          value={value ?? ''}
+          onValueChange={onValueChange}
+          required={required}
+          disabled={disabled}
+        />
+      )}
+    </>
+  );
+}
+
+// Props for the template option component
+interface TemplateOptionProps {
+  option: Option;
+  value: any;
+  disabled?: boolean;
+  trusted?: boolean;
+  onChange: (value: any) => void;
+}
+
+const TemplateOption: React.FC<TemplateOptionProps> = ({
+  option,
+  value,
+  trusted,
+  onChange,
+  disabled,
+}) => {
+  const {
+    id,
+    name,
+    description,
+    type,
+    required,
+    options,
+    constraints,
+    forced,
+    default: defaultValue,
+    intent,
+    subsectionIntent,
+    buttonIntent,
+    socials,
+    oauth,
+    emptyIsUndefined = false,
+  } = option;
+
+  const isDisabled = disabled || !(forced === undefined || forced === null);
+  const forcedValue =
+    forced !== undefined && forced !== null ? forced : undefined;
+
+  switch (type) {
+    case 'socials':
+      return (
+        <div className="flex items-center justify-center w-full gap-6 mt-2">
+          {socials?.map((social) => (
+            <SocialIcon
+              key={social.id}
+              id={social.id}
+              url={social.url}
+              trusted={trusted}
+            />
+          ))}
+        </div>
+      );
+    case 'alert':
+      return (
+        <Alert
+          intent={intent}
+          title={name}
+          description={<MarkdownLite>{description}</MarkdownLite>}
+        />
+      );
+    case 'password':
+      return (
+        <div>
+          <PasswordInput
+            label={name}
+            value={forcedValue ?? value ?? defaultValue ?? ''}
+            onValueChange={(value: string) =>
+              onChange(emptyIsUndefined ? value || undefined : value)
+            }
+            required={required}
+            disabled={isDisabled}
+            autoComplete="new-password"
+            minLength={
+              constraints?.forceInUi !== false ? constraints?.min : undefined
+            }
+            maxLength={
+              constraints?.forceInUi !== false ? constraints?.max : undefined
+            }
+          />
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    case 'string':
+      return (
+        <div>
+          <TextInput
+            label={name}
+            value={forcedValue ?? value ?? defaultValue ?? ''}
+            onValueChange={(value: string) =>
+              onChange(emptyIsUndefined ? value || undefined : value)
+            }
+            required={required}
+            minLength={
+              constraints?.forceInUi !== false ? constraints?.min : undefined
+            }
+            maxLength={
+              constraints?.forceInUi !== false ? constraints?.max : undefined
+            }
+            disabled={isDisabled}
+          />
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    case 'number':
+      return (
+        <div>
+          <NumberInput
+            value={forcedValue ?? value ?? defaultValue ?? undefined}
+            label={name}
+            onValueChange={(value: number, valueAsString: string) =>
+              onChange(isNaN(value) ? undefined : value)
+            }
+            required={required}
+            step={
+              constraints?.max
+                ? Math.floor(constraints?.max / 100) > 0
+                  ? Math.floor(constraints?.max / 100)
+                  : 1
+                : 1
+            }
+            disabled={isDisabled}
+            clampValueOnBlur={false}
+            min={
+              constraints?.forceInUi !== false ? constraints?.min : undefined
+            }
+            max={
+              constraints?.forceInUi !== false ? constraints?.max : undefined
+            }
+          />
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    case 'boolean':
+      return (
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="font-medium text-sm">{name}</span>
+            <Switch
+              disabled={isDisabled}
+              value={!!(forcedValue ?? value ?? defaultValue)}
+              onValueChange={onChange}
+            />
+          </div>
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    case 'select':
+      return (
+        <div>
+          <Select
+            label={name}
+            value={forcedValue ?? value ?? defaultValue}
+            onValueChange={onChange}
+            options={
+              options?.map((opt) => ({ label: opt.label, value: opt.value })) ??
+              []
+            }
+            required={required}
+            disabled={isDisabled}
+          />
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    case 'select-with-custom': {
+      return (
+        <div>
+          <SelectWithCustom
+            label={name}
+            value={forcedValue ?? value ?? defaultValue}
+            onChange={onChange}
+            options={options}
+            required={required}
+            disabled={isDisabled}
+          />
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    }
+    case 'multi-select':
+      return (
+        <div>
+          <Combobox
+            label={name}
+            value={(forcedValue ?? Array.isArray(value)) ? value : defaultValue}
+            onValueChange={(value: any) =>
+              onChange(
+                emptyIsUndefined
+                  ? value?.length === 0
+                    ? undefined
+                    : value
+                  : value
+              )
+            }
+            options={
+              options?.map((opt) => ({
+                label: opt.label,
+                value: opt.value,
+                textValue: opt.label,
+              })) ?? []
+            }
+            multiple
+            emptyMessage="No options"
+            disabled={isDisabled}
+            required={required}
+            maxItems={
+              constraints?.forceInUi !== false ? constraints?.max : undefined
+            }
+          />
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    case 'url':
+      return (
+        <div>
+          <TextInput
+            label={name}
+            value={forcedValue ?? value ?? defaultValue ?? ''}
+            onValueChange={(value: string) =>
+              onChange(emptyIsUndefined ? value || undefined : value)
+            }
+            required={required}
+            type="url"
+            disabled={isDisabled}
+            minLength={
+              constraints?.forceInUi !== false ? constraints?.min : undefined
+            }
+            maxLength={
+              constraints?.forceInUi !== false ? constraints?.max : undefined
+            }
+          />
+          {description && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{description}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      );
+    case 'oauth': {
+      const [showInput, setShowInput] = useState(!!value);
+
+      if (!showInput) {
+        return (
+          <div>
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-3 bg-[--subtle] p-4 rounded-lg">
+                <div className="flex-1">
+                  <h4 className="font-medium mb-1">{name}</h4>
+                  <p className="text-sm text-[--muted]">
+                    <MarkdownLite>{description}</MarkdownLite>
+                  </p>
+                </div>
+                <IconButton
+                  icon={<FaKey />}
+                  intent="primary-outline"
+                  onClick={() => {
+                    window.open(oauth?.authorisationUrl || '', '_blank');
+                    setShowInput(true);
+                  }}
+                  className="shrink-0"
+                />
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <div className="flex flex-col gap-3">
+            <div className="bg-[--subtle] p-4 rounded-lg">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="font-medium">
+                  Enter {oauth?.oauthResultField?.name || 'Authorization Code'}
+                </h4>
+                <IconButton
+                  icon={<FaArrowLeft className="w-4 h-4" />}
+                  intent="primary-subtle"
+                  size="sm"
+                  onClick={() => setShowInput(false)}
+                  aria-label="Go back to authorization"
+                />
+              </div>
+              <PasswordInput
+                value={forcedValue ?? value ?? defaultValue}
+                onValueChange={(value: string) =>
+                  onChange(emptyIsUndefined ? value || undefined : value)
+                }
+                required={required}
+                disabled={isDisabled}
+                autoComplete="new-password"
+              />
+              {oauth?.oauthResultField?.description && (
+                <div className="text-sm text-[--muted] mt-2">
+                  <MarkdownLite>
+                    {oauth.oauthResultField.description}
+                  </MarkdownLite>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    case 'subsection': {
+      const [modalOpen, setModalOpen] = useState(false);
+      const subOptions = (option.subOptions ?? []) as Option[];
+      const savedValue = (forcedValue ?? value ?? defaultValue ?? {}) as Record<
+        string,
+        any
+      >;
+      const subDefaults: Record<string, any> = {};
+      for (const sub of subOptions) {
+        if (sub.default !== undefined) {
+          subDefaults[sub.id] = sub.default;
+        }
+      }
+      const currentValue = { ...subDefaults, ...savedValue };
+
+      const [localValue, setLocalValue] =
+        useState<Record<string, any>>(currentValue);
+
+      const handleOpenModal = () => {
+        setLocalValue(currentValue);
+        setModalOpen(true);
+      };
+
+      const handleLocalChange = (subOptionId: string, subValue: any) => {
+        setLocalValue((prev) => ({ ...prev, [subOptionId]: subValue }));
+      };
+
+      const handleSave = () => {
+        onChange(localValue);
+        setModalOpen(false);
+      };
+
+      const handleCancel = () => {
+        setLocalValue(currentValue);
+        setModalOpen(false);
+      };
+
+      return (
+        <div>
+          <SubsectionTrigger
+            subsectionIntent={subsectionIntent}
+            buttonIntent={buttonIntent}
+            name={name}
+            description={description}
+            onClick={handleOpenModal}
+            disabled={isDisabled}
+          />
+          <Modal
+            open={modalOpen}
+            onOpenChange={(open) => !open && handleCancel()}
+            title={name}
+          >
+            <div className="space-y-4">
+              {subOptions.map(
+                (subOption: Option): React.JSX.Element => (
+                  <TemplateOption
+                    key={subOption.id}
+                    option={subOption}
+                    value={localValue[subOption.id]}
+                    onChange={(subValue) =>
+                      handleLocalChange(subOption.id, subValue)
+                    }
+                    disabled={isDisabled}
+                  />
+                )
+              )}
+              <Button
+                type="button"
+                intent="primary"
+                className="w-full"
+                onClick={handleSave}
+              >
+                Save
+              </Button>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+    case 'custom-nntp-servers': {
+      return (
+        <NNTPServersInput
+          name={name}
+          description={description}
+          value={forcedValue ?? value ?? defaultValue}
+          onChange={onChange}
+          disabled={isDisabled}
+        />
+      );
+    }
+    case 'nab-endpoint': {
+      return (
+        <NabEndpointInput
+          option={option}
+          value={forcedValue ?? value ?? defaultValue}
+          onChange={onChange}
+          disabled={isDisabled}
+        />
+      );
+    }
+    case 'unarr-auth': {
+      return (
+        <UnarrAuthInput
+          option={option}
+          value={forcedValue ?? value ?? defaultValue}
+          onChange={onChange}
+          disabled={isDisabled}
+        />
+      );
+    }
+    default:
+      return null;
+  }
+};
+
+interface UnarrAuthValue {
+  apiUrl?: string;
+  apiKey?: string;
+  account?: {
+    plan?: string;
+    isPro?: boolean;
+    trialActive?: boolean;
+    trialDaysLeft?: number;
+  };
+}
+
+interface UnarrConnectResponse {
+  apiUrl: string;
+  apiKey: string;
+  account: NonNullable<UnarrAuthValue['account']>;
+  exchanged: boolean;
+}
+
+function UnarrAuthInput({
+  option,
+  value,
+  onChange,
+  disabled,
+}: {
+  option: Option;
+  value: UnarrAuthValue | undefined;
+  onChange: (value: UnarrAuthValue) => void;
+  disabled?: boolean;
+}) {
+  const current = value ?? {};
+  const [credential, setCredential] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const connected = current.apiKey?.startsWith('tc_') === true;
+
+  const connect = async () => {
+    const supplied = credential.trim() || current.apiKey || '';
+    if (!supplied) {
+      toast.error('Enter an Unarr one-time auth key or API key');
+      return;
+    }
+    setConnecting(true);
+    try {
+      const response = await fetch('/builtins/unarr-indexer/auth', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiUrl: current.apiUrl || 'https://unarr.app',
+          credential: supplied,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json.success) {
+        throw new Error(json.detail || 'Could not connect Unarr');
+      }
+      const result = json.data as UnarrConnectResponse;
+      onChange({
+        apiUrl: result.apiUrl,
+        apiKey: result.apiKey,
+        account: result.account,
+      });
+      setCredential('');
+      toast.success(
+        result.exchanged
+          ? 'Unarr connected; the one-time key was replaced securely'
+          : 'Unarr API key verified'
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : 'Could not connect Unarr'
+      );
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const accountLabel = current.account?.plan
+    ? current.account.plan.toUpperCase()
+    : current.account?.trialActive
+      ? `TRIAL${current.account.trialDaysLeft ? ` · ${current.account.trialDaysLeft} days` : ''}`
+      : 'CONNECTED';
+
+  return (
+    <div className="space-y-3 rounded-[--radius] border border-[--border] bg-[--subtle] p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="font-medium">{option.name}</div>
+          <div className="text-xs text-[--muted] mt-1">
+            <MarkdownLite>{option.description}</MarkdownLite>
+          </div>
+        </div>
+        {connected && (
+          <div className="shrink-0 rounded-full bg-green-500/15 px-3 py-1 text-xs font-semibold text-green-500">
+            {accountLabel}
+          </div>
+        )}
+      </div>
+
+      <PasswordInput
+        label={
+          connected ? 'Replace or revalidate credential' : 'Unarr credential'
+        }
+        value={credential}
+        onValueChange={setCredential}
+        placeholder="unarr-authkey-… or tc_…"
+        disabled={disabled || connecting}
+        autoComplete="new-password"
+      />
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Button
+          type="button"
+          intent="gray-subtle"
+          onClick={() =>
+            window.open(
+              'https://unarr.app/profile?tab=apikey',
+              '_blank',
+              'noopener,noreferrer'
+            )
+          }
+          disabled={disabled || connecting}
+        >
+          Get key from Unarr
+        </Button>
+        <Button
+          type="button"
+          intent="primary"
+          onClick={connect}
+          loading={connecting}
+          disabled={
+            disabled || connecting || (!credential.trim() && !connected)
+          }
+        >
+          {connected && !credential.trim() ? 'Revalidate' : 'Connect Unarr'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+interface NabEndpointValue {
+  url?: string;
+  apiKey?: string;
+}
+
+interface NabTestResult {
+  ok: boolean;
+  stage?: 'caps' | 'auth' | 'search';
+  server?: { title?: string };
+  limits?: {
+    default?: number | string | boolean;
+    max?: number | string | boolean;
+  };
+  searchModes?: string[];
+  idSearchParams?: string[];
+  resultCount?: number;
+  error?: { code?: number; message: string };
+}
+
+const NAB_TEST_STAGE_HINTS: Record<string, string> = {
+  caps: 'Could not reach a Newznab API here. Check the URL, including its path.',
+  auth: 'The endpoint is reachable, but the API key was rejected.',
+  search: 'The endpoint is reachable, but the search request failed.',
+};
+
+export interface NabEndpointInputProps {
+  option: Option;
+  value: NabEndpointValue | undefined;
+  onChange: (value: NabEndpointValue) => void;
+  disabled?: boolean;
+}
+
+/**
+ * The url + API key pair for a newznab/torznab indexer, with a button that
+ * probes the endpoint.
+ */
+export function NabEndpointInput({
+  option,
+  value,
+  onChange,
+  disabled,
+}: NabEndpointInputProps) {
+  const subOptions = (option.subOptions ?? []) as Option[];
+  const urlOption = subOptions.find((sub) => sub.id === 'url');
+  const apiKeyOption = subOptions.find((sub) => sub.id === 'apiKey');
+  const current = value ?? {};
+
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<NabTestResult | null>(null);
+
+  const update = (patch: NabEndpointValue) => {
+    // any edit invalidates the previous verdict
+    setResult(null);
+    onChange({ ...current, ...patch });
+  };
+
+  // only point at a key page for indexers we have a confirmed link for
+  const apiKeyUrl = urlOption?.options?.find(
+    (entry) => entry.value === current.url
+  )?.apiKeyUrl;
+  const apiKeyDescription = [
+    apiKeyOption?.description,
+    apiKeyUrl && `[Find your API key](${apiKeyUrl})`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const runTest = async () => {
+    setTesting(true);
+    setResult(null);
+    try {
+      const response = await fetch(
+        `/builtins/${option.nab?.namespace ?? 'newznab'}/test`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: current.url,
+            apiKey: current.apiKey,
+            preset: option.nab?.preset,
+          }),
+        }
+      );
+      const json = await response.json();
+      if (!json.success) {
+        throw new Error(
+          json.detail || json.error?.message || 'Could not run the test'
+        );
+      }
+      setResult(json.data as NabTestResult);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : 'Could not run the test'
+      );
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-end gap-2">
+        <div className="flex-1 min-w-0 space-y-2">
+          {urlOption?.options?.length ? (
+            <SelectWithCustom
+              label={urlOption.name}
+              value={current.url}
+              onChange={(url) => update({ url })}
+              options={urlOption.options}
+              required={urlOption.required}
+              disabled={disabled}
+            />
+          ) : (
+            <TextInput
+              label={urlOption?.name ?? 'URL'}
+              value={current.url ?? ''}
+              onValueChange={(url: string) => update({ url })}
+              type="url"
+              required={urlOption?.required}
+              disabled={disabled}
+            />
+          )}
+        </div>
+        <Tooltip
+          trigger={
+            <IconButton
+              intent="gray-subtle"
+              icon={<BiTestTube />}
+              onClick={runTest}
+              loading={testing}
+              disabled={disabled || testing}
+              aria-label="Test endpoint"
+              className="shrink-0"
+            />
+          }
+        >
+          Test connection
+        </Tooltip>
+      </div>
+
+      {urlOption?.description && (
+        <div className="text-xs text-[--muted]">
+          <MarkdownLite>{urlOption.description}</MarkdownLite>
+        </div>
+      )}
+
+      {apiKeyOption && (
+        <div>
+          <PasswordInput
+            label={apiKeyOption.name}
+            value={current.apiKey ?? ''}
+            onValueChange={(apiKey: string) => update({ apiKey })}
+            required={apiKeyOption.required}
+            disabled={disabled}
+            autoComplete="new-password"
+          />
+          {apiKeyDescription && (
+            <div className="text-xs text-[--muted] mt-1">
+              <MarkdownLite>{apiKeyDescription}</MarkdownLite>
+            </div>
+          )}
+        </div>
+      )}
+
+      {result && <NabTestSummary result={result} />}
+    </div>
+  );
+}
+
+function NabTestSummary({ result }: { result: NabTestResult }) {
+  if (!result.ok) {
+    const hint = result.stage ? NAB_TEST_STAGE_HINTS[result.stage] : undefined;
+    return (
+      <Alert
+        intent="alert-basic"
+        title="Test failed"
+        description={
+          <span>
+            {hint ? `${hint} ` : ''}
+            {result.error?.message}
+            {result.error?.code !== undefined && ` (${result.error.code})`}
+          </span>
+        }
+      />
+    );
+  }
+
+  const supportsIdSearch = !!result.idSearchParams?.length;
+
+  const details = [
+    supportsIdSearch
+      ? `ID search: ${result.idSearchParams!.join(', ')}`
+      : 'No ID search, results are matched by title only',
+    result.resultCount !== undefined && `${result.resultCount} results`,
+    result.limits?.max !== undefined && `max ${result.limits.max} per request`,
+    result.searchModes?.length && `supports ${result.searchModes.join(', ')}`,
+  ].filter(Boolean);
+
+  return (
+    <Alert
+      intent={'success-basic'}
+      title={`Connected to ${result.server?.title || 'the indexer'}`}
+      description={details.join(' · ')}
+    />
+  );
+}
+
+// Default empty server template
+const createEmptyServer = (): NNTPServers[number] => ({
+  username: '',
+  password: '',
+  host: '',
+  port: 563,
+  ssl: true,
+  connections: 5,
+});
+
+// Decode base64 value to servers array
+const decodeServers = (value: string | undefined): NNTPServers => {
+  if (!value) return [];
+  try {
+    const decoded = Buffer.from(value, 'base64').toString('utf-8');
+    return JSON.parse(decoded) as NNTPServers;
+  } catch {
+    return [];
+  }
+};
+
+// Encode servers array to base64
+const encodeServers = (servers: NNTPServers): string | undefined => {
+  if (servers.length === 0) return undefined;
+  return Buffer.from(JSON.stringify(servers)).toString('base64');
+};
+
+export interface NNTPServersInputProps {
+  name: string;
+  description?: string;
+  value: string | undefined;
+  onChange: (value: string | undefined) => void;
+  disabled?: boolean;
+}
+
+export function NNTPServersInput({
+  name,
+  description,
+  value,
+  onChange,
+  disabled,
+}: NNTPServersInputProps) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [servers, setServers] = useState<NNTPServers>([]);
+
+  // Sync servers state when modal opens
+  useEffect(() => {
+    if (modalOpen) {
+      setServers(decodeServers(value));
+    }
+  }, [modalOpen, value]);
+
+  const serverCount = decodeServers(value).length;
+
+  const handleAddServer = () => {
+    setServers((prev) => [...prev, createEmptyServer()]);
+  };
+
+  const handleRemoveServer = (index: number) => {
+    setServers((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleMoveServer = (index: number, direction: 'up' | 'down') => {
+    setServers((prev) => {
+      const newServers = [...prev];
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= newServers.length) return prev;
+      [newServers[index], newServers[targetIndex]] = [
+        newServers[targetIndex],
+        newServers[index],
+      ];
+      return newServers;
+    });
+  };
+
+  const handleServerChange = (
+    index: number,
+    field: keyof NNTPServers[number],
+    fieldValue: any
+  ) => {
+    setServers((prev) =>
+      prev.map((server, i) =>
+        i === index ? { ...server, [field]: fieldValue } : server
+      )
+    );
+  };
+
+  const handleSave = () => {
+    // Filter out servers with empty required fields
+    const validServers = servers.filter((s) => s.host.trim() !== '');
+    onChange(encodeServers(validServers));
+    setModalOpen(false);
+  };
+
+  const handleCancel = () => {
+    setModalOpen(false);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 bg-[--subtle] p-4 rounded-lg">
+        <div className="flex-1">
+          <h4 className="font-medium mb-1">{name}</h4>
+          {description && (
+            <p className="text-sm text-[--muted]">
+              <MarkdownLite>{description}</MarkdownLite>
+            </p>
+          )}
+          {serverCount > 0 && (
+            <p className="text-sm text-[--brand] mt-1">
+              {serverCount} server{serverCount !== 1 ? 's' : ''} configured
+            </p>
+          )}
+        </div>
+        <IconButton
+          icon={<FaServer />}
+          intent="primary-outline"
+          onClick={() => setModalOpen(true)}
+          disabled={disabled}
+          className="shrink-0"
+        />
+      </div>
+
+      <Modal
+        open={modalOpen}
+        onOpenChange={setModalOpen}
+        title="Configure NNTP Servers"
+        contentClass="max-w-4xl"
+      >
+        <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+          {servers.length === 0 ? (
+            <div className="text-center py-8 text-[--muted]">
+              <FaServer className="w-12 h-12 mx-auto mb-3 opacity-50" />
+              <p>No servers configured</p>
+              <p className="text-sm">Click the button below to add a server</p>
+            </div>
+          ) : (
+            servers.map((server, index) => (
+              <div
+                key={index}
+                className="border border-[--border] rounded-lg p-4 bg-[--subtle]"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-medium text-sm">
+                    Server {index + 1}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <IconButton
+                      icon={<FaChevronUp className="w-4 h-4" />}
+                      intent="gray-subtle"
+                      size="sm"
+                      onClick={() => handleMoveServer(index, 'up')}
+                      disabled={index === 0}
+                    />
+                    <IconButton
+                      icon={<FaChevronDown className="w-4 h-4" />}
+                      intent="gray-subtle"
+                      size="sm"
+                      onClick={() => handleMoveServer(index, 'down')}
+                      disabled={index === servers.length - 1}
+                    />
+                    <IconButton
+                      icon={<FaTrashCan className="w-4 h-4" />}
+                      intent="alert-subtle"
+                      size="sm"
+                      onClick={() => handleRemoveServer(index)}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <TextInput
+                    label="Host"
+                    value={server.host ?? ''}
+                    onValueChange={(v) => handleServerChange(index, 'host', v)}
+                    placeholder="news.example.com"
+                    required
+                  />
+                  <NumberInput
+                    label="Port"
+                    value={server.port}
+                    onValueChange={(v) => handleServerChange(index, 'port', v)}
+                    min={1}
+                    max={65535}
+                    required
+                  />
+                  <TextInput
+                    label="Username"
+                    autoComplete="off"
+                    value={server.username ?? ''}
+                    onValueChange={(v) =>
+                      handleServerChange(index, 'username', v)
+                    }
+                    placeholder="username"
+                    required
+                  />
+                  <PasswordInput
+                    label="Password"
+                    autoComplete="new-password"
+                    value={server.password ?? ''}
+                    onValueChange={(v) =>
+                      handleServerChange(index, 'password', v)
+                    }
+                    placeholder="password"
+                    required
+                  />
+                  <NumberInput
+                    label="Connections"
+                    value={server.connections}
+                    onValueChange={(v) =>
+                      handleServerChange(index, 'connections', v)
+                    }
+                    min={1}
+                    max={500}
+                    required
+                  />
+                  <div className="flex items-end pb-1">
+                    <Switch
+                      label="Use SSL"
+                      value={server.ssl}
+                      onValueChange={(v) => handleServerChange(index, 'ssl', v)}
+                      side="right"
+                    />
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+
+          <Button
+            type="button"
+            intent="primary-outline"
+            className="w-full"
+            leftIcon={<FaPlus className="w-4 h-4" />}
+            onClick={handleAddServer}
+          >
+            Add Server
+          </Button>
+        </div>
+
+        <div className="flex gap-2 mt-4 pt-4 border-t border-[--border]">
+          <Button
+            type="button"
+            className="w-full"
+            intent="primary-outline"
+            onClick={handleCancel}
+          >
+            Cancel
+          </Button>
+          <Button type="button" className="w-full" onClick={handleSave}>
+            Save
+          </Button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+export default TemplateOption;

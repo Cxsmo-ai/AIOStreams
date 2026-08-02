@@ -1,0 +1,42 @@
+{
+  "name": "aiostreams",
+  "version": "2.31.1",
+  "description": "AIOStreams consolidates multiple Stremio addons and debrid services into a single, easily configurable addon. It allows highly customisable filtering, sorting, and formatting of results and supports proxying all your streams through MediaFlow Proxy or StremThru for improved compatibility and IP restriction bypassing.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "release": "commit-and-tag-version",
+    "format": "prettier --write \"**/*.{ts,tsx}\"",
+    "metadata": "node scripts/generateMetadata.cjs",
+    "gen:env-docs": "pnpm -F docs run gen:env-docs",
+    "build": "pnpm -F core run build && pnpm -F server run build && pnpm -F frontend run build && pnpm -F seanime-extensions run build",
+    "dev": "pnpm -F core -F server -F frontend --parallel dev",
+    "docs:build": "pnpm -F docs run build",
+    "docs:dev": "pnpm -F docs run dev",
+    "build:watch": "tsc --build --watch",
+    "seanime-extension:build": "pnpm -F seanime-extensions build",
+    "start": "node packages/server/dist/server",
+    "start:addon": "pnpm run start",
+    "start:dev": "cross-env NODE_ENV=development tsx watch packages/server/src/server.ts",
+    "start:addon:dev": "pnpm run start:dev",
+    "start:frontend:dev": "pnpm -F frontend run dev"
+  },
+  "author": "Viren070",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "prettier": "^3.8.3",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  },
+  "packageManager": "pnpm@11.0.8+sha512.4c4097e1dd2d42372c4e7fa5a791ff28fc75a484c7ac192e64b1df0fdef17594ba982f9b4fed9adfb3c757846f565b799b2763fb3733d1de1bcb82cf46684912",
+  "engines": {
+    "pnpm": ">=11.0.0",
+    "node": ">=24.0.0"
+  }
+}

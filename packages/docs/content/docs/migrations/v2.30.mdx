@@ -1,0 +1,226 @@
+---
+title: v2.30 Changes
+description: What changed in AIOStreams v2.30 and the few actions self-hosters need to take.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+v2.30 is a large internal overhaul — a new admin dashboard, structured logging,
+a rewritten database layer, and a move to UI-first configuration — released as a
+**minor** update because the breaking changes are small and only affect
+environment variables that were **already deprecated**.
+
+**End users are not affected.** Existing Stremio install URLs and stored user
+configurations keep working across the upgrade. No re-configuration is needed.
+Self-hosters only need to act if they use the deprecated environment variables
+listed below.
+
+---
+
+## What's new
+
+- **Admin dashboard** — analytics, logs, system info, users, proxy, tasks,
+  cache, and a Settings page.
+- **UI-first configuration** — almost every setting that used to be an
+  environment variable is now a **runtime setting** stored in the database and
+  editable from the dashboard. The matching environment variable still works,
+  but now acts as a **locked override** (the field becomes read-only in the
+  UI). See the
+  [Environment Variables reference](/configuration/environment-variables) for
+  the full bootstrap-vs-runtime split.
+- **Structured logging** — cleaner, structured log output. Setting
+  `LOG_FORMAT=json` is recommended for production.
+- **Rewritten database layer** — better abstraction and a real migration
+  system. Migrations run automatically on startup.
+- **Faster frontend** — migrated to TanStack Router with rspack/rsbuild.
+- **Addon statistics** — new menu to see addon performance.
+
+---
+
+## Breaking changes
+
+These environment variables were already deprecated and are now removed.
+Replace them as follows.
+
+### Service credentials
+
+All `DEFAULT_<SERVICE>_*` and `FORCED_<SERVICE>_*` credential variables (e.g.
+`DEFAULT_REALDEBRID_API_KEY`, `FORCED_EASYNEWS_USERNAME`) are removed. Use the
+consolidated `DEFAULT_SERVICE_CREDENTIALS` / `FORCED_SERVICE_CREDENTIALS`
+instead, one `serviceId.credentialId=value` entry per line (or `\n` separated if
+multi-line env variables are not available in your environment):
+
+<Callout type="info">
+  You can find a list of all service IDs [here](https://github.com/Viren070/AIOStreams/blob/2f42d4723e036b941154819552165379fd4ce3dc/packages/core/src/utils/constants.ts#L228-L243)
+  and a list of credential IDs [here](https://github.com/Viren070/AIOStreams/blob/2f42d4723e036b941154819552165379fd4ce3dc/packages/core/src/utils/constants.ts#L329-L779).
+</Callout>
+
+```sh
+# Before
+DEFAULT_ALLDEBRID_API_KEY=xxx
+DEFAULT_EASYNEWS_USERNAME=yyy
+
+# After
+DEFAULT_SERVICE_CREDENTIALS='alldebrid.apiKey=xxx
+easynews.username=yyy'
+# or
+DEFAULT_SERVICE_CREDENTIALS='alldebrid.apiKey=xxx\neasynews.username=yyy'
+```
+
+### Addon host/port/protocol rewrites
+
+`FORCE_<ADDON>_HOSTNAME`, `FORCE_<ADDON>_PORT`, and `FORCE_<ADDON>_PROTOCOL`
+(e.g. `FORCE_COMET_HOSTNAME`, and the StremThru/Jackettio equivalents) are
+removed. Use `STREAM_URL_MAPPINGS`:
+
+```sh
+# Before
+FORCE_COMET_HOSTNAME=comet.example.com
+FORCE_COMET_PROTOCOL=https
+
+# After
+STREAM_URL_MAPPINGS='{"http://comet:2020": "https://comet.example.com"}'
+```
+
+### Public proxy URL rewrites
+
+`FORCE_PUBLIC_PROXY_HOST`, `FORCE_PUBLIC_PROXY_PORT`, and
+`FORCE_PUBLIC_PROXY_PROTOCOL` are removed. Use the proxy's Public URL field /
+`FORCE_PROXY_PUBLIC_URL`:
+
+```sh
+# Before
+FORCE_PUBLIC_PROXY_HOST=proxy.example.com
+FORCE_PUBLIC_PROXY_PROTOCOL=https
+
+# After
+FORCE_PROXY_PUBLIC_URL='https://proxy.example.com'
+```
+
+### Other removed variables
+
+| Removed | Replacement |
+| ------- | ----------- |
+| `ALLOWED_REGEX_PATTERNS`, `ALLOWED_REGEX_PATTERNS_DESCRIPTION`, `ALLOWED_REGEX_PATTERNS_URLS`, `ALLOWED_REGEX_PATTERNS_URLS_REFRESH_INTERVAL` | `WHITELISTED_REGEX_PATTERNS`, `WHITELISTED_REGEX_PATTERNS_DESCRIPTION`, `WHITELISTED_REGEX_PATTERNS_URLS`, `WHITELISTED_SYNC_REFRESH_INTERVAL` |
+| `LOG_CACHE_STATS_INTERVAL` | Removed (no replacement) |
+| `PTT_PORT`, `PTT_SOCKET` | Removed (dead config) |
+
+---
+
+## `ADDON_PASSWORD` migration
+
+`ADDON_PASSWORD` is removed and replaced by session-based login and an
+automatically-managed config access key. Existing configurations are migrated
+automatically — no manual changes to stored configs are needed.
+
+**You must keep `ADDON_PASSWORD` in your environment for at least one startup
+after upgrading to v2.30** so the migration can run. After that, you can remove
+it. The config access key will be set to your old `ADDON_PASSWORD` value so
+existing configs continue to work.
+
+Since the old password-based protection is removed, make sure you have logins
+configured via `AIOSTREAMS_AUTH` — a comma-separated list of `user:password`
+pairs (e.g. `admin:admin123,user1:pass1`). These are the credentials you will
+be asked for when you next access the configuration page.
+
+<Callout type="info">
+  Only admin users from `AIOSTREAMS_AUTH` can access the dashboard. By default,
+  all users are admins. You can restrict this to a subset with
+  `AIOSTREAMS_AUTH_ADMINS` (comma-separated list of usernames, e.g.
+  `admin,user1`).
+</Callout>
+
+<Callout type="warn">
+  Rotating the config access key (changing `CONFIG_ACCESS_KEY` or the dashboard
+  setting) invalidates every existing config until it is re-saved while logged
+  in. Only rotate it deliberately.
+</Callout>
+
+---
+
+## Next steps
+
+### Migrate settings to the dashboard
+
+Most runtime settings can now be managed from the dashboard instead of `.env`.
+Your existing environment variables continue to act as overrides — the dashboard
+shows this and prevents you from changing overridden settings, so there's
+nothing broken about leaving them in place.
+
+When you're ready, keep only the
+[bootstrap variables](/configuration/environment-variables) in `.env` and move
+everything else via the built-in import. The updated
+[`.env.sample`](https://github.com/Viren070/AIOStreams/blob/main/.env.sample)
+reflects this split.
+
+<Accordions>
+  <Accordion title="How to migrate settings from environment variables to the dashboard">
+    <Steps>
+      <Step>
+        Go to the admin dashboard and navigate to the Settings page.
+      </Step>
+      <Step>
+        Click the 3-dot menu that appears on the top right of each tab.
+      </Step>
+      <Step>
+        Click **Import environment variables**. A modal will appear showing all
+        currently active environment variables and their values.
+      </Step>
+      <Step>
+        Click the **Import** button at the bottom of the modal to copy all
+        settings into the dashboard.
+      </Step>
+      <Step>
+        Remove all non-bootstrap environment variables from your configuration.
+        Keep the bootstrap variables — these cannot be set via the UI.
+      </Step>
+      <Step>
+        Restart/recreate AIOStreams with your updated environment configuration.
+        All runtime settings can now be managed from the dashboard.
+      </Step>
+    </Steps>
+  </Accordion>
+</Accordions>
+
+### Enable structured logging
+
+Set `LOG_FORMAT=json` in production for cleaner, structured log output that works better 
+with log viewers. 
+
+---
+
+## API changes
+
+<Callout type="info">
+  These changes only apply if you use the User API via external tools. If you
+  don't, skip this section.
+</Callout>
+
+### User API authentication moved to `Authorization: Basic`
+
+The `/api/v1/user` endpoints (`GET`, `PUT`, `DELETE`, `POST /password`,
+`POST /verify`, `GET /analytics`) no longer accept `uuid` / `password` as query
+parameters or in the JSON body. They now require the standard HTTP Basic scheme:
+
+```
+Authorization: Basic base64(<uuid>:<password>)
+```
+
+The `<password>` may be either the raw user password or the `encryptedPassword`
+token returned by `POST /api/v1/user` and `GET /api/v1/user` — encrypted tokens
+are transparently decrypted server-side.
+
+`HEAD /api/v1/user` (existence check) and `POST /api/v1/user` (create) are
+unchanged: `HEAD` still takes `?uuid=`, and create still takes
+`{ config, password }` in the body since no UUID exists yet.
+
+```sh
+# Before
+curl "https://your-instance.example.com/api/v1/user?uuid=$UUID&password=$PASSWORD"
+
+# After
+curl "https://your-instance.example.com/api/v1/user" \
+  -H "Authorization: Basic $(echo -n "$UUID:$PASSWORD" | base64)"
+```
+
+See the [User API reference](/apis/user) for the full updated request shapes.

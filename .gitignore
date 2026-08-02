@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+out/
+.next/
+next-env.d.ts
+.wrangler/
+.env
+metadata.json
+data/
+testing/

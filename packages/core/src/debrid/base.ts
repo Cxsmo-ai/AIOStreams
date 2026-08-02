@@ -1,0 +1,329 @@
+﻿import { z } from 'zod';
+import { constants, ServiceId, Cache, appConfig } from '../utils/index.js';
+import { WD1_KEY_REGEX } from '../release-blocklist/keys.js';
+
+type DebridErrorCode =
+  | 'BAD_GATEWAY'
+  | 'BAD_REQUEST'
+  | 'CONFLICT'
+  | 'FORBIDDEN'
+  | 'GONE'
+  | 'INTERNAL_SERVER_ERROR'
+  | 'METHOD_NOT_ALLOWED'
+  | 'NOT_FOUND'
+  | 'NOT_IMPLEMENTED'
+  | 'PAYMENT_REQUIRED'
+  | 'PROXY_AUTHENTICATION_REQUIRED'
+  | 'SERVICE_UNAVAILABLE'
+  | 'STORE_LIMIT_EXCEEDED'
+  | 'STORE_MAGNET_INVALID'
+  | 'TOO_MANY_REQUESTS'
+  | 'UNAUTHORIZED'
+  | 'UNAVAILABLE_FOR_LEGAL_REASONS'
+  | 'UNKNOWN'
+  | 'UNPROCESSABLE_ENTITY'
+  | 'UNSUPPORTED_MEDIA_TYPE'
+  | 'NO_MATCHING_FILE'
+  | 'TIMEOUT'
+  | 'MISSING_ARTICLES';
+
+type DebridErrorType =
+  | 'api_error'
+  | 'store_error'
+  | 'unknown_error'
+  | 'upstream_error';
+
+export class DebridError extends Error {
+  body?: unknown;
+  code?: DebridErrorCode = 'UNKNOWN';
+  headers: Record<string, string>;
+  statusCode: number;
+  statusText: string;
+  cause?: unknown;
+  type?: DebridErrorType = 'unknown_error';
+  constructor(
+    message: string,
+    options: Pick<
+      DebridError,
+      'body' | 'code' | 'headers' | 'statusCode' | 'statusText' | 'type'
+    > & { cause?: unknown }
+  ) {
+    super(message);
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+
+    if (options?.cause) {
+      this.cause = options.cause;
+      delete options.cause;
+    }
+
+    if (options.body) {
+      this.body = options.body;
+    }
+
+    this.headers = options.headers;
+    this.statusCode = options.statusCode;
+    this.statusText = options.statusText;
+
+    if (options.type) {
+      this.type = options.type;
+    }
+    if (options.code) {
+      this.code = options.code;
+    }
+  }
+}
+
+/**
+ * Codes that are service-level failures (auth, quota, rate-limit) rather than
+ * content-level.
+ */
+const DEBRID_NON_RETRYABLE_CODES = new Set<DebridErrorCode | undefined>([
+  'UNAUTHORIZED',
+  'FORBIDDEN',
+  'TOO_MANY_REQUESTS',
+  'PAYMENT_REQUIRED',
+  'STORE_LIMIT_EXCEEDED',
+  'NOT_IMPLEMENTED',
+]);
+
+/**
+ * Shared cross-service failure cache
+ */
+export class DebridFailureCache {
+  private static getCache() {
+    return Cache.getInstance<
+      string,
+      { message: string; code?: DebridErrorCode; statusCode?: number }
+    >('debrid:failure', 10_000, appConfig.bootstrap.redisUri ? 'redis' : 'sql');
+  }
+
+  /**
+   * Check whether a known failure is cached for this item and throw if so.
+   */
+  static async check(
+    serviceId: ServiceId,
+    type: 'torrent' | 'usenet',
+    key: string
+  ): Promise<void> {
+    const cached = await DebridFailureCache.getCache().get(
+      `${serviceId}:${type}:${key}`
+    );
+    if (cached) {
+      throw new DebridError(cached.message, {
+        statusCode: cached.statusCode ?? 400,
+        statusText: 'Bad Request',
+        code: cached.code,
+        headers: {},
+        body: null,
+        type: 'api_error',
+      });
+    }
+  }
+
+  /**
+   * Persist a content-level failure so future requests skip this item
+   */
+  static async mark(
+    serviceId: ServiceId,
+    type: 'torrent' | 'usenet',
+    key: string,
+    error: DebridError
+  ): Promise<void> {
+    if (DEBRID_NON_RETRYABLE_CODES.has(error.code)) return;
+    await DebridFailureCache.getCache().set(
+      `${serviceId}:${type}:${key}`,
+      {
+        message: error.message,
+        code: error.code,
+        statusCode: error.statusCode,
+      },
+      appConfig.builtins.debrid.errorCacheTtl
+    );
+  }
+}
+
+const DebridFileSchema = z.object({
+  id: z.number().optional(),
+  name: z.string().optional(),
+  size: z.number(),
+  mimeType: z.string().optional(),
+  mediaInfo: z.record(z.string(), z.unknown()).optional(),
+  link: z.string().optional(),
+  path: z.string().optional(),
+  index: z.number().optional(),
+});
+
+export type DebridFile = z.infer<typeof DebridFileSchema>;
+
+export interface DebridDownload {
+  id: string | number;
+  library?: boolean;
+  hash?: string;
+  name?: string;
+  private?: boolean;
+  size?: number;
+  addedAt?: string;
+  status:
+    | 'cached'
+    | 'downloaded'
+    | 'downloading'
+    | 'failed'
+    | 'invalid'
+    | 'processing'
+    | 'queued'
+    | 'unknown'
+    | 'uploading';
+  files?: DebridFile[];
+}
+
+const TitleMetadataSchema = z.object({
+  titles: z.array(z.string()),
+  year: z.number().optional(),
+  seasonYear: z.number().optional(),
+  country: z.string().optional(),
+  season: z.number().optional(),
+  episode: z.number().optional(),
+  absoluteEpisode: z.number().optional(),
+  relativeAbsoluteEpisode: z.number().optional(),
+  // local air dates ('YYYY-MM-DD') of the requested episode for date-based shows
+  airDates: z.array(z.string()).optional(),
+  isDateBased: z.boolean().optional(),
+});
+
+const BasePlaybackInfoSchema = z.object({
+  // title: z.string().optional(),
+  metadata: TitleMetadataSchema.optional(),
+  filename: z.string().optional(),
+  index: z.number().optional(),
+  fileIndex: z.number().optional(),
+  serviceItemId: z.string().optional(),
+});
+
+const BaseFileInfoSchema = z.object({
+  index: z.number().optional(),
+  title: z.string().optional(),
+  cacheAndPlay: z.boolean().optional(),
+  autoRemoveDownloads: z.boolean().optional(),
+  serviceItemId: z.string().optional(),
+  fileIndex: z.number().optional(),
+});
+
+const TorrentInfoSchema = BaseFileInfoSchema.extend({
+  downloadUrl: z.string().optional(),
+  hash: z.string(),
+  private: z.boolean().optional(),
+  sources: z.array(z.string()),
+  type: z.literal('torrent'),
+});
+
+const TorrentPlaybackInfoSchema =
+  BasePlaybackInfoSchema.merge(TorrentInfoSchema);
+
+const UsenetInfoSchema = BaseFileInfoSchema.extend({
+  hash: z.string(),
+  easynewsUrl: z.string().optional(),
+  nzb: z.string(),
+  releaseKey: z.string().regex(WD1_KEY_REGEX).optional().catch(undefined),
+  indexer: z.string().optional(),
+  quotaBucket: z.enum(['torrentclaw']).optional(),
+  quotaReservationKey: z.string().min(1).max(256).optional(),
+  quotaBytes: z.number().nonnegative().optional(),
+  type: z.literal('usenet'),
+});
+
+const UsenetPlaybackInfoSchema = BasePlaybackInfoSchema.merge(UsenetInfoSchema);
+
+export const PlaybackInfoSchema = z.discriminatedUnion('type', [
+  TorrentPlaybackInfoSchema,
+  UsenetPlaybackInfoSchema,
+]);
+
+export const FileInfoSchema = z.discriminatedUnion('type', [
+  TorrentInfoSchema,
+  UsenetInfoSchema,
+]);
+
+export const ServiceAuthSchema = z.object({
+  id: z.enum(constants.BUILTIN_SUPPORTED_SERVICES),
+  credential: z.string(),
+});
+export type ServiceAuth = z.infer<typeof ServiceAuthSchema>;
+
+export type PlaybackInfo = z.infer<typeof PlaybackInfoSchema>;
+export type FileInfo = z.infer<typeof FileInfoSchema>;
+export type TorrentInfo = z.infer<typeof TorrentInfoSchema>;
+export type UsenetInfo = z.infer<typeof UsenetInfoSchema>;
+export type TitleMetadata = z.infer<typeof TitleMetadataSchema>;
+
+interface BaseDebridService {
+  readonly serviceName: ServiceId;
+  readonly capabilities: { torrents: boolean; usenet: boolean };
+
+  resolve(
+    playbackInfo: PlaybackInfo,
+    filename: string,
+    cacheAndPlay: boolean,
+    autoRemoveDownloads?: boolean,
+    /**
+     * Optional abort signal used by the failover orchestrator to cancel a
+     * losing parallel attempt. Services that can honour it (e.g. native usenet)
+     * should thread it into their I/O; others may ignore it.
+     */
+    signal?: AbortSignal
+  ): Promise<string | undefined>;
+
+  refreshLibraryCache?(sources?: ('torrent' | 'nzb')[]): Promise<void>;
+}
+
+export interface TorrentDebridService extends BaseDebridService {
+  checkMagnets(
+    magnets: string[],
+    sid?: string,
+    checkOwned?: boolean
+  ): Promise<DebridDownload[]>;
+  listMagnets(): Promise<DebridDownload[]>;
+  addMagnet(magnet: string): Promise<DebridDownload>;
+  addTorrent(torrent: string): Promise<DebridDownload>;
+  getMagnet?(magnetId: string): Promise<DebridDownload>;
+  generateTorrentLink(link: string, clientIp?: string): Promise<string>;
+  removeMagnet(magnetId: string): Promise<void>;
+  getMagnet?(magnetId: string): Promise<DebridDownload>;
+}
+
+export interface UsenetDebridService extends BaseDebridService {
+  checkNzbs(
+    nzbs: { name?: string; hash?: string }[],
+    checkOwned?: boolean
+  ): Promise<DebridDownload[]>;
+  listNzbs?(id?: string): Promise<DebridDownload[]>;
+  addNzb?(nzb: string, name: string): Promise<DebridDownload>;
+  generateUsenetLink?(
+    downloadId: string,
+    fileId?: string,
+    clientIp?: string
+  ): Promise<string>;
+  removeNzb?(nzbId: string): Promise<void>;
+  getNzb?(nzbId: string): Promise<DebridDownload>;
+}
+
+export type DebridService = TorrentDebridService | UsenetDebridService;
+
+export type DebridServiceConfig = {
+  token: string;
+  clientIp?: string;
+};
+
+export function isTorrentDebridService(
+  debridService: DebridService
+): debridService is TorrentDebridService {
+  return debridService.capabilities.torrents;
+}
+
+export function isUsenetDebridService(
+  debridService: DebridService
+): debridService is UsenetDebridService {
+  return debridService.capabilities.usenet;
+}

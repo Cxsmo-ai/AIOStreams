@@ -1,0 +1,1060 @@
+﻿import {
+  CacheAndPlaySchema,
+  Manifest,
+  Meta,
+  NNTPServersSchema,
+  Stream,
+} from '../../db/schemas.js';
+import { z, ZodError } from 'zod';
+import { IdParser, IdType, ParsedId } from '../../utils/id-parser.js';
+import {
+  AnimeDatabase,
+  BuiltinServiceId,
+  constants,
+  encryptString,
+  enrichParsedIdWithAnimeEntry,
+  formatZodError,
+  fromUrlSafeBase64,
+  getSimpleTextHash,
+  getTimeTakenSincePoint,
+  SERVICE_DETAILS,
+} from '../../utils/index.js';
+import { config as appConfig } from '../../config/index.js';
+import { TorrentGrabber } from '../../utils/torrent.js';
+import {
+  BuiltinDebridServices,
+  PlaybackInfo,
+  Torrent,
+  NZB,
+  TorrentWithSelectedFile,
+  NZBWithSelectedFile,
+  UnprocessedTorrent,
+  ServiceAuth,
+  DebridError,
+  generatePlaybackUrl,
+  TitleMetadata,
+  metadataStore,
+  fileInfoStore,
+  FileInfo,
+} from '../../debrid/index.js';
+import { processTorrents, processNZBs } from '../utils/debrid.js';
+import {
+  calculateAbsoluteEpisode,
+  isNonAnimeAbsoluteEligible,
+  isPredominantlyLatin,
+} from '../utils/general.js';
+import { MetadataService } from '../../metadata/service.js';
+import { MetadataTitle, TitleConflict } from '../../metadata/utils.js';
+import { stripTitleDisambiguators } from '../../metadata/conflicts.js';
+import { countryToReleaseTag } from '../../utils/countries.js';
+import type { Logger } from '../../logging/logger.js';
+import pLimit from 'p-limit';
+import { cleanTitle, normaliseTitle } from '../../parser/utils.js';
+import { NzbDavConfig, NzbDAVService } from '../../debrid/nzbdav.js';
+import { AltmountConfig, AltmountService } from '../../debrid/altmount.js';
+import { formatHours } from '../../formatters/utils.js';
+
+export interface SearchMetadata extends TitleMetadata {
+  primaryTitle?: string;
+  year?: number;
+  imdbId?: string | null;
+  tmdbId?: number | null;
+  tvdbId?: number | null;
+  isAnime?: boolean;
+  /** Full title list with language tags, used by buildQueries for language-aware scraping. */
+  titlesWithLang?: MetadataTitle[];
+  /** ISO 639-1 code of the content's original language (from TMDB). */
+  originalLanguage?: string;
+  /** Whether the requested season is the latest season and still has an upcoming episode. */
+  ongoingSeason?: boolean;
+  /** episodeAirDates[0] — used for query generation on date-based shows. */
+  episodeAirDate?: string;
+  /** First episode number of the resolved season (>1 means continuous absolute numbering). */
+  resolvedSeasonFirstEpisode?: number;
+  /** Scene-mapping search titles, best (non-identity) first. */
+  sceneTitles?: string[];
+  titleConflicts?: TitleConflict[];
+}
+
+export const BaseDebridConfigSchema = z.object({
+  services: BuiltinDebridServices,
+  tmdbApiKey: z.string().optional(),
+  tmdbReadAccessToken: z.string().optional(),
+  tvdbApiKey: z.string().optional(),
+  cacheAndPlay: CacheAndPlaySchema.optional(),
+  autoRemoveDownloads: z.boolean().optional(),
+  checkOwned: z.boolean().optional().default(true),
+});
+export type BaseDebridConfig = z.infer<typeof BaseDebridConfigSchema>;
+
+export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
+  abstract readonly id: string;
+  abstract readonly name: string;
+  abstract readonly version: string;
+
+  get addonId(): string {
+    return `com.${this.name.toLowerCase().replace(/\s/g, '')}.viren070`;
+  }
+
+  abstract readonly logger: Logger;
+
+  protected readonly userData: T;
+  protected readonly clientIp?: string;
+
+  protected static readonly supportedIdTypes: IdType[] = [
+    'imdbId',
+    'kitsuId',
+    'malId',
+    'themoviedbId',
+    'thetvdbId',
+  ];
+
+  protected get supportedIdTypes(): IdType[] {
+    return (this.constructor as typeof BaseDebridAddon).supportedIdTypes;
+  }
+
+  /**
+   * Whether this addon needs search metadata (title, year, IDs, etc.).
+   * Set to false in subclasses that don't use metadata (e.g. EZTV).
+   * When false, getSearchMetadata() will return a minimal empty metadata object.
+   */
+  protected static readonly needsSearchMetadata: boolean = true;
+
+  protected get needsSearchMetadata(): boolean {
+    return (this.constructor as typeof BaseDebridAddon).needsSearchMetadata;
+  }
+
+  /**
+   * Promise that resolves to the search metadata. Started at the beginning of
+   * getStreams() but not awaited immediately, so implementations can do other
+   * work (e.g. fetching library lists) in parallel.
+   */
+  protected _searchMetadataPromise: Promise<SearchMetadata> | null = null;
+
+  /**
+   * Await the search metadata promise. Must be called within _searchTorrents
+   * or _searchNzbs when the implementation actually needs the metadata.
+   */
+  protected async getSearchMetadata(): Promise<SearchMetadata> {
+    if (!this._searchMetadataPromise) {
+      throw new Error(
+        'Search metadata not initialised. getSearchMetadata() must be called within _searchTorrents or _searchNzbs.'
+      );
+    }
+    return this._searchMetadataPromise;
+  }
+
+  constructor(userData: T, configSchema: z.ZodType<T>, clientIp?: string) {
+    try {
+      this.userData = configSchema.parse(userData);
+    } catch (error) {
+      throw new Error(
+        `Invalid user data: ${formatZodError(error as ZodError)}`
+      );
+    }
+
+    this.clientIp = clientIp;
+  }
+
+  public getManifest(): Manifest {
+    return {
+      id: this.addonId,
+      name: this.name,
+      version: this.version,
+      types: ['movie', 'series', 'anime'],
+      catalogs: [],
+      description: `${this.name} addon`,
+      resources: [
+        {
+          name: 'stream',
+          types: ['movie', 'series', 'anime'],
+          idPrefixes: IdParser.getPrefixes(this.supportedIdTypes),
+        },
+      ],
+    };
+  }
+
+  public async getStreams(type: string, id: string): Promise<Stream[]> {
+    const parsedId = IdParser.parse(id, type);
+    const errorStreams: Stream[] = [];
+    if (!parsedId || !this.supportedIdTypes.includes(parsedId.type)) {
+      throw new Error(`Unsupported ID: ${id}`);
+    }
+
+    this.logger.info(`Handling stream request for ${this.name}`, {
+      requestType: type,
+      requestId: id,
+    });
+
+    // Start metadata fetch in the background so implementations can do other
+    // work (e.g. fetching library lists) before awaiting it.
+    if (this.needsSearchMetadata) {
+      this._searchMetadataPromise = this._getSearchMetadata(
+        parsedId,
+        type
+      ).then((metadata) => {
+        if (metadata.primaryTitle) {
+          metadata.primaryTitle = cleanTitle(
+            metadata.primaryTitle,
+            metadata.originalLanguage
+          );
+          this.logger.debug(
+            `Cleaned primary title for ${id}: ${metadata.primaryTitle}`
+          );
+        }
+        return metadata;
+      });
+      this._searchMetadataPromise.catch(() => {});
+    } else {
+      // Provide a minimal empty metadata object for addons that don't need it
+      this._searchMetadataPromise = Promise.resolve({
+        primaryTitle: undefined,
+        titles: [],
+        season: parsedId.season ? Number(parsedId.season) : undefined,
+        episode: parsedId.episode ? Number(parsedId.episode) : undefined,
+      });
+    }
+
+    const searchPromises = await Promise.allSettled([
+      this._searchTorrents(parsedId),
+      this._searchNzbs(parsedId),
+    ]);
+
+    let torrentResults =
+      searchPromises[0].status === 'fulfilled' ? searchPromises[0].value : [];
+    const nzbResults =
+      searchPromises[1].status === 'fulfilled' ? searchPromises[1].value : [];
+
+    if (searchPromises[0].status === 'rejected') {
+      errorStreams.push(
+        this._createErrorStream({
+          title: `${this.name}`,
+          description: searchPromises[0].reason.message,
+        })
+      );
+    }
+    if (searchPromises[1].status === 'rejected') {
+      errorStreams.push(
+        this._createErrorStream({
+          title: `${this.name}`,
+          description: searchPromises[1].reason.message,
+        })
+      );
+    }
+
+    // Now await the metadata — needed for processTorrents/processNZBs and titleMetadata
+    let searchMetadata: SearchMetadata;
+    try {
+      searchMetadata = await this.getSearchMetadata();
+    } catch (error) {
+      this.logger.error(`Failed to get search metadata for ${id}: ${error}`);
+      return [
+        this._createErrorStream({
+          title: `${this.name}`,
+          description: 'Failed to get metadata',
+        }),
+      ];
+    }
+
+    const torrentsToDownload = torrentResults.filter(
+      (t) => !t.hash && t.downloadUrl
+    );
+    torrentResults = torrentResults.filter((t) => t.hash);
+    if (torrentsToDownload.length > 0) {
+      this.logger.info(
+        `Fetching metadata for ${torrentsToDownload.length} torrents`
+      );
+      const start = Date.now();
+      const metadataPromises = torrentsToDownload.map(async (torrent) => {
+        try {
+          const metadata = await TorrentGrabber.getMetadata(torrent);
+          if (!metadata) {
+            return torrent.hash ? (torrent as Torrent) : null;
+          }
+          return {
+            ...torrent,
+            hash: metadata.hash,
+            sources: metadata.sources,
+            files: metadata.files,
+            private: metadata.private,
+          } as Torrent;
+        } catch (error) {
+          return torrent.hash ? (torrent as Torrent) : null;
+        }
+      });
+
+      const enrichedResults = (await Promise.all(metadataPromises)).filter(
+        (r): r is Torrent => r !== null
+      );
+      this.logger.info(
+        `Got info for ${enrichedResults.length} torrents in ${getTimeTakenSincePoint(start)}`
+      );
+      torrentResults = [...torrentResults, ...enrichedResults];
+    }
+
+    const torrentServices = this.userData.services.filter(
+      (s) =>
+        ![
+          'nzbdav',
+          'altmount',
+          'stremio_nntp',
+          'stremthru_newz',
+          'aiostreams',
+        ].includes(s.id)
+    );
+    const nzbServices = this.userData.services.filter((s) =>
+      [
+        'nzbdav',
+        'altmount',
+        'torbox',
+        'stremio_nntp',
+        'stremthru_newz',
+        'aiostreams',
+      ].includes(s.id)
+    );
+
+    if (torrentServices.length === 0 && torrentResults.length > 0) {
+      errorStreams.push(
+        this._createErrorStream({
+          title: `${this.name}`,
+          description: `No torrent debrid services configured to process torrent results.`,
+        })
+      );
+    }
+    if (
+      nzbServices.length === 0 &&
+      nzbResults.length > 0 &&
+      !(
+        // allow no true nzb service if all have easynewsUrl and easynews is present as service.
+        (
+          nzbResults.every((nzb) => (nzb.easynewsUrl ? true : false)) &&
+          this.userData.services.some((s) => s.id === 'easynews')
+        )
+      )
+    ) {
+      errorStreams.push(
+        this._createErrorStream({
+          title: `${this.name}`,
+          description: `No usenet services configured to process NZB results.`,
+        })
+      );
+    }
+
+    const [processedTorrents, processedNzbs] = await Promise.all([
+      processTorrents(
+        torrentResults as Torrent[],
+        torrentServices,
+        id,
+        searchMetadata,
+        this.clientIp,
+        this.userData.checkOwned
+      ),
+      processNZBs(
+        nzbResults,
+        nzbServices.concat(
+          this.userData.services.filter((s) => s.id === 'easynews')
+        ),
+        id,
+        searchMetadata,
+        this.clientIp,
+        this.userData.checkOwned
+      ),
+    ]);
+
+    let servers: string[] | undefined;
+    const encodedNntpServers = this.userData?.services.find(
+      (s) => s.id === 'stremio_nntp'
+    )?.credential;
+    try {
+      if (encodedNntpServers) {
+        const nntpServers = NNTPServersSchema.parse(
+          JSON.parse(
+            Buffer.from(encodedNntpServers, 'base64').toString('utf-8')
+          )
+        );
+        // servers - array, a list of strings that each represent a connection to a NNTP (usenet) server (for nzbUrl) in the form of nntp(s)://{user}:{pass}@{nntpDomain}:{nntpPort}/{nntpConnections} (nntps = SSL; nntp = no encryption) (example: nntps://myuser:mypass@news.example.com/4)
+        servers = nntpServers.map(
+          (s) =>
+            `${s.ssl ? 'nntps' : 'nntp'}://${encodeURIComponent(
+              s.username
+            )}:${encodeURIComponent(s.password)}@${s.host}:${s.port}/${
+              s.connections
+            }`
+        );
+      }
+    } catch (error) {
+      if (error instanceof ZodError) {
+        this.logger.error(
+          `Failed to parse NNTP servers for Stremio NNTP stream: ${formatZodError(error)}`
+        );
+      }
+      throw error;
+    }
+
+    const encryptedStoreAuths = this.userData.services.reduce(
+      (acc, service) => {
+        const auth = {
+          id: service.id,
+          credential: service.credential,
+        };
+        if (service.id === 'stremio_nntp' && servers) {
+          acc[service.id] = servers;
+        } else {
+          acc[service.id] = encryptString(JSON.stringify(auth)).data ?? '';
+        }
+        return acc;
+      },
+      {} as Record<BuiltinServiceId, string | string[]>
+    );
+    const titleMetadata: TitleMetadata = {
+      titles: searchMetadata.titles,
+      year: searchMetadata.year,
+      seasonYear: searchMetadata.seasonYear,
+      country: searchMetadata.country,
+      season: searchMetadata.season,
+      episode: searchMetadata.episode,
+      absoluteEpisode: searchMetadata.absoluteEpisode,
+      relativeAbsoluteEpisode: searchMetadata.relativeAbsoluteEpisode,
+      airDates: searchMetadata.airDates,
+      isDateBased: searchMetadata.isDateBased,
+    };
+    const metadataId = getSimpleTextHash(JSON.stringify(titleMetadata));
+    await metadataStore().set(
+      metadataId,
+      titleMetadata,
+      appConfig.builtins.debrid.playbackLinkValidity,
+      true
+    );
+
+    const results = [...processedTorrents.results, ...processedNzbs.results];
+
+    let resultStreams = await Promise.all(
+      results.map((result) => {
+        return this._createStream(result, metadataId, encryptedStoreAuths);
+      })
+    );
+    const streamServiceIds = results.map((result) => result.service?.id);
+    // Flush fileInfo store so all playback URLs are resolvable before any
+    // preload/precache ping hits the /playback/ route.
+    await fileInfoStore()?.flush();
+
+    const proxied = await this._applyServiceProxying(
+      resultStreams,
+      streamServiceIds
+    );
+    resultStreams = proxied.streams;
+    errorStreams.push(...proxied.errorStreams);
+
+    [...processedTorrents.errors, ...processedNzbs.errors].forEach((error) => {
+      let errMsg = error.error.message;
+      if (error instanceof DebridError) {
+        switch (error.code) {
+          case 'UNAUTHORIZED':
+            errMsg = 'Invalid Credentials';
+        }
+      }
+      errorStreams.push(
+        this._createErrorStream({
+          title: `${this.name}`,
+          description: `[${constants.SERVICE_DETAILS[error.serviceId].shortName}] ${errMsg}`,
+        })
+      );
+    });
+
+    return [...resultStreams, ...errorStreams];
+  }
+
+  protected buildQueries(
+    parsedId: ParsedId,
+    metadata: SearchMetadata,
+    options?: {
+      addYear?: boolean;
+      addSeasonEpisode?: boolean;
+      /** @deprecated Use titleLanguages instead. */
+      useAllTitles?: boolean;
+      titleLanguages?: string[];
+    }
+  ): string[] {
+    const { addYear, addSeasonEpisode } = {
+      addYear: true,
+      addSeasonEpisode: true,
+      ...options,
+    };
+    let queries: string[] = [];
+    if (!metadata.primaryTitle) {
+      return [];
+    }
+
+    // select titles based on options
+    const titleLangs = options?.titleLanguages;
+    let titles: string[];
+
+    if (titleLangs && titleLangs.length > 0) {
+      const selected = new Set<string>();
+      for (const spec of titleLangs) {
+        if (spec === 'default') {
+          selected.add(metadata.primaryTitle);
+        } else if (spec === 'all') {
+          metadata.titlesWithLang
+            ?.slice(0, appConfig.builtins.scrape.titleLimit)
+            .forEach((t) => selected.add(cleanTitle(t.title, t.language)));
+          break; // no need to process further specs
+        } else if (spec === 'original') {
+          // First title in the content's original language (from TMDB).
+          const match = metadata.originalLanguage
+            ? metadata.titlesWithLang?.find(
+                (t) => t.language === metadata.originalLanguage
+              )
+            : undefined;
+          if (match) selected.add(cleanTitle(match.title, match.language));
+        } else if (spec === 'scene') {
+          metadata.sceneTitles
+            ?.slice(0, appConfig.builtins.scrape.titleLimit)
+            .forEach((title) => selected.add(cleanTitle(title)));
+        } else {
+          // take only the first matching title.
+          const match = metadata.titlesWithLang?.find(
+            (t) => t.language === spec
+          );
+          if (match) selected.add(cleanTitle(match.title, match.language));
+        }
+      }
+      titles = [...selected];
+      // Always fall back to primary title if nothing matched
+      if (titles.length === 0) {
+        titles = [metadata.primaryTitle];
+      }
+    } else if (options?.useAllTitles) {
+      titles = (
+        metadata.titlesWithLang ??
+        metadata.titles.map((title) => ({ title, language: undefined }))
+      )
+        .slice(0, appConfig.builtins.scrape.titleLimit)
+        .map((t) => cleanTitle(t.title, t.language));
+    } else {
+      titles = [metadata.primaryTitle];
+    }
+
+    // Drop non-Latin-script titles from queries
+    if (appConfig.builtins.scrape.latinQueriesOnly) {
+      const latin = titles.filter(isPredominantlyLatin);
+      if (latin.length > 0) titles = latin;
+    }
+
+    const titlePlaceholder = '<___title___>';
+    const addQuery = (query: string, titleList: string[] = titles) => {
+      titleList.forEach((title) => {
+        queries.push(query.replace(titlePlaceholder, title));
+      });
+    };
+    if (parsedId.mediaType === 'movie' && addYear) {
+      addQuery(
+        `${titlePlaceholder}${metadata.year ? ` ${metadata.year}` : ''}`
+      );
+    } else if (parsedId.mediaType === 'series' && addSeasonEpisode) {
+      const normSeen = new Set(titles.map((t) => normaliseTitle(t)));
+      const variantTitles: string[] = [];
+      const addVariant = (title: string) => {
+        const cleaned = cleanTitle(title);
+        const norm = normaliseTitle(cleaned);
+        if (!norm || normSeen.has(norm)) return;
+        normSeen.add(norm);
+        variantTitles.push(cleaned);
+      };
+      const primarySelected = metadata.primaryTitle
+        ? normSeen.has(normaliseTitle(metadata.primaryTitle))
+        : false;
+      if (metadata.titleConflicts?.length) {
+        const rawPrimary = metadata.titles?.[0];
+        if (primarySelected && rawPrimary) {
+          addVariant(stripTitleDisambiguators(rawPrimary));
+        }
+        if (!variantTitles.length) {
+          const year = metadata.year;
+          if (
+            year &&
+            metadata.titleConflicts.some((c) => c.year && c.year < year)
+          ) {
+            // year tagging is language-agnostic
+            for (const title of titles.slice(0, 2)) {
+              addVariant(`${title} ${year}`);
+            }
+          }
+          const tag = countryToReleaseTag(metadata.country);
+          if (
+            primarySelected &&
+            tag &&
+            metadata.titleConflicts.some(
+              (c) => c.country && c.country !== metadata.country
+            )
+          ) {
+            // country tags attach to the canonical name only
+            addVariant(`${metadata.primaryTitle} ${tag}`);
+          }
+        }
+      }
+      const seriesTitles = variantTitles.length
+        ? [...titles, ...variantTitles]
+        : titles;
+
+      // season numbers are meaningless in release names when episodes are
+      // numbered continuously across seasons
+      const continuousAbsolute = (metadata.resolvedSeasonFirstEpisode ?? 1) > 1;
+      if (
+        parsedId.season &&
+        !metadata.isDateBased &&
+        !continuousAbsolute &&
+        (parsedId.episode ? Number(parsedId.episode) < 100 : true)
+      ) {
+        addQuery(
+          `${titlePlaceholder} S${parsedId.season!.toString().padStart(2, '0')}`,
+          seriesTitles
+        );
+      }
+      if (metadata.absoluteEpisode) {
+        addQuery(
+          metadata.isAnime
+            ? `${titlePlaceholder} ${metadata.absoluteEpisode!.toString().padStart(2, '0')}`
+            : `${titlePlaceholder} E${metadata.absoluteEpisode!.toString().padStart(2, '0')}`,
+          seriesTitles
+        );
+      } else if (parsedId.episode && !parsedId.season) {
+        addQuery(
+          `${titlePlaceholder} E${parsedId.episode!.toString().padStart(2, '0')}`,
+          seriesTitles
+        );
+      }
+      if (
+        // if relative absolute exists and is different from absoluteEpisode and episode
+        metadata.relativeAbsoluteEpisode &&
+        [metadata.absoluteEpisode, parsedId.episode].every(
+          (v) => v !== metadata.relativeAbsoluteEpisode
+        )
+      ) {
+        addQuery(
+          `${titlePlaceholder} ${metadata.relativeAbsoluteEpisode!.toString().padStart(2, '0')}`,
+          seriesTitles
+        );
+      }
+      if (parsedId.season && parsedId.episode && !continuousAbsolute) {
+        addQuery(
+          `${titlePlaceholder} S${parsedId.season!.toString().padStart(2, '0')}E${parsedId.episode!.toString().padStart(2, '0')}`,
+          seriesTitles
+        );
+      }
+      // date-based releases are named by air date
+      if (metadata.isDateBased && metadata.episodeAirDate) {
+        const [yyyy, mm, dd] = metadata.episodeAirDate.split('-');
+        if (yyyy && mm && dd) {
+          const sceneAlias = metadata.sceneTitles?.[0];
+          const dateTitles = sceneAlias
+            ? [...new Set([cleanTitle(sceneAlias), ...titles])]
+            : titles;
+          addQuery(`${titlePlaceholder} ${yyyy} ${mm} ${dd}`, dateTitles);
+        }
+      }
+    } else {
+      addQuery(titlePlaceholder);
+    }
+    return queries;
+  }
+
+  protected abstract _searchTorrents(
+    parsedId: ParsedId
+  ): Promise<UnprocessedTorrent[]>;
+  protected abstract _searchNzbs(parsedId: ParsedId): Promise<NZB[]>;
+
+  protected async _getSearchMetadata(
+    parsedId: ParsedId,
+    type: string
+  ): Promise<SearchMetadata> {
+    const start = Date.now();
+
+    const animeEntry = AnimeDatabase.getInstance().getEntryById(
+      parsedId.type,
+      parsedId.value,
+      parsedId.season ? Number(parsedId.season) : undefined,
+      parsedId.episode ? Number(parsedId.episode) : undefined
+    );
+
+    // Extract seasonYear from anime entry
+    const seasonYear = animeEntry?.animeSeason?.year ?? undefined;
+
+    // Update season from anime entry if available
+    if (animeEntry && !parsedId.season) {
+      enrichParsedIdWithAnimeEntry(parsedId, animeEntry);
+    }
+
+    const metadata = await new MetadataService({
+      tmdbAccessToken: this.userData.tmdbReadAccessToken,
+      tmdbApiKey: this.userData.tmdbApiKey,
+      tvdbApiKey: this.userData.tvdbApiKey,
+    }).getMetadata(parsedId, type === 'movie' ? 'movie' : 'series');
+
+    // Calculate absolute episode if needed
+    let absoluteEpisode: number | undefined;
+    let relativeAbsoluteEpisode: number | undefined;
+    const nonAnimeAbsolute =
+      !animeEntry && isNonAnimeAbsoluteEligible(metadata);
+    if (
+      (animeEntry || nonAnimeAbsolute) &&
+      parsedId.season &&
+      parsedId.episode &&
+      metadata.seasons
+    ) {
+      const seasons = metadata.seasons.map(
+        ({ season_number, episode_count }) => ({
+          number: season_number.toString(),
+          episodes: episode_count,
+        })
+      );
+      if (nonAnimeAbsolute && (metadata.resolvedSeasonFirstEpisode ?? 1) > 1) {
+        // episodes are already numbered continuously across seasons
+        absoluteEpisode = Number(parsedId.episode);
+      } else {
+        this.logger.debug(
+          `Calculating absolute episode with current season and episode: ${parsedId.season}, ${parsedId.episode} and seasons: ${JSON.stringify(seasons)}`
+        );
+        // Calculate base absolute episode
+        absoluteEpisode = Number(
+          calculateAbsoluteEpisode(parsedId.season, parsedId.episode, seasons)
+        );
+      }
+    }
+    if (animeEntry && parsedId.season && parsedId.episode && metadata.seasons) {
+      const seasons = metadata.seasons.map(
+        ({ season_number, episode_count }) => ({
+          number: season_number.toString(),
+          episodes: episode_count,
+        })
+      );
+
+      // Calculate relative absolute episode (within current AniDB entry)
+      // Find the first season of this AniDB entry
+      const startingSeason =
+        animeEntry.imdb?.seasonNumber ??
+        animeEntry.tvdb?.seasonNumber ??
+        animeEntry.trakt?.seasonNumber ??
+        animeEntry.tmdb?.seasonNumber;
+
+      if (startingSeason) {
+        // Calculate absolute episode from the starting season (AniDB episode number)
+        const currentSeasonNum = Number(parsedId.season);
+        const episodeNum = Number(parsedId.episode);
+        let totalEpisodesBeforeCurrentSeason = 0;
+
+        for (const s of seasons.filter((s) => s.number !== '0')) {
+          const seasonNum = Number(s.number);
+          if (seasonNum < startingSeason) continue; // Skip seasons before this AniDB entry
+          if (s.number === parsedId.season) break;
+          totalEpisodesBeforeCurrentSeason += s.episodes;
+        }
+
+        const calculated = totalEpisodesBeforeCurrentSeason + episodeNum;
+        // Only set if different from regular episode number
+        if (calculated !== episodeNum) {
+          relativeAbsoluteEpisode = calculated;
+        }
+      }
+
+      const parsedSeasonRecord = seasons.find(
+        (s) => s.number === parsedId.season
+      );
+      const isAlreadyAbsoluteForNonImdb =
+        parsedSeasonRecord !== undefined &&
+        Number(parsedId.episode) > parsedSeasonRecord.episodes;
+
+      if (
+        animeEntry?.imdb?.nonImdbEpisodes &&
+        absoluteEpisode &&
+        parsedId.type === 'imdbId' &&
+        !isAlreadyAbsoluteForNonImdb
+      ) {
+        const nonImdbEpisodesBefore = animeEntry.imdb.nonImdbEpisodes.filter(
+          (ep) => ep < absoluteEpisode!
+        ).length;
+        if (nonImdbEpisodesBefore > 0) {
+          absoluteEpisode += nonImdbEpisodesBefore;
+        }
+
+        if (relativeAbsoluteEpisode) {
+          const nonImdbEpisodesBeforeRelative =
+            animeEntry.imdb.nonImdbEpisodes.filter(
+              (ep) => ep < relativeAbsoluteEpisode!
+            ).length;
+          if (nonImdbEpisodesBeforeRelative > 0) {
+            relativeAbsoluteEpisode += nonImdbEpisodesBeforeRelative;
+          }
+        }
+      }
+    }
+
+    // // Map IDs
+    const imdbId =
+      parsedId.type === 'imdbId'
+        ? parsedId.value.toString()
+        : animeEntry?.mappings?.imdbId?.toString();
+    // const tmdbId =
+    //   parsedId.type === 'themoviedbId'
+    //     ? parsedId.value.toString()
+    //     : (animeEntry?.mappings?.themoviedbId?.toString() ?? null);
+    // const tvdbId =
+    //   parsedId.type === 'thetvdbId'
+    //     ? parsedId.value.toString()
+    //     : (animeEntry?.mappings?.thetvdbId?.toString() ?? null);
+
+    const searchMetadata: SearchMetadata = {
+      primaryTitle: metadata.title,
+      titles: metadata.titles?.map((t) => t.title) ?? [],
+      titlesWithLang: metadata.titles ?? [],
+      originalLanguage: metadata.originalLanguage,
+      season: parsedId.season ? Number(parsedId.season) : undefined,
+      episode: parsedId.episode ? Number(parsedId.episode) : undefined,
+      absoluteEpisode,
+      relativeAbsoluteEpisode,
+      year: metadata.year,
+      seasonYear,
+      imdbId,
+      tmdbId: metadata.tmdbId ?? null,
+      tvdbId: metadata.tvdbId ?? null,
+      isAnime: animeEntry ? true : false,
+      ongoingSeason:
+        metadata.nextAirDate && metadata.seasons?.length
+          ? Number(parsedId.season) ===
+            Math.max(...metadata.seasons.map((s) => s.season_number))
+          : undefined,
+      isDateBased: metadata.isDateBased,
+      airDates: metadata.episodeAirDates,
+      episodeAirDate: metadata.episodeAirDate,
+      resolvedSeasonFirstEpisode: metadata.resolvedSeasonFirstEpisode,
+      sceneTitles: metadata.sceneTitles,
+      country: metadata.country,
+      titleConflicts: metadata.titleConflicts,
+    };
+
+    this.logger.debug(
+      `Got search metadata for ${parsedId.type}:${parsedId.value} in ${getTimeTakenSincePoint(start)}`,
+      {
+        ...searchMetadata,
+        titles: searchMetadata.titles.length,
+        titlesWithLang: searchMetadata.titlesWithLang?.length,
+      }
+    );
+
+    return searchMetadata;
+  }
+
+  protected _createStream(
+    torrentOrNzb: TorrentWithSelectedFile | NZBWithSelectedFile,
+    metadataId: string,
+    encryptedStoreAuths: Record<BuiltinServiceId, string | string[]>
+  ): Stream {
+    // Handle debrid streaming
+    const encryptedStoreAuth = torrentOrNzb.service
+      ? encryptedStoreAuths?.[torrentOrNzb.service?.id]
+      : undefined;
+
+    const fileInfo: FileInfo | undefined = torrentOrNzb.service
+      ? torrentOrNzb.type === 'torrent'
+        ? {
+            type: 'torrent',
+            downloadUrl: torrentOrNzb.downloadUrl,
+            title: torrentOrNzb.title,
+            hash: torrentOrNzb.hash,
+            private: torrentOrNzb.private,
+            sources: torrentOrNzb.sources,
+            index: torrentOrNzb.file.index,
+            cacheAndPlay:
+              this.userData.cacheAndPlay?.enabled &&
+              this.userData.cacheAndPlay?.streamTypes?.includes('torrent'),
+            autoRemoveDownloads: this.userData.autoRemoveDownloads,
+            serviceItemId: torrentOrNzb.serviceItemId,
+          }
+        : {
+            type: 'usenet',
+            nzb: torrentOrNzb.nzb,
+            title: torrentOrNzb.title,
+            hash: torrentOrNzb.hash,
+            releaseKey: torrentOrNzb.releaseKey,
+            indexer: torrentOrNzb.indexer,
+            quotaBucket: torrentOrNzb.indexer
+              ?.toLowerCase()
+              .includes('torrentclaw')
+              ? 'torrentclaw'
+              : undefined,
+            quotaReservationKey: torrentOrNzb.quotaReservationKey,
+            quotaBytes: torrentOrNzb.quotaBytes,
+            index: torrentOrNzb.file.index,
+            easynewsUrl:
+              torrentOrNzb.service?.id === 'easynews'
+                ? torrentOrNzb.easynewsUrl
+                : undefined,
+            cacheAndPlay:
+              this.userData.cacheAndPlay?.enabled &&
+              this.userData.cacheAndPlay?.streamTypes?.includes('usenet'),
+            autoRemoveDownloads: this.userData.autoRemoveDownloads,
+            serviceItemId: torrentOrNzb.serviceItemId,
+          }
+      : undefined;
+
+    const svcMeta = torrentOrNzb.service
+      ? SERVICE_DETAILS[torrentOrNzb.service.id]
+      : undefined;
+    // const svcMeta = SERVICE_DETAILS[torrentOrNzb.service.id];
+    const isPrivate =
+      torrentOrNzb.type === 'torrent' ? torrentOrNzb.private : undefined;
+    const shortCode = svcMeta?.shortName || 'P2P';
+    const cacheIndicator = torrentOrNzb.service
+      ? torrentOrNzb.service.cached
+        ? '⚡'
+        : '⏳'
+      : '';
+    const isFreeleech = torrentOrNzb?.downloadvolumefactor === 0;
+
+    const name = `${torrentOrNzb.service?.library ? '🗃️ ' : ''}${isPrivate ? '🔑 ' : ''}[${shortCode} ${cacheIndicator}] ${this.name} ${isFreeleech ? 'FREELEECH' : ''} `;
+    const description = `${torrentOrNzb.title ? torrentOrNzb.title : ''}\n${torrentOrNzb.file.name ? torrentOrNzb.file.name : ''}\n${
+      torrentOrNzb.indexer ? `🔍 ${torrentOrNzb.indexer}` : ''
+    } ${'seeders' in torrentOrNzb && torrentOrNzb.seeders ? `👤 ${torrentOrNzb.seeders}` : ''} ${
+      torrentOrNzb.age ? `🕒 ${formatHours(torrentOrNzb.age)}` : ''
+    } ${torrentOrNzb.group ? `\n🏷️ ${torrentOrNzb.group}` : ''}`;
+
+    return {
+      url:
+        torrentOrNzb.service && torrentOrNzb.service.id != 'stremio_nntp'
+          ? generatePlaybackUrl(
+              encryptedStoreAuth! as string,
+              metadataId!,
+              fileInfo!,
+              torrentOrNzb.file.name ?? torrentOrNzb.title
+            )
+          : undefined,
+      nzbUrl: torrentOrNzb.type === 'usenet' ? torrentOrNzb.nzb : undefined,
+      releaseKey:
+        torrentOrNzb.type === 'usenet' ? torrentOrNzb.releaseKey : undefined,
+      idMatched: torrentOrNzb.confirmed === true ? true : undefined,
+      servers:
+        torrentOrNzb.service?.id === 'stremio_nntp'
+          ? (encryptedStoreAuth as string[])
+          : undefined,
+      name,
+      description,
+      type:
+        torrentOrNzb.service?.id === 'stremio_nntp'
+          ? 'stremio-usenet'
+          : torrentOrNzb.type,
+      age: torrentOrNzb.age,
+      infoHash: torrentOrNzb.type === 'torrent' ? torrentOrNzb.hash : undefined,
+      fileIdx: torrentOrNzb.file.index,
+      behaviorHints: {
+        videoSize: torrentOrNzb.file.size,
+        filename: torrentOrNzb.file.name,
+        folderSize: torrentOrNzb.size,
+      },
+      parsedMediaInfo: torrentOrNzb.parsedMediaInfo,
+    };
+  }
+
+  protected _createErrorStream({
+    title,
+    description,
+  }: {
+    title: string;
+    description: string;
+  }): Stream {
+    return {
+      name: `[❌] ${title}`,
+      description: description,
+      externalUrl: 'stremio:///',
+    };
+  }
+
+  protected async _applyServiceProxying(
+    streams: Stream[],
+    streamServiceIds: Array<BuiltinServiceId | undefined>
+  ): Promise<{ streams: Stream[]; errorStreams: Stream[] }> {
+    const errorStreams: Stream[] = [];
+
+    let resultStreams = [...streams];
+    const serviceIds = [...streamServiceIds];
+
+    let nzbdavAuth: z.infer<typeof NzbDavConfig> | undefined;
+    let altmountAuth: z.infer<typeof AltmountConfig> | undefined;
+
+    const encodedNzbdavAuth = this.userData.services.find(
+      (s) => s.id === 'nzbdav'
+    )?.credential;
+    const encodedAltmountAuth = this.userData.services.find(
+      (s) => s.id === 'altmount'
+    )?.credential;
+
+    if (encodedNzbdavAuth) {
+      const { success, data } = NzbDavConfig.safeParse(
+        JSON.parse(fromUrlSafeBase64(encodedNzbdavAuth))
+      );
+      if (success) {
+        nzbdavAuth = data;
+      }
+    }
+
+    if (encodedAltmountAuth) {
+      const { success, data } = AltmountConfig.safeParse(
+        JSON.parse(fromUrlSafeBase64(encodedAltmountAuth))
+      );
+      if (success) {
+        altmountAuth = data;
+      }
+    }
+
+    const setProxyHeaders = (
+      serviceId: BuiltinServiceId,
+      authorization?: string
+    ) => {
+      resultStreams = resultStreams.map((stream, i) => {
+        if (serviceIds[i] !== serviceId) return stream;
+
+        return {
+          ...stream,
+          behaviorHints: {
+            ...stream.behaviorHints,
+            notWebReady: true,
+            proxyHeaders: authorization
+              ? {
+                  request: {
+                    Authorization: authorization,
+                  },
+                }
+              : undefined,
+          },
+        };
+      });
+    };
+
+    const nzbdavBasicAuth =
+      nzbdavAuth?.webdavUser && nzbdavAuth?.webdavPassword
+        ? `Basic ${Buffer.from(
+            `${nzbdavAuth.webdavUser}:${nzbdavAuth.webdavPassword}`
+          ).toString('base64')}`
+        : undefined;
+    const altmountBasicAuth =
+      altmountAuth?.webdavUser && altmountAuth?.webdavPassword
+        ? `Basic ${Buffer.from(
+            `${altmountAuth.webdavUser}:${altmountAuth.webdavPassword}`
+          ).toString('base64')}`
+        : undefined;
+
+    // Only stamp proxy headers / notWebReady when the service will NOT proxy
+    // itself at resolve time.
+    if (nzbdavAuth && !nzbdavAuth.aiostreamsAuth) {
+      setProxyHeaders('nzbdav', nzbdavBasicAuth);
+    }
+
+    if (altmountAuth && !altmountAuth.aiostreamsAuth) {
+      setProxyHeaders('altmount', altmountBasicAuth);
+    }
+
+    return {
+      streams: resultStreams,
+      errorStreams,
+    };
+  }
+}

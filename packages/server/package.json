@@ -1,0 +1,28 @@
+{
+  "name": "@aiostreams/server",
+  "version": "0.0.0",
+  "main": "dist/server.js",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest watch",
+    "dev": "cross-env NODE_ENV=development tsx watch src/server.ts",
+    "build": "tsc",
+    "prepublish": "npm run build"
+  },
+  "description": "Combine all your streams into one addon and display them with consistent formatting, sorting, and filtering.",
+  "dependencies": {
+    "@aiostreams/core": "workspace:*",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.1",
+    "multer": "^2.1.1",
+    "rate-limit-redis": "^4.3.1",
+    "undici": "^7.25.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^20.19.39"
+  }
+}
