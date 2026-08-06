@@ -30,7 +30,7 @@ type TorrentClawFormattingOptions = {
   showScore?: boolean;
   showTorBoxIndicator?: boolean;
   showTrueSpec?: boolean;
-  showUnarr?: boolean;
+
 };
 
 type TorrentClawRemappingOptions = {
@@ -44,7 +44,7 @@ type TorrentClawRemappingOptions = {
 };
 
 type TorrentClawPresetOptions = {
-  usenetEnabled?: boolean;
+
   playback?: TorrentClawPlaybackOptions;
   remapping?: TorrentClawRemappingOptions;
   formatting?: TorrentClawFormattingOptions;
@@ -95,13 +95,13 @@ function isTorrentClawSeasonPack(stream: Stream): boolean {
 
   const hasEpisode = /\bS\d{1,2}\s*E\d{1,3}\b/i.test(filename);
   return (
-    /\bS\d{1,2}\s*[-–]\s*S?\d{1,2}\b/i.test(filename) ||
-    /\bS\d{1,2}\s*E\d{1,3}\s*[-–]\s*(?:(?:S\d{1,2}\s*)?E)?\d{1,3}\b/i.test(
+    /\bS\d{1,2}\s*[-Ã¢â‚¬â€œ]\s*S?\d{1,2}\b/i.test(filename) ||
+    /\bS\d{1,2}\s*E\d{1,3}\s*[-Ã¢â‚¬â€œ]\s*(?:(?:S\d{1,2}\s*)?E)?\d{1,3}\b/i.test(
       filename
     ) ||
-    /\b\d{1,2}x\d{1,3}\s*[-–]\s*\d{1,3}\b/i.test(filename) ||
+    /\b\d{1,2}x\d{1,3}\s*[-Ã¢â‚¬â€œ]\s*\d{1,3}\b/i.test(filename) ||
     /\b(?:complete|collection|season(?:s)?|temporada)\b/i.test(filename) ||
-    /\b(?:сезон|серии)\b/iu.test(filename) ||
+    /\b(?:Ã‘ÂÃÂµÃÂ·ÃÂ¾ÃÂ½|Ã‘ÂÃÂµÃ‘â‚¬ÃÂ¸ÃÂ¸)\b/iu.test(filename) ||
     (!hasEpisode && /(?:^|[[(\s])S\d{1,2}(?=$|[\])\s])/i.test(filename))
   );
 }
@@ -369,19 +369,19 @@ export class TorrentClawStreamParser extends StreamParser {
     const providers: Array<{ id: ServiceId; pattern: RegExp }> = [
       {
         id: constants.REALDEBRID_SERVICE,
-        pattern: /(?:^|[\s·|[(])(?:RD|REAL[- ]?DEBRID)(?=$|[\s·|)\]])/i,
+        pattern: /(?:^|[\sÃ‚Â·|[(])(?:RD|REAL[- ]?DEBRID)(?=$|[\sÃ‚Â·|)\]])/i,
       },
       {
         id: constants.ALLDEBRID_SERVICE,
-        pattern: /(?:^|[\s·|[(])(?:AD|ALL[- ]?DEBRID)(?=$|[\s·|)\]])/i,
+        pattern: /(?:^|[\sÃ‚Â·|[(])(?:AD|ALL[- ]?DEBRID)(?=$|[\sÃ‚Â·|)\]])/i,
       },
       {
         id: constants.TORBOX_SERVICE,
-        pattern: /(?:^|[\s·|[(])(?:TB|TORBOX)(?=$|[\s·|)\]])/i,
+        pattern: /(?:^|[\sÃ‚Â·|[(])(?:TB|TORBOX)(?=$|[\sÃ‚Â·|)\]])/i,
       },
       {
         id: constants.PREMIUMIZE_SERVICE,
-        pattern: /(?:^|[\s·|[(])(?:PM|PREMIUMIZE)(?=$|[\s·|)\]])/i,
+        pattern: /(?:^|[\sÃ‚Â·|[(])(?:PM|PREMIUMIZE)(?=$|[\sÃ‚Â·|)\]])/i,
       },
     ];
     const provider = providers.find(({ pattern }) => pattern.test(text));
@@ -402,8 +402,8 @@ export class TorrentClawStreamParser extends StreamParser {
 
   protected override getReleaseGroup(stream: Stream): string | undefined {
     return this.getLines(stream)
-      .find((line) => /🏷️?/.test(line))
-      ?.replace(/^.*?🏷️?\s*/u, '')
+      .find((line) => /Ã°Å¸ÂÂ·Ã¯Â¸Â?/.test(line))
+      ?.replace(/^.*?Ã°Å¸ÂÂ·Ã¯Â¸Â?\s*/u, '')
       .trim();
   }
 
@@ -428,19 +428,18 @@ export class TorrentClawStreamParser extends StreamParser {
     const lines = this.getLines(stream);
     const score = lines.find((line) => /\b\d{1,3}\/100\b/.test(line));
     const trueSpec = lines.find((line) => /\btruespec\b/i.test(line));
-    const unarr = lines.find((line) => /\bunarr\b/i.test(line));
+
     const isAction = !stream.url && Boolean(stream.externalUrl);
     const suffix: string[] = [];
 
     if (this.options.showScore !== false && score) {
       suffix.push(
         this.options.showTorBoxIndicator === false
-          ? score.replace(/\s*·\s*TB\b/gi, '').trim()
+          ? score.replace(/\s*Ã‚Â·\s*TB\b/gi, '').trim()
           : score
       );
     }
     if (this.options.showTrueSpec !== false && trueSpec) suffix.push(trueSpec);
-    if (this.options.showUnarr !== false && unarr) suffix.push(unarr);
 
     return {
       ...(super.getExtras(stream, currentParsedStream) || {}),
@@ -450,7 +449,7 @@ export class TorrentClawStreamParser extends StreamParser {
           : undefined,
         torBox: /\bTB\b/.test(score || ''),
         trueSpec: Boolean(trueSpec),
-        unarr: Boolean(unarr),
+
       },
       formattingPassthrough: isAction,
       formattingSuffix: suffix,
@@ -479,16 +478,7 @@ export class TorrentClawPreset extends Preset {
           appConfig.presets.defaultTimeout,
         appConfig.presets.torrentclaw.url
       ),
-      {
-        id: 'usenetEnabled',
-        name: 'Enable NZB / Usenet',
-        description:
-          'Accept TorrentClaw NZB-compatible results and route them through the configured AIOStreams NNTP providers. TorrentClaw itself currently publishes torrent results; this stays dormant until an NZB result is present.',
-        type: 'boolean',
-        required: false,
-        default: false,
-        showInSimpleMode: true,
-      },
+      
       {
         id: 'nzbMonthlyLimitGb',
         name: 'TorrentClaw NZB Monthly Limit (GB)',
@@ -526,7 +516,7 @@ export class TorrentClawPreset extends Preset {
             id: 'watchInBrowser',
             name: 'Watch in Browser',
             description:
-              'Show TorrentClaw’s external browser-player source card.',
+              'Show TorrentClawÃ¢â‚¬â„¢s external browser-player source card.',
             type: 'boolean',
             default: false,
           },
@@ -542,7 +532,7 @@ export class TorrentClawPreset extends Preset {
             id: 'unavailableNotices',
             name: 'Unavailable Notices',
             description:
-              'Show TorrentClaw’s “no instant streams” informational card.',
+              'Show TorrentClawÃ¢â‚¬â„¢s Ã¢â‚¬Å“no instant streamsÃ¢â‚¬Â informational card.',
             type: 'boolean',
             default: false,
           },
@@ -659,7 +649,7 @@ export class TorrentClawPreset extends Preset {
           {
             id: 'showScore',
             name: 'TorrentClaw Score',
-            description: 'Preserve TorrentClaw’s quality score indicator.',
+            description: 'Preserve TorrentClawÃ¢â‚¬â„¢s quality score indicator.',
             type: 'boolean',
             default: true,
           },
@@ -678,14 +668,7 @@ export class TorrentClawPreset extends Preset {
             type: 'boolean',
             default: true,
           },
-          {
-            id: 'showUnarr',
-            name: 'Unarr Indicator',
-            description:
-              'Preserve the Unarr indicator whenever TorrentClaw supplies it.',
-            type: 'boolean',
-            default: true,
-          },
+          
         ],
       },
       {
@@ -734,13 +717,13 @@ export class TorrentClawPreset extends Preset {
         appConfig.http.defaultUserAgent,
       SUPPORTED_SERVICES: supportedServices,
       DESCRIPTION:
-        'AI-verified torrent, debrid and Unarr streams with quality scores, TrueSpec indicators, and automatic metadata-ID repair.',
+        'AI-verified torrent and debrid streams with quality scores, TrueSpec indicators, and automatic metadata-ID repair.',
       OPTIONS: options,
       SUPPORTED_STREAM_TYPES: [
         constants.P2P_STREAM_TYPE,
         constants.DEBRID_STREAM_TYPE,
         constants.EXTERNAL_STREAM_TYPE,
-        constants.STREMIO_USENET_STREAM_TYPE,
+
       ],
       SUPPORTED_RESOURCES: supportedResources,
       CATEGORY: constants.PresetCategory.STREAMS,
@@ -764,11 +747,7 @@ export class TorrentClawPreset extends Preset {
     const options = (addon.preset.options || {}) as TorrentClawPresetOptions;
     const playback = options.playback || {};
     const remapping = options.remapping || {};
-    const original = filterTorrentClawPlaybackActions(streams, playback).filter(
-      (stream) =>
-        options.usenetEnabled === true ||
-        stream.type !== constants.STREMIO_USENET_STREAM_TYPE
-    );
+    const original = filterTorrentClawPlaybackActions(streams, playback).filter((stream) => stream.type !== constants.STREMIO_USENET_STREAM_TYPE);
 
     if (remapping.enabled === false || !/^tt\d+/i.test(id)) {
       return enrichSeasonPackSizes(original, type, options.formatting || {});
