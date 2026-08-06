@@ -1,0 +1,18 @@
+name: Delete Old Workflow Runs
+on: [push]
+jobs:
+  del_runs:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete workflow runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_ids=$(gh api repos/${{ github.repository }}/actions/runs --paginate -q ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id")
+          for id in $run_ids; do
+            echo "Deleting run $id"
+            gh api -X DELETE repos/${{ github.repository }}/actions/runs/$id || true
+            sleep 0.5
+          done
