@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.32.0](https://github.com/Cxsmo-ai/AIOStreams/compare/v2.31.1...v2.32.0) (2026-08-06)
+
+
+### Features
+
+* update AIOStreams with TorrentClaw and Unarr usenet integration ([ee3be33](https://github.com/Cxsmo-ai/AIOStreams/commit/ee3be33dafe697a16d5cc49f28fc42bec833fcac))
+
+
+### Bug Fixes
+
+* default version to 2.31.1 and add addon description fallback in manifest ([082d4ab](https://github.com/Cxsmo-ai/AIOStreams/commit/082d4ab95a1dd1f221299325c513ccdcbb093438))
+* delete tsbuildinfo files in Docker build to force full re-compilation ([a901625](https://github.com/Cxsmo-ai/AIOStreams/commit/a901625ac96035f98f37390775d9123039412600))
+* enforce tsc --force to ensure dist files recompile clean manifest version and description ([5bbd911](https://github.com/Cxsmo-ai/AIOStreams/commit/5bbd911f3cb2bbc685c6810889a7f11e0372e207))
+* handle missing git gracefully in generateMetadata script ([6be82bc](https://github.com/Cxsmo-ai/AIOStreams/commit/6be82bcfea9c1f37454cbc8bb8e63ea78b81bc6d))
+* purge stale dist folders in Docker build to force clean typescript recompilation ([741ce3d](https://github.com/Cxsmo-ai/AIOStreams/commit/741ce3d608a138824c7e747efc9b9511880300d8))
+* remove residual usenetEnabled type usage ([9adee02](https://github.com/Cxsmo-ai/AIOStreams/commit/9adee0228e4e075b4afe29211afa41b0095f4649))
+* remove rimraf from root build script ([7484ecc](https://github.com/Cxsmo-ai/AIOStreams/commit/7484ecc525d1dfce6bb9ab289d3ab5012bb9e405))
+* scrub all remaining unarr and usenet fields from torrentclaw preset ([e3f2b87](https://github.com/Cxsmo-ai/AIOStreams/commit/e3f2b879d522f8d066e07449cc1d69d60f9ebbe3))
+* strip UTF-8 BOM from manifest.ts ([333de7d](https://github.com/Cxsmo-ai/AIOStreams/commit/333de7d378889b096466c017ba72461e45c5c854))
+* use tsc --build --force for typescript compilation ([d015dc8](https://github.com/Cxsmo-ai/AIOStreams/commit/d015dc82492b5372c71642e74de5c3e04527e577))
+
 ## [2.31.1](https://github.com/Viren070/AIOStreams/compare/v2.31.0...v2.31.1) (2026-07-17)
 
 
