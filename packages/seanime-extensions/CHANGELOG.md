@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/Cxsmo-ai/AIOStreams/compare/seanime-extensions-v0.9.0...seanime-extensions-v0.10.0) (2026-08-06)
+
+
+### Features
+
+* update AIOStreams with TorrentClaw and Unarr usenet integration ([ee3be33](https://github.com/Cxsmo-ai/AIOStreams/commit/ee3be33dafe697a16d5cc49f28fc42bec833fcac))
+
 ## [0.9.0](https://github.com/Viren070/AIOStreams/compare/seanime-extensions-v0.8.3...seanime-extensions-v0.9.0) (2026-07-08)
 
 
