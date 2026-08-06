@@ -30,7 +30,7 @@ type TorrentClawFormattingOptions = {
   showScore?: boolean;
   showTorBoxIndicator?: boolean;
   showTrueSpec?: boolean;
-  showUnarr?: boolean;
+  
 };
 
 type TorrentClawRemappingOptions = {
@@ -653,14 +653,7 @@ export class TorrentClawPreset extends Preset {
             type: 'boolean',
             default: true,
           },
-          {
-            id: 'showUnarr',
-            name: 'Unarr Indicator',
-            description:
-              'Preserve the Unarr indicator whenever TorrentClaw supplies it.',
-            type: 'boolean',
-            default: true,
-          },
+          
         ],
       },
       {
