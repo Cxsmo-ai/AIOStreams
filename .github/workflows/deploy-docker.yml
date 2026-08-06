@@ -157,9 +157,9 @@ jobs:
         run: |
           for tag in ${TAGS}; do
             docker buildx imagetools create \
-              -t "ghcr.io/cxsmo-ai/aiostreams:${tag}" \
-              "ghcr.io/cxsmo-ai/aiostreams@$(cat /tmp/digests/amd64)" \
-              "ghcr.io/cxsmo-ai/aiostreams@$(cat /tmp/digests/arm64)"
+              -t "ghcr.io/${REPO}:${tag}" \
+              "ghcr.io/${REPO}@$(cat /tmp/digests/amd64)" \
+              "ghcr.io/${REPO}@$(cat /tmp/digests/arm64)"
           done
 
       
