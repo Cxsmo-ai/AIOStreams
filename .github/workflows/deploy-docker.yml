@@ -32,8 +32,12 @@ jobs:
           INPUT_REF: ${{ inputs.ref }}
         run: |
           declare TAGS=""
-          case "${INPUT_REF}" in
-          v[0-9]*.[0-9]*.[0-9]*)
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            TAGS="latest main-${GITHUB_SHA::7}"
+            CHANNEL="nightly"
+          else
+            case "${INPUT_REF}" in
+            v[0-9]*.[0-9]*.[0-9]*)
             TAGS="${INPUT_REF}"
             if [[ "$(git rev-parse origin/main)" = "$(git rev-parse "${INPUT_REF}")" ]]; then
               MAJOR_MINOR=$(echo "${INPUT_REF}" | sed -E 's/v([0-9]+)\.([0-9]+)\.[0-9]+/\1.\2/')
@@ -47,10 +51,11 @@ jobs:
             CHANNEL="nightly"
             ;;
           *)
-            echo "Invalid Input Ref: ${INPUT_REF}"
-            exit 1
-            ;;
-          esac
+              echo "Invalid Input Ref: ${INPUT_REF}"
+              exit 1
+              ;;
+            esac
+          fi
 
           if [[ -z "${TAGS}" ]]; then
             echo "Empty Tags!"
