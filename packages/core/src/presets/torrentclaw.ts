@@ -741,7 +741,7 @@ export class TorrentClawPreset extends Preset {
     const remapping = options.remapping || {};
     const original = filterTorrentClawPlaybackActions(streams, playback).filter(
       (stream) =>
-        options.usenetEnabled === true ||
+        
         stream.type !== constants.STREMIO_USENET_STREAM_TYPE
     );
 
