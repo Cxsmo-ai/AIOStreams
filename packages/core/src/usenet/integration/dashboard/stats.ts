@@ -12,6 +12,7 @@ import {
   LiveStreamInfo,
   CacheStats,
   EngineOptions,
+  providerBackupTier,
 } from '../../index.js';
 import { usenetEngineRegistry, getUsenetEngineConfig } from '../engine.js';
 
@@ -38,6 +39,7 @@ export interface UsenetProviderStatRow {
   host: string;
   enabled: boolean;
   isBackup: boolean;
+  backupTier: number;
   priority: number;
   live: ProviderLiveInfo;
   articles: number;
@@ -240,7 +242,8 @@ function idlePool(
       max: p.maxConnections,
       tripped: false,
       throttled: false,
-      isBackup: p.isBackup ?? false,
+      isBackup: providerBackupTier(p) > 0,
+      backupTier: providerBackupTier(p),
       freeSlots: 0,
       throughput: 0,
       queued: 0,
@@ -357,7 +360,8 @@ export async function getUsenetStatsOverview(
       name: cfg?.name,
       host: cfg?.host ?? id,
       enabled: cfg ? cfg.enabled !== false : false,
-      isBackup: cfg?.isBackup ?? info?.isBackup ?? false,
+      isBackup: cfg ? providerBackupTier(cfg) > 0 : (info?.isBackup ?? false),
+      backupTier: cfg ? providerBackupTier(cfg) : (info?.backupTier ?? 0),
       priority: cfg?.priority ?? 0,
       live: {
         state: info?.state ?? (cfg ? 'offline' : 'disabled'),
@@ -388,9 +392,7 @@ export async function getUsenetStatsOverview(
   // Sort by usage desc, keeping configured-but-idle providers after active ones.
   providers.sort((a, b) => b.articles - a.articles || a.priority - b.priority);
 
-  const lastErrorByIndexer = new Map(
-    indexerErrors.map((e) => [e.indexer, e])
-  );
+  const lastErrorByIndexer = new Map(indexerErrors.map((e) => [e.indexer, e]));
   const totalGrabs = indexerSummary.reduce((s, i) => s + i.grabs, 0);
   const indexers: UsenetIndexerStatRow[] = indexerSummary
     .map((agg) => {

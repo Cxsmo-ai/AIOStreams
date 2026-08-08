@@ -75,6 +75,8 @@ AIOStreams includes built-in search engines, indexers, and integrations hosted d
 - **TorrentClaw Integration**: Advanced cache detection (`[Cached]` / `[Uncached]`), automatic title remapping, season pack sizing, and custom TorrentClaw formatting hooks for clean, standardized stream layouts across torrent and Usenet results.
 - **TorrentClaw Usenet Indexer**: Toggle allowing TorrentClaw to serve as a Usenet indexer for AIOStreams (supporting NNTP, Unarr indexer integration, and smart quota optimization designed to sustain 200GB download limits through heavy monthly usage).
 - **Unarr Indexer**: Native Usenet indexer support with per-config key validation.
+- **Evidence-based Addon Rankings**: A privacy-safe dashboard ranks addon availability, surviving contribution, top-result wins, errors, latency, and source-size leadership. Statistics use normalized daily counter rollups instead of retaining titles, media IDs, stream URLs, or per-result records.
+- **NNTP Emergency Tiers**: Put unlimited accounts in primary tier 0 and metered block accounts in ordered fallback tiers 1, 2, and upward. Providers can still load-balance inside a tier, and existing `isBackup` configurations remain compatible as tier 1.
 - **Built-in Search Engines & Integrations**: Support for Google Drive, TorBox Search, Knaben, Easynews, SeaDex, Prowlarr, Jackett, Newznab, Torznab, and library browsing.
 
 > [!NOTE]

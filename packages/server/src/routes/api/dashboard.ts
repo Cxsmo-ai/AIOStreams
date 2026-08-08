@@ -151,8 +151,7 @@ router.post('/logs/clear', (req, res) => {
         success: false,
         error: {
           code: 'CONFIRMATION_REQUIRED',
-          message:
-            'Clearing logs is destructive and requires confirmation.',
+          message: 'Clearing logs is destructive and requires confirmation.',
         },
       })
     );
@@ -563,6 +562,13 @@ router.get('/analytics/requests', async (req, res) => {
 
 router.get('/analytics/addons', async (req, res) => {
   const data = await AnalyticsRepository.addons(parseRange(req.query.range));
+  res.status(200).json(createResponse({ success: true, data }));
+});
+
+router.get('/analytics/addon-performance', async (req, res) => {
+  const data = await AnalyticsRepository.addonPerformance(
+    parseRange(req.query.range)
+  );
   res.status(200).json(createResponse({ success: true, data }));
 });
 
