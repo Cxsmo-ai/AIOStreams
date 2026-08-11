@@ -1167,6 +1167,18 @@ export const ParsedStreamSchema = z.object({
       cached: z.boolean(),
     })
     .optional(),
+  torbox: z
+    .object({
+      service: z.literal('TB'),
+      mode: z.enum(['native', 'stream']),
+      target: z.enum(['native', '1080p', '720p']),
+      cacheState: z.enum(['cached', 'uncached', 'unknown']),
+      cacheAndPlay: z.boolean(),
+      audio: z.string(),
+      subtitle: z.string(),
+      nativeFallback: z.boolean(),
+    })
+    .optional(),
   /**Duration in milliseconds */
   duration: z.number().optional(),
   /**Bitrate in bps */

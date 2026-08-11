@@ -172,6 +172,15 @@ export interface ParseValue {
     name: string | null;
     cached: boolean | null;
   };
+  torbox?: {
+    service: string | null;
+    mode: string | null;
+    target: string | null;
+    cache: string | null;
+    audio: string | null;
+    subtitle: string | null;
+    fallback: string | null;
+  };
   addon?: {
     name: string | null;
     presetId: string | null;
@@ -674,7 +683,8 @@ export abstract class BaseFormatter {
         daysSinceFirstAired: this.formatterContext.daysSinceFirstAired ?? null,
         daysSinceLastAired: this.formatterContext.daysSinceLastAired ?? null,
         hasNextEpisode: this.formatterContext.hasNextEpisode ?? false,
-        daysUntilNextEpisode: this.formatterContext.daysUntilNextEpisode ?? null,
+        daysUntilNextEpisode:
+          this.formatterContext.daysUntilNextEpisode ?? null,
         anilistId: this.formatterContext.anilistId ?? null,
         malId: this.formatterContext.malId ?? null,
         hasSeaDex: this.formatterContext.hasSeaDex ?? false,
@@ -698,6 +708,17 @@ export abstract class BaseFormatter {
           : null,
         cached:
           stream.service?.cached !== undefined ? stream.service?.cached : null,
+      },
+      torbox: {
+        service: stream.torbox?.service ?? null,
+        mode: stream.torbox?.mode.toUpperCase() ?? null,
+        target: stream.torbox?.target.toUpperCase() ?? null,
+        cache: stream.torbox?.cacheState.toUpperCase() ?? null,
+        audio: stream.torbox?.audio ?? null,
+        subtitle: stream.torbox?.subtitle ?? null,
+        fallback: stream.torbox?.nativeFallback
+          ? 'NATIVE IF TRACKS MISSING'
+          : null,
       },
     };
     // spreading invokes the getters above, so every field is still present,

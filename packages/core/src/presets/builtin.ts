@@ -16,6 +16,7 @@ import {
 import { Preset } from './preset.js';
 import { releaseKeyKind } from '../release-blocklist/keys.js';
 import { stremthruSpecialCases } from './stremthru.js';
+import { getTorboxRouteConfig } from '../debrid/torbox-config.js';
 
 export class BuiltinStreamParser extends StreamParser {
   protected override getReleaseKey(stream: Stream): string | undefined {
@@ -285,6 +286,7 @@ export class BuiltinAddonPreset extends Preset {
       tmdbReadAccessToken: userData.tmdbAccessToken,
       tmdbApiKey: userData.tmdbApiKey,
       tvdbApiKey: userData.tvdbApiKey,
+      torbox: getTorboxRouteConfig(userData),
       services: services.map((service) => ({
         id: service,
         credential: this.getServiceCredential(service, userData),

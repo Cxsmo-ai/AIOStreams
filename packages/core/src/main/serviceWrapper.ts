@@ -16,6 +16,7 @@ import {
   fileInfoStore,
   TitleMetadata,
   FileInfo,
+  getTorboxRouteConfig,
 } from '../debrid/index.js';
 import { processTorrents } from '../builtins/utils/debrid.js';
 import { StreamContext } from '../streams/context.js';
@@ -436,6 +437,10 @@ async function buildDebridStreams(
               userData.cacheAndPlay?.enabled &&
               userData.cacheAndPlay?.streamTypes?.includes('torrent'),
             autoRemoveDownloads: userData.autoRemoveDownloads,
+            torbox:
+              result.service.id === 'torbox'
+                ? getTorboxRouteConfig(userData)
+                : undefined,
           }
         : undefined;
 

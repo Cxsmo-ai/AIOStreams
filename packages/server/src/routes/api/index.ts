@@ -7,6 +7,7 @@ export { default as catalogApi } from './catalog.js';
 export { default as postersApi } from './posters.js';
 export { default as gdriveApi } from './gdrive.js';
 export { default as debridApi } from './debrid.js';
+export { default as torboxApi } from './torbox.js';
 export { default as searchApi } from './search.js';
 export { default as animeApi } from './anime.js';
 export { default as proxyApi } from './proxy.js';

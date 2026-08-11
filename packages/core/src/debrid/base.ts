@@ -217,6 +217,15 @@ const TitleMetadataSchema = z.object({
   isDateBased: z.boolean().optional(),
 });
 
+export const TorboxRouteSchema = z.object({
+  quality: z.enum(['native', '1080p', '720p']).default('native'),
+  audioLanguage: z.string().default('auto'),
+  subtitleLanguage: z.string().default('off'),
+  appendFilename: z.boolean().default(false),
+  torrentCacheAndPlay: z.boolean().optional(),
+  usenetCacheAndPlay: z.boolean().optional(),
+});
+
 const BasePlaybackInfoSchema = z.object({
   // title: z.string().optional(),
   metadata: TitleMetadataSchema.optional(),
@@ -224,6 +233,7 @@ const BasePlaybackInfoSchema = z.object({
   index: z.number().optional(),
   fileIndex: z.number().optional(),
   serviceItemId: z.string().optional(),
+  torbox: TorboxRouteSchema.optional(),
 });
 
 const BaseFileInfoSchema = z.object({
@@ -233,6 +243,7 @@ const BaseFileInfoSchema = z.object({
   autoRemoveDownloads: z.boolean().optional(),
   serviceItemId: z.string().optional(),
   fileIndex: z.number().optional(),
+  torbox: TorboxRouteSchema.optional(),
 });
 
 const TorrentInfoSchema = BaseFileInfoSchema.extend({
@@ -319,7 +330,7 @@ export interface TorrentDebridService extends BaseDebridService {
 
 export interface UsenetDebridService extends BaseDebridService {
   checkNzbs(
-    nzbs: { name?: string; hash?: string }[],
+    nzbs: { name?: string; hash?: string; nzb?: string }[],
     checkOwned?: boolean
   ): Promise<DebridDownload[]>;
   listNzbs?(id?: string): Promise<DebridDownload[]>;
