@@ -385,6 +385,37 @@ type RankedDeepbridResult = {
   confirmed: boolean;
 };
 
+export function prioritizeDeepbridSeasonPacks(
+  ranked: RankedDeepbridResult[],
+  media: NewshostingMediaRequest,
+  limit: number
+): RankedDeepbridResult[] {
+  const cappedLimit = Math.max(0, limit);
+  if (
+    cappedLimit === 0 ||
+    media.type !== 'series' ||
+    media.season === undefined
+  ) {
+    return ranked.slice(0, cappedLimit);
+  }
+
+  // Exact episode searches can produce enough high-scoring results to fill
+  // the resolve budget before a season pack is reached. Reserve a small part
+  // of that budget for matching packs and resolve them first, while retaining
+  // the original ranking for the rest.
+  const packs = ranked.filter((item) => {
+    const parsed = parseNewshostingRelease(item.result.title);
+    return parsed.season === media.season && parsed.seasonPack === true;
+  });
+  const packLimit = Math.min(packs.length, Math.max(1, Math.ceil(cappedLimit / 4)));
+  const selectedPacks = packs.slice(0, packLimit);
+  const packTokens = new Set(selectedPacks.map((item) => item.result.token));
+  return [
+    ...selectedPacks,
+    ...ranked.filter((item) => !packTokens.has(item.result.token)),
+  ].slice(0, cappedLimit);
+}
+
 type ResolvedDeepbridFile = RankedDeepbridResult & {
   file: DeepbridFinderFile;
   archiveExpanded: boolean;
@@ -555,8 +586,12 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           b.score - a.score ||
           b.result.sources - a.result.sources ||
           b.result.size - a.result.size
-      )
-      .slice(0, this.userData.maxContentResolves);
+      );
+    const candidates = prioritizeDeepbridSeasonPacks(
+      ranked,
+      media,
+      this.userData.maxContentResolves
+    );
 
     this.logger.info(
       {
@@ -567,11 +602,15 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         ).length,
         finderResults: finderResults.length,
         confirmedResults: ranked.length,
+        contentCandidates: candidates.length,
+        seasonPackCandidates: candidates.filter(
+          (item) => parseNewshostingRelease(item.result.title).seasonPack
+        ).length,
       },
       'Deepbrid Finder search completed'
     );
 
-    const resolved = await resolveDeepbridFiles(ranked, media, {
+    const resolved = await resolveDeepbridFiles(candidates, media, {
       concurrency: this.userData.resolveConcurrency,
       maxResults: this.userData.maxResults,
       deadline,
@@ -620,6 +659,8 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           bingeGroup: `deepbrid-usenet|${file.name.toLowerCase()}`,
           deepbridSeasonPack:
             parseNewshostingRelease(result.title).seasonPack === true,
+          deepbridReleaseTitle: result.title,
+          deepbridReleaseSize: result.size || undefined,
           deepbridArchiveExpanded: archiveExpanded,
         },
       } satisfies Stream;

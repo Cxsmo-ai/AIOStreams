@@ -5,6 +5,7 @@ import {
   chooseDeepbridVideoFiles,
   createDeepbridPlaybackToken,
   decodeDeepbridPlaybackToken,
+  prioritizeDeepbridSeasonPacks,
   resolveDeepbridFiles,
 } from './addon.js';
 import {
@@ -262,6 +263,40 @@ test('adds an explicit season query without dropping exact episode search', () =
   assert.equal(queries.includes('Tower Prep'), true);
 });
 
+test('reserves resolver capacity for matching season packs', () => {
+  const result = (token: string, title: string, score: number) => ({
+    result: {
+      token,
+      title,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 1,
+    },
+    score,
+    confirmed: true,
+  });
+  const ranked = [
+    result('episode-1', 'Tower Prep S01E05 1080p', 1_500),
+    result('episode-2', 'Tower Prep S01E05 720p', 1_400),
+    result('pack-1', 'Tower Prep S01 Complete 1080p', 1_200),
+    result('pack-2', 'Tower Prep S01 Pack 720p', 1_100),
+    result('other-pack', 'Tower Prep S02 Complete 1080p', 1_000),
+  ];
+
+  assert.deepEqual(
+    prioritizeDeepbridSeasonPacks(
+      ranked,
+      { type: 'series', season: 1, episode: 5 },
+      3
+    ).map((item) => item.result.token),
+    ['pack-1', 'episode-1', 'episode-2']
+  );
+});
+
 test('parses Deepbrid direct links as formatted Usenet without a fake service', () => {
   const parser = new TestDeepbridParser(parserAddon);
   const stream: Stream = {
@@ -313,6 +348,23 @@ test('offers only Deepbrid-compatible formatting controls', () => {
   ]) {
     assert.equal(serialized.includes(torrentClawSpecific), false);
   }
+});
+
+test('exposes season-pack provenance separately from the selected episode size', () => {
+  const packTitle = 'Example Show S01 Complete 1080p';
+  const packSize = 20 * 1024 ** 3;
+  const episodeSize = 2 * 1024 ** 3;
+  const behaviorHints = {
+    filename: 'Example.Show.S01E05.mkv',
+    videoSize: episodeSize,
+    deepbridSeasonPack: true,
+    deepbridReleaseTitle: packTitle,
+    deepbridReleaseSize: packSize,
+  };
+
+  assert.equal(behaviorHints.videoSize, episodeSize);
+  assert.equal(behaviorHints.deepbridReleaseSize, packSize);
+  assert.equal(behaviorHints.deepbridReleaseTitle, packTitle);
 });
 
 test('uses AIOStreams formatting by default and supports an explicit opt-out', () => {
