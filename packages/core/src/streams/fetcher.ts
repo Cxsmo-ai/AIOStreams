@@ -43,6 +43,32 @@ export interface AddonDispositionInfo {
 
 export type AddonDispositionMap = Map<string, AddonDispositionInfo>;
 
+export interface AddonStatistic {
+  title: string;
+  description: string;
+  manifestUrl?: string;
+  rawCount?: number;
+}
+
+export function reconcileAddonStatisticCount(
+  statistic: AddonStatistic,
+  finalCount: number
+): AddonStatistic {
+  const rawCount = Math.max(finalCount, statistic.rawCount ?? finalCount);
+  const removed = rawCount - finalCount;
+  const countText =
+    removed > 0
+      ? `${finalCount} unique (${rawCount} resolved; ${removed} duplicate${removed === 1 ? '' : 's'} merged)`
+      : `${finalCount}`;
+  return {
+    ...statistic,
+    description: statistic.description.replace(
+      /(Streams\s*:\s*)[^\r\n]*/,
+      `$1${countText}`
+    ),
+  };
+}
+
 const logger = createLogger('fetcher');
 
 class StreamFetcher {
@@ -70,10 +96,7 @@ class StreamFetcher {
       title?: string;
       description?: string;
     }[];
-    statistics: {
-      title: string;
-      description: string;
-    }[];
+    statistics: AddonStatistic[];
     /** Per-addon outcome map used by per-user analytics. */
     dispositions: AddonDispositionMap;
   }> {
@@ -85,10 +108,7 @@ class StreamFetcher {
       title: string;
       description: string;
     }[] = [];
-    const allStatisticStreams: {
-      title: string;
-      description: string;
-    }[] = [];
+    const allStatisticStreams: AddonStatistic[] = [];
     let allStreams: ParsedStream[] = [];
     const start = Date.now();
 
@@ -185,6 +205,8 @@ class StreamFetcher {
           }
 ⏱️ Time       : ${getTimeTakenSincePoint(start)}
 `,
+          manifestUrl: addon.manifestUrl,
+          rawCount: usableStreams.length,
         };
 
         logger.debug(
@@ -255,6 +277,23 @@ class StreamFetcher {
         )
       );
 
+      const survivorCounts = new Map<string, number>();
+      for (const stream of filteredStreams) {
+        const manifestUrl = stream.addon.manifestUrl;
+        survivorCounts.set(
+          manifestUrl,
+          (survivorCounts.get(manifestUrl) ?? 0) + 1
+        );
+      }
+      const reconciledStatistics = groupStatistics.map((statistic) =>
+        statistic.manifestUrl
+          ? reconcileAddonStatisticCount(
+              statistic,
+              survivorCounts.get(statistic.manifestUrl) ?? 0
+            )
+          : statistic
+      );
+
       // Run preferred matching AFTER filter
       await this.precompute.precomputePreferred(filteredStreams, context);
 
@@ -265,7 +304,7 @@ class StreamFetcher {
       return {
         totalTime: Date.now() - groupStart,
         streams: filteredStreams,
-        statistics: groupStatistics,
+        statistics: reconciledStatistics,
         errors: groupErrors,
       };
     };
