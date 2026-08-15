@@ -117,7 +117,9 @@ export function getSpeedTestEngineConfig(provider: ProviderConfig): {
 } {
   const u = appConfig.usenet;
   const options = buildUsenetEngineOptions([provider]);
-  const pipelineDepth = Math.max(1, provider.pipelineDepth ?? 1);
+  // Match the normal engine fallback for legacy provider records that predate
+  // the pipelineDepth setting. Explicit depth 1 remains sequential by choice.
+  const pipelineDepth = Math.max(1, provider.pipelineDepth ?? 2);
   const prefetchSegments = options.prefetchSegments ?? u.prefetchSegments;
   return {
     options,

@@ -295,8 +295,12 @@ export class LocalSegmentFetcher implements SegmentFetcher {
     private opts: EngineOptions,
     private stats: StatsSink
   ) {
+    // Keep programmatic/legacy provider records aligned with the config
+    // schema.  Records created before pipelineDepth existed omit the field;
+    // treating those as sequential silently disables NNTP pipelining on the
+    // normal playback path.  Explicit depth 1 still opts into sequential IO.
     const depthOf = (p: ProviderConfig): number =>
-      Math.max(1, p.pipelineDepth ?? 1);
+      Math.max(1, p.pipelineDepth ?? 2);
     this.pools = providers
       .filter((p) => p.enabled !== false)
       .map((p) => {
