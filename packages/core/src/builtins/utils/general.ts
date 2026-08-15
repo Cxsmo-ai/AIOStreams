@@ -6,6 +6,40 @@ import pLimit from 'p-limit';
 
 const logger = createLogger('builtin:scrape');
 
+// Search caches prevent repeated work after the first request, but a burst of
+// identical cold requests can still otherwise fan out to the upstream indexer
+// before the first response is stored. Keep the in-flight map scoped to the
+// cache instance so unrelated addons/configurations never share results.
+const inFlightSearches = new WeakMap<
+  object,
+  Map<string, Promise<unknown>>
+>();
+
+async function runSearchSingleFlight<T>(
+  searchCache: Cache<string, T>,
+  searchCacheKey: string,
+  fetchFn: () => Promise<T>
+): Promise<T> {
+  let flights = inFlightSearches.get(searchCache);
+  if (!flights) {
+    flights = new Map<string, Promise<unknown>>();
+    inFlightSearches.set(searchCache, flights);
+  }
+
+  const existing = flights.get(searchCacheKey);
+  if (existing) return existing as Promise<T>;
+
+  const flight = Promise.resolve().then(fetchFn);
+  flights.set(searchCacheKey, flight);
+  try {
+    return await flight;
+  } finally {
+    if (flights.get(searchCacheKey) === flight) {
+      flights.delete(searchCacheKey);
+    }
+  }
+}
+
 export const createQueryLimit = () =>
   pLimit(appConfig.builtins.scrape.queryConcurrency);
 
@@ -260,19 +294,27 @@ export async function searchWithBackgroundRefresh<T>(
     return cachedResult;
   }
 
-  const result = await fetchFn();
+  return runSearchSingleFlight(searchCache, searchCacheKey, async () => {
+    // Re-check the cache after joining the single-flight boundary. Another
+    // caller may have completed the write between the initial read and this
+    // request being scheduled.
+    const populated = await searchCache.get(searchCacheKey);
+    if (populated !== undefined) return populated;
 
-  // Don't cache empty results
-  if (!isEmptyResult(result)) {
-    await searchCache.set(searchCacheKey, result, cacheTTL);
-    await bgRefreshCache.set(
-      bgCacheKey,
-      Date.now(),
-      appConfig.builtins.torrent.minimumBackgroundRefreshInterval
-    );
-  }
+    const result = await fetchFn();
 
-  return result;
+    // Don't cache empty results
+    if (!isEmptyResult(result)) {
+      await searchCache.set(searchCacheKey, result, cacheTTL);
+      await bgRefreshCache.set(
+        bgCacheKey,
+        Date.now(),
+        appConfig.builtins.torrent.minimumBackgroundRefreshInterval
+      );
+    }
+
+    return result;
+  });
 }
 
 /**
@@ -310,20 +352,25 @@ function triggerBackgroundRefresh<T>(options: {
         return;
       }
 
-      // Perform background refresh
+      // Perform background refresh. It shares the same single-flight boundary
+      // as cold callers, preventing duplicate upstream requests during a
+      // cache-expiry burst.
       logger.debug(`Starting background refresh for: ${searchCacheKey}`);
-      const freshResult = await fetchFn();
+      await runSearchSingleFlight(searchCache, searchCacheKey, async () => {
+        const freshResult = await fetchFn();
 
-      // Update cache if result is not empty
-      if (!isEmptyResult(freshResult)) {
-        await searchCache.set(searchCacheKey, freshResult, cacheTTL, true);
-        await bgRefreshCache.set(
-          bgCacheKey,
-          now,
-          appConfig.builtins.torrent.minimumBackgroundRefreshInterval
-        );
-        logger.info(`Background refreshed cache for: ${searchCacheKey}`);
-      }
+        // Update cache if result is not empty
+        if (!isEmptyResult(freshResult)) {
+          await searchCache.set(searchCacheKey, freshResult, cacheTTL, true);
+          await bgRefreshCache.set(
+            bgCacheKey,
+            now,
+            appConfig.builtins.torrent.minimumBackgroundRefreshInterval
+          );
+          logger.info(`Background refreshed cache for: ${searchCacheKey}`);
+        }
+        return freshResult;
+      });
     } catch (error) {
       logger.error(
         `Background refresh failed for: ${searchCacheKey} - ${error instanceof Error ? error.message : 'Unknown error'}`

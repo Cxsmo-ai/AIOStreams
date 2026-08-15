@@ -47,6 +47,10 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
   private readonly indexers: string[] = [];
   private readonly tags: string[] = [];
   private readonly sources: string[] = [];
+  private readonly selectedIndexersByProtocol = new Map<
+    'torrent' | 'usenet',
+    Promise<ProwlarrApiIndexer[]>
+  >();
   constructor(config: ProwlarrAddonConfig, clientIp?: string) {
     super(config, ProwlarrAddonConfigSchema, clientIp);
 
@@ -128,6 +132,25 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
    * Get indexers filtered by protocol (torrent or usenet)
    */
   private async getIndexersByProtocol(
+    protocol: 'torrent' | 'usenet'
+  ): Promise<ProwlarrApiIndexer[]> {
+    const existing = this.selectedIndexersByProtocol.get(protocol);
+    if (existing) return existing;
+
+    const selection = this.loadIndexersByProtocol(protocol);
+    this.selectedIndexersByProtocol.set(protocol, selection);
+    try {
+      return await selection;
+    } catch (error) {
+      // Allow a transient metadata failure to be retried on the next scrape.
+      if (this.selectedIndexersByProtocol.get(protocol) === selection) {
+        this.selectedIndexersByProtocol.delete(protocol);
+      }
+      throw error;
+    }
+  }
+
+  private async loadIndexersByProtocol(
     protocol: 'torrent' | 'usenet'
   ): Promise<ProwlarrApiIndexer[]> {
     let availableIndexers: ProwlarrApiIndexer[] = [];
