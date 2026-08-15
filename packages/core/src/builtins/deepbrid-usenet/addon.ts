@@ -664,12 +664,17 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         // individual resolved entries still preserves every distinct stream.
         const probeCache = new Map<string, Promise<boolean>>();
         return (file, requestOptions) => {
-          const cached = probeCache.get(file.link);
+          // The byte signature check also uses the filename extension, so
+          // keep that part of the key to avoid cross-extension false sharing.
+          const extension =
+            file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
+          const cacheKey = `${file.link}\u0000${extension}`;
+          const cached = probeCache.get(cacheKey);
           if (cached) return cached;
           const probe = deepbridNetworkLimit(() =>
             probeDeepbridVideo(file, this.userData.apiKey, requestOptions)
           );
-          probeCache.set(file.link, probe);
+          probeCache.set(cacheKey, probe);
           return probe;
         };
       })(),
