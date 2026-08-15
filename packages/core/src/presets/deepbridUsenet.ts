@@ -108,7 +108,7 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
         name: 'Resolve Concurrency',
         description: 'How many Deepbrid content requests may run at once.',
         type: 'number',
-        default: 10,
+        default: 5,
         showInSimpleMode: false,
         constraints: { min: 1, max: 10, forceInUi: false },
       },
@@ -184,7 +184,7 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
       apiKey: options.apiKey,
       maxResults: options.maxResults ?? 20,
       maxContentResolves: options.maxContentResolves ?? 15,
-      resolveConcurrency: options.resolveConcurrency ?? 10,
+      resolveConcurrency: options.resolveConcurrency ?? 5,
       timeout: options.timeout ?? 30_000,
     });
     const encrypted = encryptString(JSON.stringify(config));

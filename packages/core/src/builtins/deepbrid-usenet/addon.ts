@@ -44,7 +44,7 @@ export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
   apiKey: z.string().trim().min(16).max(512),
   maxResults: z.number().int().min(1).max(50).default(20),
   maxContentResolves: z.number().int().min(1).max(30).default(15),
-  resolveConcurrency: z.number().int().min(1).max(10).default(10),
+  resolveConcurrency: z.number().int().min(1).max(10).default(5),
   timeout: z.number().int().min(1_000).max(120_000).default(30_000),
 });
 export type DeepbridUsenetConfig = z.infer<typeof DeepbridUsenetConfigSchema>;
@@ -642,8 +642,8 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     // Older generated addon configs defaulted to three workers. Keep those
     // configs fast after an upgrade while retaining the hard safety cap.
     const resolveConcurrency = Math.max(
-      10,
-      Math.min(10, this.userData.resolveConcurrency)
+      5,
+      Math.min(5, this.userData.resolveConcurrency)
     );
     const resolved = await resolveDeepbridFiles(candidates, media, {
       concurrency: resolveConcurrency,
