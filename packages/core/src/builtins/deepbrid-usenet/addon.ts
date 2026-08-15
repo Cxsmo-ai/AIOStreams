@@ -313,7 +313,9 @@ export async function probeDeepbridVideo(
     const headers: Record<string, string> = {
       Accept: '*/*',
       'Accept-Encoding': 'identity',
-      Range: 'bytes=0-65535',
+      // Container signatures are within the first few dozen bytes. Keep the
+      // preflight cheap while still requiring a real ranged video response.
+      Range: 'bytes=0-63',
     };
     if (isDeepbridHost(target.hostname)) {
       headers.Authorization = `Bearer ${apiKey}`;
@@ -656,10 +658,21 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         deepbridNetworkLimit(() =>
           client.getContent(token, archives, requestOptions)
         ),
-      probeFile: (file, requestOptions) =>
-        deepbridNetworkLimit(() =>
-          probeDeepbridVideo(file, this.userData.apiKey, requestOptions)
-        ),
+      probeFile: (() => {
+        // Finder can return the same CDN link under multiple releases. A
+        // single preflight is sufficient for that URL; retaining the
+        // individual resolved entries still preserves every distinct stream.
+        const probeCache = new Map<string, Promise<boolean>>();
+        return (file, requestOptions) => {
+          const cached = probeCache.get(file.link);
+          if (cached) return cached;
+          const probe = deepbridNetworkLimit(() =>
+            probeDeepbridVideo(file, this.userData.apiKey, requestOptions)
+          );
+          probeCache.set(file.link, probe);
+          return probe;
+        };
+      })(),
     });
     this.logger.info(
       {
