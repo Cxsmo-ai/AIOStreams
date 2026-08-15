@@ -61,7 +61,9 @@ const providerConfigSchema = z.object({
   backupTier: z.number().int().min(0).max(99).optional(),
   isBackup: z.boolean().optional(),
   enabled: z.boolean().optional(),
-  pipelineDepth: z.number().int().min(1).max(20).optional(),
+  // Conservative default: keeps a connection busy without the aggressive
+  // provider load of large pipelines. Explicit values still override it.
+  pipelineDepth: z.number().int().min(1).max(20).default(2),
 });
 
 /** A fraction in the closed interval [0, 1]; accepts numeric env strings. */

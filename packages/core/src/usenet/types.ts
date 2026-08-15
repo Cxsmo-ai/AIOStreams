@@ -36,10 +36,10 @@ export interface ProviderConfig {
   /** Admin toggle to disable without deleting. */
   enabled?: boolean;
   /**
-   * Max in-flight `BODY`/`STAT` commands per connection (NNTP pipelining). `1`
-   * (default) = sequential. Higher hides per-article latency so fewer
-   * connections saturate a fast/high-latency link. Defaults to `1` (off) when
-   * unset.
+   * Max in-flight `BODY`/`STAT` commands per connection (NNTP pipelining). `2`
+   * is the conservative default. Higher values hide more per-article latency;
+   * set `1` to force sequential behavior for providers that do not tolerate
+   * pipelining.
    */
   pipelineDepth?: number;
 }
@@ -273,7 +273,7 @@ export function providerSetFingerprint(
       priority: p.priority,
       backupTier: providerBackupTier(p),
       // Depth changes pool sizing (pipeline slots), so it must rebuild the engine.
-      pipelineDepth: p.pipelineDepth ?? 0,
+      pipelineDepth: p.pipelineDepth ?? 2,
     }))
     .sort((a, b) =>
       `${a.host}:${a.port}:${a.username}`.localeCompare(

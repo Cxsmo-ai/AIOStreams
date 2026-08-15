@@ -40,8 +40,9 @@ export function buildUsenetEngineOptions(
   providers: ProviderConfig[]
 ): Partial<EngineOptions> {
   const u = appConfig.usenet;
+  const defaultPipelineDepth = 2;
   const depthOf = (p: ProviderConfig): number =>
-    Math.max(1, p.pipelineDepth ?? 1);
+    Math.max(1, p.pipelineDepth ?? defaultPipelineDepth);
   const sumPipelineSlots = providers.reduce(
     (n, p) => n + (p.maxConnections || 0) * depthOf(p),
     0
