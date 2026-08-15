@@ -7,6 +7,7 @@ import ProwlarrApi, {
   ProwlarrApiSearchItem,
   ProwlarrApiError,
   ProwlarrApiTagItem,
+  PROWLARR_INTERACTIVE_TIMEOUT_MS,
 } from './api.js';
 import { ParsedId } from '../../utils/id-parser.js';
 import { SearchMetadata } from '../base/debrid.js';
@@ -31,6 +32,7 @@ export const ProwlarrAddonConfigSchema = BaseDebridConfigSchema.extend({
 export type ProwlarrAddonConfig = z.infer<typeof ProwlarrAddonConfigSchema>;
 
 const logger = createLogger('prowlarr');
+const PROWLARR_RESULT_LIMIT = 500;
 
 export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
   readonly id = 'prowlarr';
@@ -134,10 +136,14 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
     if (this.preconfiguredInstance && ProwlarrAddon.preconfiguredIndexers) {
       availableIndexers = ProwlarrAddon.preconfiguredIndexers;
     } else {
-      try {
-        const { data } = await this.api.indexers();
-        availableIndexers = data;
-      } catch (error) {
+      const [indexersResult, tagsResult] = await Promise.allSettled([
+        this.api.indexers(),
+        this.api.tags(),
+      ]);
+      if (indexersResult.status === 'fulfilled') {
+        availableIndexers = indexersResult.value.data;
+      } else {
+        const error = indexersResult.reason;
         if (error instanceof ProwlarrApiError) {
           throw new Error(
             `Failed to get Prowlarr indexers: ${error.message}: ${error.status} - ${error.statusText}`
@@ -145,15 +151,24 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
         }
         throw new Error(`Failed to get Prowlarr indexers: ${error}`);
       }
+      if (tagsResult.status === 'fulfilled') {
+        chosenTags = tagsResult.value.data
+          .filter((tag) => this.tags.includes(tag.label.toLowerCase()))
+          .map((tag) => tag.id);
+      } else {
+        logger.warn(`Failed to get Prowlarr tags: ${tagsResult.reason}`);
+      }
     }
 
-    try {
-      const { data } = await this.api.tags();
-      chosenTags = data
-        .filter((tag) => this.tags.includes(tag.label.toLowerCase()))
-        .map((tag) => tag.id);
-    } catch (error) {
-      logger.warn(`Failed to get Prowlarr tags: ${error}`);
+    if (this.preconfiguredInstance && ProwlarrAddon.preconfiguredIndexers) {
+      try {
+        const { data } = await this.api.tags();
+        chosenTags = data
+          .filter((tag) => this.tags.includes(tag.label.toLowerCase()))
+          .map((tag) => tag.id);
+      } catch (error) {
+        logger.warn(`Failed to get Prowlarr tags: ${error}`);
+      }
     }
 
     const chosenIndexers = availableIndexers.filter(
@@ -214,7 +229,7 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
           query: q,
           indexerIds: chosenIndexers.map((indexer) => indexer.id),
           type: 'search',
-          limit: 2000,
+          limit: PROWLARR_RESULT_LIMIT,
         });
         this.logger.info(
           `Prowlarr ${protocol} search for ${q} took ${getTimeTakenSincePoint(start)}`,
@@ -227,7 +242,10 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
     );
     return collectProwlarrResultsUntilDeadline(
       searchPromises,
-      appConfig.builtins.prowlarr.searchTimeout + 10_000,
+      Math.min(
+        appConfig.builtins.prowlarr.searchTimeout,
+        PROWLARR_INTERACTIVE_TIMEOUT_MS
+      ) + 1_000,
       (error) =>
         this.logger.warn(
           `Prowlarr ${protocol} query failed: ${error instanceof Error ? error.message : String(error)}`

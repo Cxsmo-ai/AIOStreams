@@ -83,6 +83,7 @@ const ProwlarrApiSearchItemSchema = z.object({
 const ProwlarrApiSearchSchema = z.array(ProwlarrApiSearchItemSchema);
 
 const logger = createLogger('prowlarr');
+export const PROWLARR_INTERACTIVE_TIMEOUT_MS = 8_000;
 
 export type ProwlarrApiSearchItem = z.infer<typeof ProwlarrApiSearchItemSchema>;
 
@@ -177,7 +178,8 @@ class ProwlarrApi {
             ...(limit !== undefined && { limit }),
             ...(offset !== undefined && { offset }),
           },
-          ProwlarrApiSearchSchema
+          ProwlarrApiSearchSchema,
+          Math.min(this.#timeout, PROWLARR_INTERACTIVE_TIMEOUT_MS)
         ),
       isEmptyResult: (result) => result.data.length === 0,
       logger,
