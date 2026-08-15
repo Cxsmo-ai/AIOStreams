@@ -44,7 +44,7 @@ export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
   apiKey: z.string().trim().min(16).max(512),
   maxResults: z.number().int().min(1).max(50).default(20),
   maxContentResolves: z.number().int().min(1).max(30).default(15),
-  resolveConcurrency: z.number().int().min(1).max(5).default(3),
+  resolveConcurrency: z.number().int().min(1).max(5).default(5),
   timeout: z.number().int().min(1_000).max(120_000).default(30_000),
 });
 export type DeepbridUsenetConfig = z.infer<typeof DeepbridUsenetConfigSchema>;
@@ -452,79 +452,103 @@ export async function resolveDeepbridFiles(
   options: ResolveDeepbridOptions
 ): Promise<ResolvedDeepbridFile[]> {
   const now = options.now ?? Date.now;
-  const resolved: ResolvedDeepbridFile[] = [];
+  const resolvedByIndex = new Map<number, ResolvedDeepbridFile[]>();
   const concurrency = Math.max(1, Math.min(5, options.concurrency));
+  let nextIndex = 0;
+  let resolvedCount = 0;
+  let activeCandidates = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      if (
+        resolvedCount + activeCandidates >= options.maxResults ||
+        options.signal?.aborted ||
+        remainingRequestBudget(options.deadline, now) <
+          DEEPBRID_MIN_REQUEST_BUDGET_MS
+      ) {
+        return;
+      }
+      const index = nextIndex++;
+      if (index >= ranked.length) return;
+      const item = ranked[index];
+      activeCandidates += 1;
+      try {
+        const release = parseNewshostingRelease(item.result.title);
+        const seasonPack =
+          media.type === 'series' &&
+          media.season !== undefined &&
+          release.season === media.season &&
+          release.seasonPack === true;
+        let timeoutMs = remainingRequestBudget(options.deadline, now);
+        if (timeoutMs < DEEPBRID_MIN_REQUEST_BUDGET_MS) return;
 
-  for (let offset = 0; offset < ranked.length; offset += concurrency) {
-    if (
-      resolved.length >= options.maxResults ||
-      options.signal?.aborted ||
-      remainingRequestBudget(options.deadline, now) <
-        DEEPBRID_MIN_REQUEST_BUDGET_MS
-    ) {
-      break;
-    }
-
-    const batch = ranked.slice(offset, offset + concurrency);
-    const batchResolved = await Promise.all(
-      batch.map(async (item): Promise<ResolvedDeepbridFile[]> => {
-        try {
-          let timeoutMs = remainingRequestBudget(options.deadline, now);
-          if (timeoutMs < DEEPBRID_MIN_REQUEST_BUDGET_MS) return [];
-          let content = await options.getContent(item.result.token, false, {
+        // Finder can expand a known season pack in the same request. Avoid
+        // first fetching its archive listing and then fetching it again.
+        let archiveExpanded = seasonPack;
+        let content = await options.getContent(item.result.token, seasonPack, {
+          timeoutMs,
+          signal: options.signal,
+        });
+        if (content.hasPassword) continue;
+        if (
+          !seasonPack &&
+          content.files.some((file) => isDeepbridArchiveName(file.name))
+        ) {
+          timeoutMs = remainingRequestBudget(options.deadline, now);
+          if (timeoutMs < DEEPBRID_MIN_REQUEST_BUDGET_MS) return;
+          content = await options.getContent(item.result.token, true, {
             timeoutMs,
             signal: options.signal,
           });
-          let archiveExpanded = false;
-          if (content.hasPassword) return [];
-          if (content.files.some((file) => isDeepbridArchiveName(file.name))) {
-            timeoutMs = remainingRequestBudget(options.deadline, now);
-            if (timeoutMs < DEEPBRID_MIN_REQUEST_BUDGET_MS) return [];
-            content = await options.getContent(item.result.token, true, {
-              timeoutMs,
-              signal: options.signal,
-            });
-            archiveExpanded = true;
-          }
-          const files = chooseDeepbridVideoFiles(
-            content.files,
-            media,
-            item.result.title
-          );
-          if (!options.probeFile) {
-            return files.map((file) => ({ ...item, file, archiveExpanded }));
-          }
-          const probed = await Promise.all(
-            files.map(async (file) => {
-              const timeoutMs = remainingRequestBudget(options.deadline, now);
-              if (timeoutMs < DEEPBRID_MIN_REQUEST_BUDGET_MS) return undefined;
-              return (await options.probeFile!(file, {
-                timeoutMs,
-                signal: options.signal,
-              }))
-                ? { ...item, file, archiveExpanded }
-                : undefined;
-            })
-          );
-          return probed.filter(
-            (value): value is ResolvedDeepbridFile => value !== undefined
-          );
-        } catch (error) {
-          if (error instanceof DeepbridApiError && error.code === 'api_12') {
-            return [];
-          }
-          logger.debug(
-            { error: error instanceof Error ? error.message : String(error) },
-            'Deepbrid content resolution failed'
-          );
-          return [];
+          archiveExpanded = true;
         }
-      })
-    );
-    resolved.push(...batchResolved.flat());
-  }
+        const files = chooseDeepbridVideoFiles(
+          content.files,
+          media,
+          item.result.title
+        );
+        if (!options.probeFile) {
+          const values = files.map((file) => ({ ...item, file, archiveExpanded }));
+          resolvedByIndex.set(index, values);
+          resolvedCount += values.length;
+          continue;
+        }
+        const probed = await Promise.all(
+          files.map(async (file) => {
+            const probeTimeoutMs = remainingRequestBudget(options.deadline, now);
+            if (probeTimeoutMs < DEEPBRID_MIN_REQUEST_BUDGET_MS)
+              return undefined;
+            return (await options.probeFile!(file, {
+              timeoutMs: probeTimeoutMs,
+              signal: options.signal,
+            }))
+              ? { ...item, file, archiveExpanded }
+              : undefined;
+          })
+        );
+        const values = probed.filter(
+          (value): value is ResolvedDeepbridFile => value !== undefined
+        );
+        resolvedByIndex.set(index, values);
+        resolvedCount += values.length;
+      } catch (error) {
+        if (error instanceof DeepbridApiError && error.code === 'api_12') {
+          continue;
+        }
+        logger.debug(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Deepbrid content resolution failed'
+        );
+      } finally {
+        activeCandidates -= 1;
+      }
+    }
+  };
 
-  return resolved.slice(0, options.maxResults);
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  return [...resolvedByIndex.entries()]
+    .sort(([a], [b]) => a - b)
+    .flatMap(([, values]) => values)
+    .slice(0, options.maxResults);
 }
 
 export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
@@ -610,8 +634,14 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       'Deepbrid Finder search completed'
     );
 
+    // Older generated addon configs defaulted to three workers. Keep those
+    // configs fast after an upgrade while retaining the hard safety cap.
+    const resolveConcurrency = Math.max(
+      5,
+      Math.min(5, this.userData.resolveConcurrency)
+    );
     const resolved = await resolveDeepbridFiles(candidates, media, {
-      concurrency: this.userData.resolveConcurrency,
+      concurrency: resolveConcurrency,
       maxResults: this.userData.maxResults,
       deadline,
       signal,

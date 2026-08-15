@@ -184,7 +184,7 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
       apiKey: options.apiKey,
       maxResults: options.maxResults ?? 20,
       maxContentResolves: options.maxContentResolves ?? 15,
-      resolveConcurrency: options.resolveConcurrency ?? 3,
+      resolveConcurrency: options.resolveConcurrency ?? 5,
       timeout: options.timeout ?? 30_000,
     });
     const encrypted = encryptString(JSON.stringify(config));
