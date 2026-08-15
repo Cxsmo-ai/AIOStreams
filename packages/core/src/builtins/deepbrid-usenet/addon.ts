@@ -611,15 +611,10 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           b.result.sources - a.result.sources ||
           b.result.size - a.result.size
       );
-    // A long tail of low-ranked Finder results is the main source of the
-    // old 30-second response. Ten top-ranked candidates is enough to retain
-    // the best releases while keeping content lookup and playback probing
-    // bounded for interactive Stremio requests.
-    const contentResolveLimit = Math.min(this.userData.maxContentResolves, 10);
     const candidates = prioritizeDeepbridSeasonPacks(
       ranked,
       media,
-      contentResolveLimit
+      this.userData.maxContentResolves
     );
 
     this.logger.info(
