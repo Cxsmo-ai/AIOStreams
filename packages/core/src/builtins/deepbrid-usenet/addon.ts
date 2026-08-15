@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import pLimit from 'p-limit';
 import { ParsedId } from '../../utils/id-parser.js';
 import {
   constants,
@@ -39,6 +40,10 @@ import {
 } from './client.js';
 
 const logger = createLogger('deepbrid-usenet');
+// Deepbrid throttles bursts across simultaneous AIOStreams requests. Share a
+// process-wide ceiling while still allowing one request to resolve candidates
+// in parallel and retain every valid result.
+const deepbridNetworkLimit = pLimit(10);
 
 export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
   apiKey: z.string().trim().min(16).max(512),
@@ -589,12 +594,14 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     if (searchTimeout < DEEPBRID_MIN_REQUEST_BUDGET_MS) return [];
     const searched = await Promise.allSettled(
       queries.map((query) =>
-        client.search(query, {
-          category: categoryFor(media, metadata.isAnime),
-          limit: 50,
-          timeoutMs: searchTimeout,
-          signal,
-        })
+        deepbridNetworkLimit(() =>
+          client.search(query, {
+            category: categoryFor(media, metadata.isAnime),
+            limit: 50,
+            timeoutMs: searchTimeout,
+            signal,
+          })
+        )
       )
     );
     const finderResults = searched.flatMap((entry) =>
@@ -637,8 +644,8 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     // Older generated addon configs defaulted to three workers. Keep those
     // configs fast after an upgrade while retaining the hard safety cap.
     const resolveConcurrency = Math.max(
-      5,
-      Math.min(5, this.userData.resolveConcurrency)
+      10,
+      Math.min(10, this.userData.resolveConcurrency)
     );
     const resolved = await resolveDeepbridFiles(candidates, media, {
       concurrency: resolveConcurrency,
@@ -646,9 +653,13 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       deadline,
       signal,
       getContent: (token, archives, requestOptions) =>
-        client.getContent(token, archives, requestOptions),
+        deepbridNetworkLimit(() =>
+          client.getContent(token, archives, requestOptions)
+        ),
       probeFile: (file, requestOptions) =>
-        probeDeepbridVideo(file, this.userData.apiKey, requestOptions),
+        deepbridNetworkLimit(() =>
+          probeDeepbridVideo(file, this.userData.apiKey, requestOptions)
+        ),
     });
     this.logger.info(
       {
