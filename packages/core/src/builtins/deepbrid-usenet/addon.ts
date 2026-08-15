@@ -44,7 +44,7 @@ export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
   apiKey: z.string().trim().min(16).max(512),
   maxResults: z.number().int().min(1).max(50).default(20),
   maxContentResolves: z.number().int().min(1).max(30).default(15),
-  resolveConcurrency: z.number().int().min(1).max(5).default(5),
+  resolveConcurrency: z.number().int().min(1).max(10).default(10),
   timeout: z.number().int().min(1_000).max(120_000).default(30_000),
 });
 export type DeepbridUsenetConfig = z.infer<typeof DeepbridUsenetConfigSchema>;
@@ -453,7 +453,7 @@ export async function resolveDeepbridFiles(
 ): Promise<ResolvedDeepbridFile[]> {
   const now = options.now ?? Date.now;
   const resolvedByIndex = new Map<number, ResolvedDeepbridFile[]>();
-  const concurrency = Math.max(1, Math.min(5, options.concurrency));
+  const concurrency = Math.max(1, Math.min(10, options.concurrency));
   let nextIndex = 0;
   let resolvedCount = 0;
   let activeCandidates = 0;
@@ -611,10 +611,15 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           b.result.sources - a.result.sources ||
           b.result.size - a.result.size
       );
+    // A long tail of low-ranked Finder results is the main source of the
+    // old 30-second response. Ten top-ranked candidates is enough to retain
+    // the best releases while keeping content lookup and playback probing
+    // bounded for interactive Stremio requests.
+    const contentResolveLimit = Math.min(this.userData.maxContentResolves, 10);
     const candidates = prioritizeDeepbridSeasonPacks(
       ranked,
       media,
-      this.userData.maxContentResolves
+      contentResolveLimit
     );
 
     this.logger.info(
@@ -637,8 +642,8 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     // Older generated addon configs defaulted to three workers. Keep those
     // configs fast after an upgrade while retaining the hard safety cap.
     const resolveConcurrency = Math.max(
-      5,
-      Math.min(5, this.userData.resolveConcurrency)
+      10,
+      Math.min(10, this.userData.resolveConcurrency)
     );
     const resolved = await resolveDeepbridFiles(candidates, media, {
       concurrency: resolveConcurrency,
