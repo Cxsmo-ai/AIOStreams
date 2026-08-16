@@ -26,6 +26,36 @@ type TiebreakerCmp = (
 const logger = createLogger('deduplicator');
 
 /**
+ * Usenet deduplication domains. Deepbrid and TorBox intentionally compete for
+ * the same release, while native AIOStreams/NNTP results remain independent
+ * fallbacks and only deduplicate with their own service family.
+ */
+function usenetDeduplicationDomain(stream: ParsedStream): string {
+  const isUsenet =
+    stream.type === 'usenet' ||
+    stream.type === 'stremio-usenet' ||
+    // Service-routed Usenet streams are represented as `debrid` by the
+    // built-in parser. The NZB URL is the reliable discriminator from
+    // service-routed torrents, which must retain the normal dedup behavior.
+    (stream.type === 'debrid' && Boolean(stream.nzbUrl));
+  if (!isUsenet) return 'default';
+  if (stream.service?.id === constants.AIOSTREAMS_SERVICE) {
+    return 'native-aiostreams';
+  }
+  if (stream.service?.id === constants.STREMIO_NNTP_SERVICE) {
+    return 'native-stremio-nntp';
+  }
+  if (
+    stream.service?.id === constants.DEEPBRID_SERVICE ||
+    stream.service?.id === constants.TORBOX_SERVICE ||
+    stream.addon.identifier === 'deepbrid-usenet'
+  ) {
+    return 'deepbrid-torbox';
+  }
+  return 'default';
+}
+
+/**
  * Build the seeders/age tiebreaker comparator from the user's config. Shared by
  * winner selection and same-release variant ordering so both honour the same
  * `torrent_seeders` / `usenet_age` settings. `position: 'any'` applies an enabled
@@ -146,11 +176,15 @@ class StreamDeduplicator {
           .replace(/[^\p{L}\p{N}+]/gu, '')
           .replace(/\s+/g, '')
           .toLowerCase();
-        currentStreamKeyStrings.push(`filename:${normalisedFilename}`);
+        currentStreamKeyStrings.push(
+          `filename:${usenetDeduplicationDomain(stream)}:${normalisedFilename}`
+        );
       }
 
       const isUsenet =
-        stream.type === 'usenet' || stream.type === 'stremio-usenet';
+        stream.type === 'usenet' ||
+        stream.type === 'stremio-usenet' ||
+        (stream.type === 'debrid' && Boolean(stream.nzbUrl));
 
       // Some addons provide fileIdx (to distinguish multiple files
       // within a single torrent), while others don't. This creates an unavoidable trade-off
@@ -166,7 +200,9 @@ class StreamDeduplicator {
         );
       }
       if (deduplicationKeys.includes('infoHash') && isUsenet && stream.nzbUrl) {
-        currentStreamKeyStrings.push(`infoHash:${stream.nzbUrl}`);
+        currentStreamKeyStrings.push(
+          `infoHash:${usenetDeduplicationDomain(stream)}:${stream.nzbUrl}`
+        );
       }
 
       if (deduplicationKeys.includes('smartDetect')) {
@@ -448,6 +484,19 @@ class StreamDeduplicator {
   ): number {
     const lc = libraryCmp(a, b);
     if (lc !== 0) return lc;
+
+    const explicitPriority = (serviceId?: string): number | undefined => {
+      if (serviceId === constants.DEEPBRID_SERVICE) return 0;
+      if (serviceId === constants.TORBOX_SERVICE) return 1;
+      return undefined;
+    };
+    const aExplicit = explicitPriority(a.service?.id);
+    const bExplicit = explicitPriority(b.service?.id);
+    if (aExplicit !== undefined || bExplicit !== undefined) {
+      if (aExplicit === undefined) return 1;
+      if (bExplicit === undefined) return -1;
+      if (aExplicit !== bExplicit) return aExplicit - bExplicit;
+    }
 
     let aServiceIndex =
       this.userData.services

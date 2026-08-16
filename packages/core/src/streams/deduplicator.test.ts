@@ -29,6 +29,19 @@ function directUsenet(
   } as ParsedStream;
 }
 
+function serviceUsenet(
+  id: string,
+  serviceId: 'deepbrid' | 'torbox' | 'aiostreams',
+  filename: string
+): ParsedStream {
+  return {
+    ...directUsenet(id, id, filename),
+    type: 'debrid',
+    service: { id: serviceId, cached: true },
+    nzbUrl: 'https://example.com/release.nzb',
+  } as ParsedStream;
+}
+
 function deduplicator(
   options: NonNullable<UserData['deduplicator']>
 ): StreamDeduplicator {
@@ -85,4 +98,21 @@ test('applies the direct Usenet fallback to stremio-usenet streams', async () =>
 
   assert.equal(result.length, 1);
   assert.equal(result[0]?.id, 'native-nntp');
+});
+
+test('deduplicates Deepbrid against TorBox but keeps native AIOStreams separate', async () => {
+  const filename = 'Show.S01E01.1080p.mkv';
+  const result = await deduplicator({
+    enabled: true,
+    cached: 'single_result',
+  }).deduplicate([
+    serviceUsenet('torbox', 'torbox', filename),
+    serviceUsenet('deepbrid', 'deepbrid', filename),
+    serviceUsenet('native', 'aiostreams', filename),
+  ]);
+
+  assert.deepEqual(
+    result.map((stream) => stream.id).sort(),
+    ['deepbrid', 'native']
+  );
 });
