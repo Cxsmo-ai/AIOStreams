@@ -16,6 +16,9 @@ const ResultSchema = z.looseObject({
   size: z.coerce.number().nonnegative().catch(0),
   size_human: z.coerce.string().optional(),
   sizeHuman: z.coerce.string().optional(),
+  nzb: z.string().optional(),
+  nzb_url: z.string().optional(),
+  nzbUrl: z.string().optional(),
   date: z.coerce.string().optional(),
   created_at: z.coerce.string().optional(),
   sources: z.coerce.number().int().nonnegative().catch(0),
@@ -48,6 +51,7 @@ export interface DeepbridFinderFile {
   link: string;
   size: number;
   sizeHuman: string;
+  nzbUrl?: string;
 }
 
 export interface DeepbridFinderContent {
@@ -55,6 +59,12 @@ export interface DeepbridFinderContent {
   files: DeepbridFinderFile[];
   hasPassword: boolean;
   password: string;
+}
+
+export interface DeepbridUploadInfo {
+  id: string;
+  title: string;
+  files: DeepbridFinderFile[];
 }
 
 export interface DeepbridRequestOptions {
@@ -260,12 +270,16 @@ export class DeepbridFinderClient {
       const link = file.link || file.url || '';
       if (!name || !link) return [];
       try {
+        const nzbUrl = [file.nzb_url, file.nzbUrl, file.nzb].find(
+          (value): value is string => typeof value === 'string' && value.length > 0
+        );
         return [
           {
             name,
             link: validateDeepbridDownloadUrl(link).toString(),
             size: file.size,
             sizeHuman: file.size_human || file.sizeHuman || '',
+            nzbUrl,
           },
         ];
       } catch {
@@ -282,6 +296,56 @@ export class DeepbridFinderClient {
       hasPassword,
       password: typeof json.password === 'string' ? json.password : '',
     };
+  }
+
+  /** Submit an external NZB URL to the authenticated Deepbrid account. */
+  async addNzbUrl(
+    nzbUrl: string,
+    options: DeepbridRequestOptions = {}
+  ): Promise<string> {
+    const parsed = new URL(nzbUrl);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+      throw new DeepbridApiError('Deepbrid requires a safe HTTPS NZB URL.', undefined, 'unsafe-nzb-url');
+    }
+    const timeoutMs = Math.max(250, Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs));
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+    const response = await makeRequest(`${DEEPBRID_API_BASE}/usenet/add`, {
+      method: 'POST', timeout: timeoutMs, signal,
+      headers: {
+        Accept: 'application/json', Authorization: `Bearer ${this.apiKey}`,
+        'User-Agent': DEEPBRID_FINDER_USER_AGENT,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ nzb_url: parsed.toString() }),
+    });
+    const json = JSON.parse(await response.text()) as Record<string, unknown>;
+    if (!response.ok || Number(json.error ?? 0) !== 0) {
+      throw new DeepbridApiError(apiMessage(json, `Deepbrid NZB upload failed (${response.status}).`), response.status, 'nzb-upload-failed');
+    }
+    const id = json.id ?? json.upload_id ?? json.uploadId;
+    if (typeof id !== 'string' && typeof id !== 'number') {
+      throw new DeepbridApiError('Deepbrid NZB upload returned no upload id.', response.status, 'missing-upload-id');
+    }
+    return String(id);
+  }
+
+  /** Read resolved files for an uploaded external NZB. */
+  async getUploadInfo(id: string, options: DeepbridRequestOptions = {}): Promise<DeepbridUploadInfo> {
+    const json = await this.getJson(`/usenet/uploads/info?id=${encodeURIComponent(id)}`, options);
+    const values = Array.isArray(json.files) ? json.files : [];
+    const files = values.flatMap((value) => {
+      const parsed = FileSchema.safeParse(value);
+      if (!parsed.success) return [];
+      const file = parsed.data;
+      const name = file.name || file.filename || '';
+      const link = file.link || file.url || '';
+      if (!name || !link) return [];
+      try {
+        return [{ name, link: validateDeepbridDownloadUrl(link).toString(), size: file.size, sizeHuman: file.size_human || file.sizeHuman || '' }];
+      } catch { return []; }
+    });
+    return { id, title: typeof json.title === 'string' ? json.title : '', files };
   }
 }
 
