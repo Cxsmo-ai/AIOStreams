@@ -38,6 +38,10 @@ import {
   isDeepbridVideoName,
   validateDeepbridDownloadUrl,
 } from './client.js';
+import {
+  hasSuccessfulDeepbridProbe,
+  rememberSuccessfulDeepbridProbe,
+} from './probe-cache.js';
 
 const logger = createLogger('deepbrid-usenet');
 // Deepbrid throttles bursts across simultaneous AIOStreams requests. Share a
@@ -671,9 +675,15 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           const cacheKey = `${file.link}\u0000${extension}`;
           const cached = probeCache.get(cacheKey);
           if (cached) return cached;
+          if (hasSuccessfulDeepbridProbe(cacheKey)) {
+            return Promise.resolve(true);
+          }
           const probe = deepbridNetworkLimit(() =>
             probeDeepbridVideo(file, this.userData.apiKey, requestOptions)
-          );
+          ).then((playable) => {
+            if (playable) rememberSuccessfulDeepbridProbe(cacheKey);
+            return playable;
+          });
           probeCache.set(cacheKey, probe);
           return probe;
         };
