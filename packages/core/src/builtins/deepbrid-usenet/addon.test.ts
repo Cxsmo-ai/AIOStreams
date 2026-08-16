@@ -7,6 +7,7 @@ import {
   decodeDeepbridPlaybackToken,
   prioritizeDeepbridSeasonPacks,
   resolveDeepbridFiles,
+  requireDeepbridApiKey,
 } from './addon.js';
 import {
   isDeepbridArchiveName,
@@ -27,6 +28,10 @@ class TestDeepbridParser extends DeepbridUsenetStreamParser {
     return this.getIndexer();
   }
 
+  indexerFor(stream: Stream, parsed: ParsedStream) {
+    return this.getIndexer(stream, parsed);
+  }
+
   service(stream: Stream, parsed: ParsedStream) {
     return this.getService(stream, parsed);
   }
@@ -43,6 +48,17 @@ class TestDeepbridParser extends DeepbridUsenetStreamParser {
     return this.getStreamType(stream, undefined, parsed);
   }
 }
+
+test('Deepbrid addon requires the global service credential', () => {
+  assert.throws(
+    () => requireDeepbridApiKey({ services: [] }),
+    /Services > Deepbrid/
+  );
+  assert.equal(
+    requireDeepbridApiKey({ services: [], apiKey: 'x'.repeat(32) }),
+    'x'.repeat(32)
+  );
+});
 
 const parserAddon: Addon = {
   name: 'Deepbrid Usenet',
@@ -327,6 +343,28 @@ test('parses Deepbrid direct links as formatted Usenet without a fake service', 
   );
   parsed.filename = parser.filename(stream, parsed);
   assert.equal(parser.size(stream, parsed), 4_294_967_296);
+});
+
+test('keeps service routing and indexer formatting for indexer-mode results', () => {
+  const parser = new TestDeepbridParser(parserAddon);
+  const stream: Stream = {
+    name: '[DB ⚡] Deepbrid Usenet',
+    description: 'Example.Show.S01E01.1080p\n🔍 ExternalIndexer',
+    url: 'https://aiostreams.example/playback',
+    type: 'usenet',
+    idMatched: true,
+    behaviorHints: { filename: 'Example.Show.S01E01.mkv' },
+  };
+  const parsed = {
+    addon: parserAddon,
+    type: 'http',
+    proxied: false,
+  } as ParsedStream;
+  assert.equal(parser.indexerFor(stream, parsed), 'ExternalIndexer');
+  assert.deepEqual(parser.service(stream, parsed), {
+    id: 'deepbrid',
+    cached: true,
+  });
 });
 
 test('offers only Deepbrid-compatible formatting controls', () => {

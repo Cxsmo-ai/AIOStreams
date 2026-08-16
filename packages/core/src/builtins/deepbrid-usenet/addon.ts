@@ -50,7 +50,8 @@ const logger = createLogger('deepbrid-usenet');
 const deepbridNetworkLimit = pLimit(10);
 
 export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
-  apiKey: z.string().trim().min(16).max(512),
+  /** Copied from the global Deepbrid service during preset generation. */
+  apiKey: z.string().trim().min(16).max(512).optional(),
   mode: z.enum(['direct', 'indexer']).default('direct'),
   resolveExternalIndexers: z.boolean().default(false),
   maxResults: z.number().int().min(1).max(50).default(20),
@@ -59,6 +60,15 @@ export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
   timeout: z.number().int().min(1_000).max(120_000).default(30_000),
 });
 export type DeepbridUsenetConfig = z.infer<typeof DeepbridUsenetConfigSchema>;
+
+export function requireDeepbridApiKey(config: DeepbridUsenetConfig): string {
+  if (!config.apiKey) {
+    throw new Error(
+      'Deepbrid service is not configured. Add your API key under Services > Deepbrid, then regenerate this addon.'
+    );
+  }
+  return config.apiKey;
+}
 
 const CapabilityEnvelopeSchema = z.object({
   v: z.literal(1),
@@ -574,6 +584,10 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     super(config, DeepbridUsenetConfigSchema, clientIp);
   }
 
+  private get deepbridApiKey(): string {
+    return requireDeepbridApiKey(this.userData);
+  }
+
   override async getStreams(
     type: string,
     id: string,
@@ -600,7 +614,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     if (!queries.length) return [];
 
     const client = new DeepbridFinderClient(
-      this.userData.apiKey,
+      this.deepbridApiKey,
       this.userData.timeout
     );
     const searchTimeout = remainingRequestBudget(deadline, Date.now);
@@ -686,7 +700,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
             return Promise.resolve(true);
           }
           const probe = deepbridNetworkLimit(() =>
-            probeDeepbridVideo(file, this.userData.apiKey, requestOptions)
+            probeDeepbridVideo(file, this.deepbridApiKey, requestOptions)
           ).then((playable) => {
             if (playable) rememberSuccessfulDeepbridProbe(cacheKey);
             return playable;
@@ -714,7 +728,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       const target = validateDeepbridDownloadUrl(file.link);
       const playbackUrl = `${base}/builtins/deepbrid-usenet/play/${createDeepbridPlaybackToken(
         {
-          apiKey: this.userData.apiKey,
+          apiKey: this.deepbridApiKey,
           url: target.toString(),
           filename: file.name,
           size: file.size || undefined,
@@ -762,7 +776,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     if (!queries.length) return [];
 
     const client = new DeepbridFinderClient(
-      this.userData.apiKey,
+      this.deepbridApiKey,
       this.userData.timeout
     );
     const searchTimeout = remainingRequestBudget(deadline, Date.now);

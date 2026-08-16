@@ -35,17 +35,34 @@ export function deepbridUsenetFormatPassthrough(
 }
 
 export class DeepbridUsenetStreamParser extends BuiltinStreamParser {
-  protected override getIndexer(): string {
-    return 'Deepbrid Usenet';
+  private isDirectFinderStream(stream: Stream): boolean {
+    // Direct Finder streams are emitted by DeepbridUsenetAddon itself as
+    // [DB⚡]/[DB] entries. Service-routed indexer-mode streams use the normal
+    // BuiltinAddonPreset [DB ⚡] shape and must retain their service metadata.
+    return /^\[DB(?:⚡|\])/.test(stream.name || '');
+  }
+
+  protected override getIndexer(
+    stream?: Stream,
+    currentParsedStream?: ParsedStream
+  ): string | undefined {
+    return !stream || this.isDirectFinderStream(stream)
+      ? 'Deepbrid Usenet'
+      : super.getIndexer(stream, currentParsedStream!);
   }
 
   protected override getService(
-    _stream: Stream,
-    _currentParsedStream: ParsedStream
+    stream: Stream,
+    currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
-    // Deepbrid Finder resolves its own direct media links. It is not one of
-    // the separately configured AIOStreams debrid or Usenet services.
-    return undefined;
+    // Direct Finder streams have their own secure playback URL and no service
+    // wrapper. Indexer-mode streams are produced by BaseDebridAddon and must
+    // keep the selected AIOStreams/Deepbrid service for playback and labels.
+    if (this.isDirectFinderStream(stream)) return undefined;
+    if (/^\[DB\s+⚡\]/.test(stream.name || '')) {
+      return { id: constants.DEEPBRID_SERVICE, cached: true };
+    }
+    return super.getService(stream, currentParsedStream);
   }
 }
 
@@ -65,12 +82,13 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
         default: 'Deepbrid Usenet',
       },
       {
-        id: 'apiKey',
-        name: 'Deepbrid API Key',
+        id: 'deepbridService',
+        name: 'Deepbrid Service Credential',
         description:
-          'Your authorized Deepbrid API key. It is encrypted inside the generated built-in addon configuration.',
-        type: 'password',
-        required: true,
+          'This addon uses the API key configured once under Services > Deepbrid.',
+        type: 'alert',
+        intent: 'info',
+        required: false,
       },
       {
         id: 'mode',
@@ -205,6 +223,16 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
   ): Promise<Addon[]> {
     const mode = options.mode ?? 'direct';
     const resolveExternalIndexers = options.resolveExternalIndexers === true;
+    const deepbridService = userData.services?.find(
+      (service) =>
+        service.id === constants.DEEPBRID_SERVICE && service.enabled !== false
+    );
+    const apiKey = deepbridService?.credentials?.apiKey?.trim();
+    if (!apiKey) {
+      throw new Error(
+        'Configure the Deepbrid API key once under Services > Deepbrid before installing Deepbrid Usenet.'
+      );
+    }
     const serviceIds =
       userData.services
         ?.filter((s) => s.enabled !== false)
@@ -212,7 +240,7 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
         .filter(
           (id) =>
             id !== constants.DEEPBRID_SERVICE ||
-            (mode === 'indexer' && resolveExternalIndexers)
+            resolveExternalIndexers
         ) || [];
     const formatting = (options.formatting ||
       {}) as DeepbridUsenetFormattingOptions;
@@ -221,7 +249,7 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
       tmdbApiKey: userData.tmdbApiKey,
       tmdbReadAccessToken: userData.tmdbAccessToken,
       tvdbApiKey: userData.tvdbApiKey,
-      apiKey: options.apiKey,
+      apiKey,
       mode,
       resolveExternalIndexers,
       maxResults: options.maxResults ?? 20,
