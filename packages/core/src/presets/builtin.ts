@@ -281,11 +281,20 @@ export class BuiltinAddonPreset extends Preset {
   }
 
   protected static getBaseConfig(userData: UserData, services: ServiceId[]) {
+    // Deepbrid is the preferred external-NZB resolver when enabled. Keep all
+    // other configured services (TorBox, native AIOStreams NNTP, Stremio NNTP,
+    // and indexer-backed services) intact; this only determines priority.
+    const orderedServices = services.includes(constants.DEEPBRID_SERVICE)
+      ? [
+          constants.DEEPBRID_SERVICE,
+          ...services.filter((service) => service !== constants.DEEPBRID_SERVICE),
+        ]
+      : services;
     return {
       tmdbReadAccessToken: userData.tmdbAccessToken,
       tmdbApiKey: userData.tmdbApiKey,
       tvdbApiKey: userData.tvdbApiKey,
-      services: services.map((service) => ({
+      services: orderedServices.map((service) => ({
         id: service,
         credential: this.getServiceCredential(service, userData),
       })),
