@@ -54,6 +54,7 @@ const Y = 0x79; // 'y'
 const YBEGIN_CRLF = Buffer.from('\r\n=ybegin ');
 const YBEGIN_AT0 = Buffer.from('=ybegin ');
 const YEND_CRLF = Buffer.from('\r\n=yend');
+const EMPTY_BUFFER = Buffer.alloc(0);
 
 /**
  * Decode a complete article body (raw, possibly dot-stuffed NNTP payload) into
@@ -191,6 +192,8 @@ export function isImplausibleYencFileSize(
 export class StreamingYencDecoder {
   private state: string | null = null;
   private _ended = false;
+  /** Reused native-decoder destination; callers copy data they retain. */
+  private scratch?: Buffer;
 
   get ended(): boolean {
     return this._ended;
@@ -202,8 +205,15 @@ export class StreamingYencDecoder {
    * subsequent input is ignored.
    */
   push(chunk: Buffer): Buffer {
-    if (this._ended || chunk.length === 0) return Buffer.alloc(0);
-    const res = yencode.decodeChunk(chunk, undefined, this.state);
+    if (this._ended || chunk.length === 0) return EMPTY_BUFFER;
+    // decodeChunk can write into a caller-provided destination. Reusing this
+    // scratch avoids one Buffer allocation per socket-read chunk on the
+    // streaming/header-probe path. Consumers that retain output must copy it
+    // before the next push; YencHeadCapture already does that at its boundary.
+    if (!this.scratch || this.scratch.length < chunk.length) {
+      this.scratch = Buffer.allocUnsafe(chunk.length);
+    }
+    const res = yencode.decodeChunk(chunk, this.scratch, this.state);
     this.state = res.state;
     if (res.ended) this._ended = true;
     return res.written === res.output.length
