@@ -16,7 +16,10 @@ import { PresetManager } from '../presets/index.js';
 import { FeatureControl } from '../utils/feature.js';
 import { StreamContext, StreamUtils } from '../streams/index.js';
 import { buildPlayChain, type FailoverContentType } from './play-chain.js';
-import { resolveServiceWrappedStreams } from './serviceWrapper.js';
+import {
+  resolveGlobalDeepbridNzbs,
+  resolveServiceWrappedStreams,
+} from './serviceWrapper.js';
 import type { ServiceWrapServiceTiming } from './serviceWrapper.js';
 import type { PrecomputeSubTimings } from '../streams/precomputer.js';
 import { StreamSelector } from '../parser/streamExpression.js';
@@ -288,6 +291,24 @@ export async function processStreams(
   }
 
   const preServiceWrapIds = new Set(processedStreams.map((s) => s.id));
+  const globalDeepbridStart = Date.now();
+  const globalDeepbrid = await resolveGlobalDeepbridNzbs(
+    processedStreams,
+    context,
+    ctx.userData,
+    ctx.addons
+  );
+  if (globalDeepbrid.hasNewStreams) {
+    processedStreams = await ctx.filterer.filter(
+      globalDeepbrid.streams,
+      context
+    );
+  } else {
+    processedStreams = globalDeepbrid.streams;
+  }
+  errors.push(...globalDeepbrid.errors);
+  serviceWrapMs += Date.now() - globalDeepbridStart;
+
   const serviceWrapStart = Date.now();
   const resolvedResults = await resolveServiceWrappedStreams(
     processedStreams,

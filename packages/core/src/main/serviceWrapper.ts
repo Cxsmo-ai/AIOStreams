@@ -16,8 +16,11 @@ import {
   fileInfoStore,
   TitleMetadata,
   FileInfo,
+  NZB,
+  NZBWithSelectedFile,
+  hashNzbUrl,
 } from '../debrid/index.js';
-import { processTorrents } from '../builtins/utils/debrid.js';
+import { processTorrents, processNZBs } from '../builtins/utils/debrid.js';
 import { StreamContext } from '../streams/context.js';
 import { parseTorrentTitleCached } from '../parser/title.js';
 import { PresetManager } from '../presets/presetManager.js';
@@ -51,6 +54,130 @@ export interface ServiceWrapServiceTiming {
 export interface ServiceWrapError {
   title: string;
   description: string;
+}
+
+/**
+ * Resolve every external NZB through Deepbrid once, centrally, after all
+ * indexer addons have been scraped. This is deliberately independent of the
+ * per-addon service lists: a single global Deepbrid service selection now
+ * covers altHUB, Newshosting, Easynews, Prowlarr, TorrentClaw, Unarr, and
+ * other NZB-producing addons.
+ */
+export async function resolveGlobalDeepbridNzbs(
+  streams: ParsedStream[],
+  context: StreamContext,
+  userData: UserData,
+  addons: Addon[]
+): Promise<ServiceWrapResult> {
+  const deepbrid = buildDebridServices(userData).find(
+    (service) => service.id === constants.DEEPBRID_SERVICE
+  );
+  if (!deepbrid) return { streams, errors: [], hasNewStreams: false };
+
+  const candidates = streams.filter(
+    (stream) =>
+      !!stream.nzbUrl &&
+      stream.service?.id !== constants.DEEPBRID_SERVICE &&
+      stream.indexer !== constants.DEEPBRID_SERVICE &&
+      stream.addon.identifier !== 'deepbrid-usenet'
+  );
+  if (candidates.length === 0) return { streams, errors: [], hasNewStreams: false };
+
+  const byHash = new Map<string, ParsedStream[]>();
+  const nzbsByHash = new Map<string, NZB>();
+  for (const stream of candidates) {
+    const nzbUrl = stream.nzbUrl!;
+    const hash = hashNzbUrl(nzbUrl);
+    const originals = byHash.get(hash) ?? [];
+    originals.push(stream);
+    byHash.set(hash, originals);
+    if (!nzbsByHash.has(hash)) {
+      nzbsByHash.set(hash, {
+        type: 'usenet',
+        hash,
+        nzb: nzbUrl,
+        title:
+          stream.folderName ??
+          stream.filename ??
+          stream.originalName ??
+          'External NZB',
+        size: stream.folderSize ?? stream.size ?? 0,
+        indexer: stream.indexer,
+        confirmed: true,
+      });
+    }
+  }
+
+  const metadata = await buildMetadata(context);
+  const processed = await processNZBs(
+    [...nzbsByHash.values()],
+    [deepbrid],
+    context.id,
+    metadata,
+    userData.ip,
+    userData.checkOwned ?? true
+  );
+  const errors: ServiceWrapError[] = processed.errors.map((error) => ({
+    title: `[❌] Global Deepbrid Usenet`,
+    description: error.error.message,
+  }));
+  if (processed.results.length === 0) {
+    return { streams, errors, hasNewStreams: false };
+  }
+
+  const metadataToStore = metadata || { titles: [] };
+  const metadataId = getSimpleTextHash(JSON.stringify(metadataToStore));
+  await metadataStore().set(
+    metadataId,
+    metadataToStore,
+    appConfig.builtins.debrid.playbackLinkValidity,
+    true
+  );
+  const auth = encryptString(
+    JSON.stringify({ id: deepbrid.id, credential: deepbrid.credential })
+  ).data;
+  if (!auth) return { streams, errors, hasNewStreams: false };
+
+  const resolvedStreams: ParsedStream[] = [];
+  for (const result of processed.results as NZBWithSelectedFile[]) {
+    const originals = byHash.get(result.hash) ?? [];
+    for (const original of originals) {
+      const filename = result.file.name ?? result.title ?? 'video';
+      const fileInfo: FileInfo = {
+        type: 'usenet',
+        nzb: result.nzb,
+        title: result.title,
+        hash: result.hash,
+        index: result.file.index,
+        indexer: result.indexer,
+        cacheAndPlay:
+          userData.cacheAndPlay?.enabled &&
+          userData.cacheAndPlay.streamTypes?.includes('usenet'),
+        autoRemoveDownloads: userData.autoRemoveDownloads,
+      };
+      const url = generatePlaybackUrl(auth, metadataId, fileInfo, filename);
+      resolvedStreams.push({
+        ...original,
+        id: `${original.id}-deepbrid`,
+        type: 'debrid',
+        url,
+        service: {
+          id: constants.DEEPBRID_SERVICE,
+          cached: result.service?.cached ?? false,
+        },
+        filename,
+        size: result.file.size ?? original.size,
+        folderSize: result.size ?? original.folderSize,
+        nzbUrl: result.nzb,
+      });
+    }
+  }
+
+  return {
+    streams: [...resolvedStreams, ...streams],
+    errors,
+    hasNewStreams: resolvedStreams.length > 0,
+  };
 }
 
 /**
