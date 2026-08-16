@@ -300,6 +300,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
           'stremio_nntp',
           'stremthru_newz',
           'aiostreams',
+          'deepbrid',
         ].includes(s.id)
     );
     const nzbServices = this.userData.services.filter((s) =>
@@ -310,6 +311,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
         'stremio_nntp',
         'stremthru_newz',
         'aiostreams',
+        'deepbrid',
       ].includes(s.id)
     );
 

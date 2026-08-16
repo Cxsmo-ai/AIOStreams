@@ -18,7 +18,7 @@ import {
   BaseDebridConfigSchema,
   SearchMetadata,
 } from '../base/debrid.js';
-import { Torrent, NZB } from '../../debrid/index.js';
+import { Torrent, NZB, hashNzbUrl } from '../../debrid/index.js';
 import { buildNewshostingQueries } from '../newshosting-indexer/addon.js';
 import {
   NewshostingMediaMetadata,
@@ -51,6 +51,8 @@ const deepbridNetworkLimit = pLimit(10);
 
 export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
   apiKey: z.string().trim().min(16).max(512),
+  mode: z.enum(['direct', 'indexer']).default('direct'),
+  resolveExternalIndexers: z.boolean().default(false),
   maxResults: z.number().int().min(1).max(50).default(20),
   maxContentResolves: z.number().int().min(1).max(30).default(15),
   resolveConcurrency: z.number().int().min(1).max(10).default(5),
@@ -575,8 +577,13 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
   override async getStreams(
     type: string,
     id: string,
-    signal?: AbortSignal
+    _signal?: AbortSignal
   ): Promise<Stream[]> {
+    // If in indexer mode, fallback to BaseDebridAddon processing which handles NZBs
+    if (this.userData.mode === 'indexer') {
+      return super.getStreams(type, id);
+    }
+
     const deadline =
       Date.now() +
       Math.max(
@@ -605,7 +612,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
             category: categoryFor(media, metadata.isAnime),
             limit: 50,
             timeoutMs: searchTimeout,
-            signal,
+            signal: undefined,
           })
         )
       )
@@ -657,7 +664,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       concurrency: resolveConcurrency,
       maxResults: this.userData.maxResults,
       deadline,
-      signal,
+      signal: undefined,
       getContent: (token, archives, requestOptions) =>
         deepbridNetworkLimit(() =>
           client.getContent(token, archives, requestOptions)
@@ -739,7 +746,90 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
   protected async _searchTorrents(_parsedId: ParsedId): Promise<Torrent[]> {
     return [];
   }
-  protected async _searchNzbs(_parsedId: ParsedId): Promise<NZB[]> {
-    return [];
+
+  protected async _searchNzbs(parsedId: ParsedId): Promise<NZB[]> {
+    if (this.userData.mode !== 'indexer') return [];
+
+    const deadline =
+      Date.now() +
+      Math.max(
+        DEEPBRID_MIN_REQUEST_BUDGET_MS,
+        this.userData.timeout - DEEPBRID_DEADLINE_MARGIN_MS
+      );
+    const metadata = metadataForSearch(await this.getSearchMetadata());
+    const media = mediaForSearch(parsedId);
+    const queries = buildDeepbridQueries(metadata, media);
+    if (!queries.length) return [];
+
+    const client = new DeepbridFinderClient(
+      this.userData.apiKey,
+      this.userData.timeout
+    );
+    const searchTimeout = remainingRequestBudget(deadline, Date.now);
+    if (searchTimeout < DEEPBRID_MIN_REQUEST_BUDGET_MS) return [];
+    const searched = await Promise.allSettled(
+      queries.map((query) =>
+        deepbridNetworkLimit(() =>
+          client.search(query, {
+            category: categoryFor(media, metadata.isAnime),
+            limit: 50,
+            timeoutMs: searchTimeout,
+          })
+        )
+      )
+    );
+    const finderResults = searched.flatMap((entry) =>
+      entry.status === 'fulfilled' ? entry.value : []
+    );
+    const seen = new Set<string>();
+    const ranked = finderResults
+      .filter((item) => !seen.has(item.token) && seen.add(item.token))
+      .map((result) => ({ result, ...rankResult(result, media, metadata) }))
+      .filter((item) => item.confirmed && item.score > 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.result.sources - a.result.sources ||
+          b.result.size - a.result.size
+      );
+    const candidates = prioritizeDeepbridSeasonPacks(
+      ranked,
+      media,
+      this.userData.maxContentResolves
+    );
+
+    const resolveConcurrency = Math.max(
+      10,
+      Math.min(10, this.userData.resolveConcurrency)
+    );
+    const resolved = await resolveDeepbridFiles(candidates, media, {
+      concurrency: resolveConcurrency,
+      maxResults: this.userData.maxResults,
+      deadline,
+      getContent: (token, archives, requestOptions) =>
+        deepbridNetworkLimit(() =>
+          client.getContent(token, archives, requestOptions)
+        ),
+      // Indexer mode does NOT preflight actual video streams. We just want the NZBs.
+      probeFile: () => Promise.resolve(true),
+    });
+
+    const indexedNzbs: NZB[] = [];
+    for (const { result, file } of resolved) {
+      if (!file.nzbUrl) continue;
+      indexedNzbs.push({
+        type: 'usenet',
+        hash: hashNzbUrl(file.nzbUrl),
+        title: result.title,
+        size: file.size,
+        nzb: file.nzbUrl,
+        // This stable service id is also the loop-prevention marker used by
+        // processNZBs when Deepbrid is configured as an external resolver.
+        indexer: constants.DEEPBRID_SERVICE,
+        confirmed: true,
+        age: ageHours(result.date),
+      });
+    }
+    return indexedNzbs;
   }
 }

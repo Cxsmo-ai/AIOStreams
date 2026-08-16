@@ -1,5 +1,6 @@
 import {
   BuiltinServiceId,
+  constants,
   createLogger,
   getTimeTakenSincePoint,
   mergeParsedMediaInfos,
@@ -596,6 +597,13 @@ async function processNZBsForDebridService(
   nzbs = nzbs.filter(
     (n) => !n.library || !n.indexer || n.indexer === service.id
   );
+
+  // Finder-origin NZBs are already owned by Deepbrid. Never submit them back
+  // to the Deepbrid upload API, otherwise indexer mode creates a resolution
+  // loop and duplicates the same release on the account.
+  if (service.id === constants.DEEPBRID_SERVICE) {
+    nzbs = nzbs.filter((n) => n.indexer !== constants.DEEPBRID_SERVICE);
+  }
 
   if (nzbs.length === 0) {
     return [];

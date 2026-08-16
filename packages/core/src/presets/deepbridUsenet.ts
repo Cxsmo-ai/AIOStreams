@@ -73,6 +73,26 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
         required: true,
       },
       {
+        id: 'mode',
+        name: 'Deepbrid Mode',
+        description:
+          'Direct mode resolves Finder results through Deepbrid. Indexer mode exposes Finder NZBs to your selected Usenet services and disables Deepbrid direct resolution.',
+        type: 'select',
+        default: 'direct',
+        options: [
+          { label: 'Direct Resolve', value: 'direct' },
+          { label: 'Indexer Only', value: 'indexer' },
+        ],
+      },
+      {
+        id: 'resolveExternalIndexers',
+        name: 'Resolve External Indexers with Deepbrid',
+        description:
+          'Enable the Deepbrid service for NZBs in this addon pipeline. For other indexer addons, also select Deepbrid under that addon’s Usenet services. Finder NZBs are never submitted back to Deepbrid.',
+        type: 'boolean',
+        default: false,
+      },
+      {
         id: 'timeout',
         name: 'Timeout (ms)',
         description: 'Total timeout for Deepbrid Finder API operations.',
@@ -160,7 +180,16 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
       URL: [`${appConfig.bootstrap.internalUrl}/builtins/deepbrid-usenet`],
       TIMEOUT: appConfig.presets.defaultTimeout,
       USER_AGENT: appConfig.http.defaultUserAgent,
-      SUPPORTED_SERVICES: [],
+      SUPPORTED_SERVICES: [
+        constants.AIOSTREAMS_SERVICE,
+        constants.STREMIO_NNTP_SERVICE,
+        constants.ALTMOUNT_SERVICE,
+        constants.NZBDAV_SERVICE,
+        constants.TORBOX_SERVICE,
+        constants.STREMTHRU_NEWZ_SERVICE,
+        constants.EASYNEWS_SERVICE,
+        constants.DEEPBRID_SERVICE,
+      ],
       DESCRIPTION:
         'Search Deepbrid Usenet Finder and securely stream resolved video files through AIOStreams with HTTP Range support.',
       OPTIONS: options,
@@ -174,14 +203,27 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
     userData: UserData,
     options: Record<string, any>
   ): Promise<Addon[]> {
+    const mode = options.mode ?? 'direct';
+    const resolveExternalIndexers = options.resolveExternalIndexers === true;
+    const serviceIds =
+      userData.services
+        ?.filter((s) => s.enabled !== false)
+        .map((s) => s.id)
+        .filter(
+          (id) =>
+            id !== constants.DEEPBRID_SERVICE ||
+            (mode === 'indexer' && resolveExternalIndexers)
+        ) || [];
     const formatting = (options.formatting ||
       {}) as DeepbridUsenetFormattingOptions;
     const config = DeepbridUsenetConfigSchema.parse({
-      services: [],
+      services: serviceIds,
       tmdbApiKey: userData.tmdbApiKey,
       tmdbReadAccessToken: userData.tmdbAccessToken,
       tvdbApiKey: userData.tvdbApiKey,
       apiKey: options.apiKey,
+      mode,
+      resolveExternalIndexers,
       maxResults: options.maxResults ?? 20,
       maxContentResolves: options.maxContentResolves ?? 15,
       resolveConcurrency: options.resolveConcurrency ?? 5,

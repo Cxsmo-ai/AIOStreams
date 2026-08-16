@@ -328,6 +328,7 @@ const STREMIO_NNTP_SERVICE = 'stremio_nntp';
 const STREMTHRU_NEWZ_SERVICE = 'stremthru_newz';
 const AIOSTREAMS_SERVICE = 'aiostreams';
 const TORRIN_SERVICE = 'torrin';
+export const DEEPBRID_SERVICE = 'deepbrid' as const;
 
 const SERVICES = [
   REALDEBRID_SERVICE,
@@ -348,6 +349,7 @@ const SERVICES = [
   STREMTHRU_NEWZ_SERVICE,
   AIOSTREAMS_SERVICE,
   TORRIN_SERVICE,
+  DEEPBRID_SERVICE,
 ] as const;
 
 export const BUILTIN_SUPPORTED_SERVICES = [
@@ -367,6 +369,7 @@ export const BUILTIN_SUPPORTED_SERVICES = [
   STREMTHRU_NEWZ_SERVICE,
   AIOSTREAMS_SERVICE,
   TORRIN_SERVICE,
+  DEEPBRID_SERVICE,
 ] as const;
 
 export type ServiceId = (typeof SERVICES)[number];
@@ -777,6 +780,23 @@ const SERVICE_DETAILS: Record<
         id: 'password',
         name: 'Password',
         description: 'Your Easynews password',
+        type: 'password',
+        required: true,
+      },
+    ],
+  },
+  [DEEPBRID_SERVICE]: {
+    id: DEEPBRID_SERVICE,
+    name: 'Deepbrid',
+    shortName: 'DB',
+    knownNames: ['Deepbrid', 'DB'],
+    signUpText: "Don't have an account? [Sign up here](https://www.deepbrid.com/)",
+    credentials: [
+      {
+        id: 'apiKey',
+        name: 'API Key',
+        description:
+          'Your Deepbrid API key. Obtain it from [here](https://www.deepbrid.com/devices)',
         type: 'password',
         required: true,
       },
