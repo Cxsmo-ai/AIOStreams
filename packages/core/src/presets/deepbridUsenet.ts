@@ -245,10 +245,7 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
     const formatting = (options.formatting ||
       {}) as DeepbridUsenetFormattingOptions;
     const config = DeepbridUsenetConfigSchema.parse({
-      services: serviceIds,
-      tmdbApiKey: userData.tmdbApiKey,
-      tmdbReadAccessToken: userData.tmdbAccessToken,
-      tvdbApiKey: userData.tvdbApiKey,
+      ...this.getBaseConfig(userData, serviceIds),
       apiKey,
       mode,
       resolveExternalIndexers,
