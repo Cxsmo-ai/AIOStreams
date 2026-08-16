@@ -395,6 +395,17 @@ export class FileStream implements SeekableStream {
                   .filter((l) => l >= 0 && l < segments.length)
               )
             : undefined;
+        // Keep a stream's speculative read-ahead inside the engine-wide
+        // download budget.  The semaphore still provides the hard safety
+        // ceiling, but allowing dozens of tasks to queue behind a much
+        // smaller budget adds bookkeeping, retains decoded reorder buffers,
+        // and can delay cancellation when a player seeks.  Clamping here
+        // preserves every segment/source while keeping bounded-concurrency
+        // behaviour aligned with the configured global budget.
+        const streamWorkers = Math.max(
+          1,
+          Math.min(this.opts.prefetchSegments, this.opts.maxConcurrentDownloads)
+        );
         const inner = new SegmentsStream({
           pool: this.pool,
           segments,
@@ -419,12 +430,12 @@ export class FileStream implements SeekableStream {
           // caps how many of those actually run at once. So a lone stream can use
           // the whole account, while concurrent streams fair-share it via that
           // semaphore; there is no separate per-stream connection cap.
-          maxWorkers: this.opts.prefetchSegments,
+          maxWorkers: streamWorkers,
           // Buffer sized to the same window so completed-but-not-yet-emitted
           // segments can ride out per-segment latency jitter without stalling
           // dispatch.
           bufferSizeBytes: Math.max(
-            this.avgDecodedSize * this.opts.prefetchSegments,
+            this.avgDecodedSize * streamWorkers,
             1
           ),
           skipBytes: start - segmentStartByte,
