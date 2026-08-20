@@ -4,6 +4,7 @@ import { AIOStreamsError, AIOStreamsResponse } from '../main/types.js';
 import { z } from 'zod';
 import { StreamType } from '../utils/constants.js';
 import { config as appConfig } from '../config/index.js';
+import { applyTorboxPresentation } from '../debrid/torbox-presentation.js';
 
 type ErrorOptions = {
   errorTitle?: string;
@@ -90,12 +91,16 @@ export class ChillLinkTransformer {
       ) => Promise<{ name: string; description: string }>;
     }
   ): Promise<ChillLinkSource | null> {
-    const { name, description } = stream.addon.formatPassthrough
+    let { name, description } = stream.addon.formatPassthrough
       ? {
           name: stream.originalName || stream.addon.name,
           description: stream.originalDescription,
         }
       : await formatter.format(stream);
+    ({ name, description } = applyTorboxPresentation(stream, {
+      name,
+      description,
+    }));
 
     if (!this.supportedTypes.includes(stream.type)) {
       return null;

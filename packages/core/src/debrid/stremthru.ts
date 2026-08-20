@@ -67,6 +67,24 @@ export interface StremThruServiceConfig {
     // maxWaitTime?: number; // max wait time is inferred from pollingInterval * maxPolls,
     // though a max wait time config is more user friendly. so we support maxWaitTime, infer maxPolls instead./
   };
+  /**
+   * Optional provider-specific final playback resolver. Store/cache/create and
+   * polling still use StremThru; only the final media URL is replaced.
+   */
+  torrentPlaybackResolver?: (input: {
+    downloadId: string;
+    fileId: number;
+    playbackInfo: PlaybackInfo & { type: 'torrent' };
+  }) => Promise<string | undefined>;
+  usenetPlaybackResolver?: (input: {
+    downloadId: string;
+    fileId: number;
+    playbackInfo: PlaybackInfo & { type: 'usenet' };
+  }) => Promise<string | undefined>;
+  cacheAndPlayResolver?: (
+    playbackInfo: PlaybackInfo,
+    requested: boolean
+  ) => boolean;
 }
 
 export class StremThruService
@@ -807,6 +825,9 @@ export class StremThruService
     autoRemoveDownloads?: boolean,
     signal?: AbortSignal
   ): Promise<string | undefined> {
+    cacheAndPlay =
+      this.config.cacheAndPlayResolver?.(playbackInfo, cacheAndPlay) ??
+      cacheAndPlay;
     if (playbackInfo.type === 'usenet') {
       const effectiveCacheAndPlay =
         this.usenetOptions.alwaysCacheAndPlay || cacheAndPlay;
@@ -936,10 +957,13 @@ export class StremThruService
         `Adding torrent to ${this.serviceName} for ${makeUrlLogSafe(playbackInfo.downloadUrl)}`
       );
       magnetDownload = await this.addTorrent(playbackInfo.downloadUrl);
-      logger.debug(`Torrent added for ${makeUrlLogSafe(playbackInfo.downloadUrl)}`, {
-        status: magnetDownload.status,
-        id: magnetDownload.id,
-      });
+      logger.debug(
+        `Torrent added for ${makeUrlLogSafe(playbackInfo.downloadUrl)}`,
+        {
+          status: magnetDownload.status,
+          id: magnetDownload.id,
+        }
+      );
     } else {
       let magnet = `magnet:?xt=urn:btih:${hash}`;
       if (playbackInfo.filename) {
@@ -1130,18 +1154,34 @@ export class StremThruService
       availableFiles: `[${magnetDownload.files.map((file) => file.name).join(', ')}]`,
     });
 
-    const playbackLink = await this.generateTorrentLink(
-      file.link,
-      this.config.clientIp
-    );
-    await StremThruService.playbackLinkCache.set(
-      cacheKey,
-      playbackLink,
-      appConfig.builtins.debrid.playbackLinkCacheTtl,
-      true
-    );
+    const providerPlaybackLink =
+      this.config.torrentPlaybackResolver &&
+      magnetDownload.id !== undefined &&
+      file.index !== undefined
+        ? await this.config.torrentPlaybackResolver({
+            downloadId: String(magnetDownload.id),
+            fileId: file.index,
+            playbackInfo,
+          })
+        : undefined;
+    const playbackLink =
+      providerPlaybackLink ??
+      (await this.generateTorrentLink(file.link, this.config.clientIp));
+    if (providerPlaybackLink === undefined) {
+      await StremThruService.playbackLinkCache.set(
+        cacheKey,
+        playbackLink,
+        appConfig.builtins.debrid.playbackLinkCacheTtl,
+        true
+      );
+    }
 
-    if (autoRemoveDownloads && magnetDownload.id && !magnetDownload.private) {
+    if (
+      providerPlaybackLink === undefined &&
+      autoRemoveDownloads &&
+      magnetDownload.id &&
+      !magnetDownload.private
+    ) {
       this.removeMagnet(magnetDownload.id.toString()).catch((err) => {
         logger.warn(
           `Failed to cleanup magnet ${magnetDownload.id} after resolve: ${err.message}`
@@ -1171,9 +1211,7 @@ export class StremThruService
     const cachedLink = await StremThruService.playbackLinkCache.get(cacheKey);
 
     if (cachedLink !== undefined) {
-      logger.debug(
-        `Using cached link for ${nzb ? makeUrlLogSafe(nzb) : hash}`
-      );
+      logger.debug(`Using cached link for ${nzb ? makeUrlLogSafe(nzb) : hash}`);
       if (cachedLink === null) {
         if (!cacheAndPlay) {
           return undefined;
@@ -1326,7 +1364,13 @@ export class StremThruService
     }
 
     let file:
-      | { name?: string; link?: string; size: number; index?: number }
+      | {
+          id?: number;
+          name?: string;
+          link?: string;
+          size: number;
+          index?: number;
+        }
       | undefined;
 
     if (playbackInfo.fileIndex !== undefined) {
@@ -1405,7 +1449,7 @@ export class StremThruService
       file = usenetDownload.files[0];
     }
 
-    if (!file?.link) {
+    if (!file || (!file.link && !this.config.usenetPlaybackResolver)) {
       throw new DebridError('Selected file was missing a link', {
         statusCode: 400,
         statusText: 'Selected file was missing a link',
@@ -1416,20 +1460,37 @@ export class StremThruService
       });
     }
 
-    let playbackLink = await this.generateUsenetLink(
-      file.link,
-      undefined,
-      this.config.clientIp
-    );
+    const providerPlaybackLink =
+      this.config.usenetPlaybackResolver && usenetDownload.id !== undefined
+        ? await this.config.usenetPlaybackResolver({
+            downloadId: String(usenetDownload.id),
+            fileId: file.id ?? file.index ?? 0,
+            playbackInfo,
+          })
+        : undefined;
+    const playbackLink =
+      providerPlaybackLink ??
+      (await this.generateUsenetLink(
+        file.link!,
+        undefined,
+        this.config.clientIp
+      ));
 
-    await StremThruService.playbackLinkCache.set(
-      cacheKey,
-      playbackLink,
-      appConfig.builtins.debrid.playbackLinkCacheTtl,
-      true
-    );
+    if (providerPlaybackLink === undefined) {
+      await StremThruService.playbackLinkCache.set(
+        cacheKey,
+        playbackLink,
+        appConfig.builtins.debrid.playbackLinkCacheTtl,
+        true
+      );
+    }
 
-    if (autoRemoveDownloads && usenetDownload.id && nzb) {
+    if (
+      providerPlaybackLink === undefined &&
+      autoRemoveDownloads &&
+      usenetDownload.id &&
+      nzb
+    ) {
       this.removeNzb(usenetDownload.id.toString()).catch((err) => {
         logger.warn(
           `Failed to cleanup usenet download ${usenetDownload.id} after resolve: ${err.message}`

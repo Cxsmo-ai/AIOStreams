@@ -37,6 +37,7 @@ import {
   fileInfoStore,
   FileInfo,
 } from '../../debrid/index.js';
+import { TorboxRouteSchema } from '../../debrid/torbox-route-schema.js';
 import { processTorrents, processNZBs } from '../utils/debrid.js';
 import {
   calculateAbsoluteEpisode,
@@ -81,6 +82,7 @@ export const BaseDebridConfigSchema = z.object({
   tmdbApiKey: z.string().optional(),
   tmdbReadAccessToken: z.string().optional(),
   tvdbApiKey: z.string().optional(),
+  torbox: TorboxRouteSchema.optional(),
   cacheAndPlay: CacheAndPlaySchema.optional(),
   autoRemoveDownloads: z.boolean().optional(),
   checkOwned: z.boolean().optional().default(true),
@@ -871,6 +873,10 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
               this.userData.cacheAndPlay?.streamTypes?.includes('torrent'),
             autoRemoveDownloads: this.userData.autoRemoveDownloads,
             serviceItemId: torrentOrNzb.serviceItemId,
+            torbox:
+              torrentOrNzb.service?.id === 'torbox'
+                ? this.userData.torbox
+                : undefined,
           }
         : {
             type: 'usenet',
@@ -896,6 +902,10 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
               this.userData.cacheAndPlay?.streamTypes?.includes('usenet'),
             autoRemoveDownloads: this.userData.autoRemoveDownloads,
             serviceItemId: torrentOrNzb.serviceItemId,
+            torbox:
+              torrentOrNzb.service?.id === 'torbox'
+                ? this.userData.torbox
+                : undefined,
           }
       : undefined;
 

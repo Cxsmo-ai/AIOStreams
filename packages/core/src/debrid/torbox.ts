@@ -29,6 +29,19 @@ import {
 } from './base.js';
 import { ParsedResult } from '@viren070/parse-torrent-title';
 import { parseTorrentTitleCached } from '../parser/title.js';
+import {
+  DEFAULT_TORBOX_PLAYBACK_PREFERENCES,
+  parseTorboxCredential,
+  TorboxClient,
+  type TorboxCredentialPayload,
+  type TorboxMediaType,
+} from './torbox-client.js';
+import pLimit from 'p-limit';
+import {
+  fetchTorboxNzbDocument,
+  fetchTorboxNzbHashes,
+  getTorboxNzbHashes,
+} from './torbox-nzb-hashes.js';
 
 const logger = createLogger('debrid:torbox');
 
@@ -153,6 +166,8 @@ export class TorboxDebridService
   private readonly apiVersion = 'v1';
   private readonly torboxApi: TorboxApi;
   private readonly stremthru: StremThruService;
+  private readonly client: TorboxClient;
+  private readonly credential: TorboxCredentialPayload;
   private readonly pollInterval: number;
   private readonly maxWaitTime: number;
   private static playbackLinkCache = Cache.getInstance<string, string | null>(
@@ -167,10 +182,18 @@ export class TorboxDebridService
 
   constructor(
     private readonly config: DebridServiceConfig,
-    options?: { pollInterval?: number; maxWaitTime?: number }
+    options?: {
+      pollInterval?: number;
+      maxWaitTime?: number;
+      credential?: TorboxCredentialPayload;
+      client?: TorboxClient;
+    }
   ) {
     this.pollInterval = options?.pollInterval ?? Time.Second * 10;
     this.maxWaitTime = options?.maxWaitTime ?? Time.Minute * 2;
+    this.credential =
+      options?.credential ?? parseTorboxCredential(config.token);
+    this.client = options?.client ?? new TorboxClient();
     this.torboxApi = new TorboxApi({
       token: config.token,
     });
@@ -184,6 +207,15 @@ export class TorboxDebridService
         token: config.token,
       },
       capabilities: { torrents: true, usenet: false },
+      torrentPlaybackResolver: async ({ downloadId, fileId, playbackInfo }) =>
+        (
+          await this.resolveTorboxPlayback(
+            'torrent',
+            downloadId,
+            fileId,
+            playbackInfo.torbox
+          )
+        ).url,
     });
   }
   public async listMagnets(): Promise<DebridDownload[]> {
@@ -243,20 +275,66 @@ export class TorboxDebridService
   }
 
   public async checkNzbs(
-    nzbs: { name?: string; hash?: string }[]
+    nzbs: { name?: string; hash?: string; nzb?: string }[]
   ): Promise<DebridDownload[]> {
+    const sourceByCandidate = new Map<string, string>();
+    const hashLimit = pLimit(3);
+    const candidateGroups = await Promise.all(
+      nzbs
+        .filter(
+          (nzb): nzb is { name?: string; hash: string; nzb?: string } =>
+            typeof nzb.hash === 'string' && nzb.hash.length > 0
+        )
+        .map((source) =>
+          hashLimit(async () => {
+            const candidates = new Set<string>([source.hash.toLowerCase()]);
+            if (source.nzb) {
+              try {
+                for (const hash of await fetchTorboxNzbHashes(source.nzb)) {
+                  candidates.add(hash.toLowerCase());
+                }
+              } catch (error) {
+                logger.debug(
+                  'TorBox NZB content hash unavailable; using URL hashes',
+                  {
+                    name: source.name,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  }
+                );
+                for (const hash of await getTorboxNzbHashes({
+                  url: source.nzb,
+                }))
+                  candidates.add(hash.toLowerCase());
+              }
+            }
+            return { source, candidates: [...candidates] };
+          })
+        )
+    );
+    nzbs = candidateGroups.flatMap(({ source, candidates }) =>
+      candidates.map((hash) => ({ name: source.name, hash }))
+    );
+    for (const { source, candidates } of candidateGroups)
+      for (const candidate of candidates)
+        sourceByCandidate.set(candidate, source.hash);
     nzbs = nzbs.filter((nzb) => nzb.hash);
     if (nzbs.length === 0) {
       return [];
     }
     const cachedResults: DebridDownload[] = [];
     const hashesToCheck: string[] = [];
+    const cachedSourceHashes = new Set<string>();
     for (const { hash } of nzbs as { hash: string }[]) {
-      const cacheKey = getSimpleTextHash(hash);
+      const sourceHash =
+        sourceByCandidate.get(hash.toLowerCase()) ?? hash.toLowerCase();
+      if (cachedSourceHashes.has(sourceHash)) continue;
+      const cacheKey = getSimpleTextHash(sourceHash);
       const cached =
         await TorboxDebridService.instantAvailabilityCache.get(cacheKey);
       if (cached) {
         cachedResults.push(cached);
+        cachedSourceHashes.add(sourceHash);
       } else {
         hashesToCheck.push(hash);
       }
@@ -299,7 +377,9 @@ export class TorboxDebridService
 
         newResults = result.data.data.map((item) => ({
           id: -1,
-          hash: item.hash,
+          hash: item.hash
+            ? (sourceByCandidate.get(item.hash.toLowerCase()) ?? item.hash)
+            : undefined,
           status: 'cached' as const,
           size: item.size,
           files: item.files?.map((file) => ({
@@ -309,6 +389,11 @@ export class TorboxDebridService
             mimeType: file.mimetype,
           })),
         }));
+        newResults = [
+          ...new Map(
+            newResults.map((item) => [item.hash, item] as const)
+          ).values(),
+        ];
 
         newResults
           .filter((item) => item.hash)
@@ -329,30 +414,20 @@ export class TorboxDebridService
     return cachedResults;
   }
 
-  public async addNzb(nzb: string, name: string): Promise<DebridDownload> {
+  private async addNzbFile(
+    nzb: string,
+    name: string,
+    addOnlyIfCached: boolean
+  ): Promise<DebridDownload> {
     try {
-      const res = await this.torboxApi.usenet.createUsenetDownload(
-        this.apiVersion,
-        {
-          link: nzb,
-          name,
-        }
+      const document = await fetchTorboxNzbDocument(nzb);
+      const created = await this.client.createUsenetDownloadFromFile(
+        this.config.token,
+        document.xml,
+        name,
+        addOnlyIfCached
       );
-
-      if (!res.data?.data?.usenetdownloadId) {
-        throw new DebridError(`Usenet download failed: ${res.data?.detail}`, {
-          statusCode: res.metadata.status,
-          statusText: res.metadata.statusText,
-          code: 'UNKNOWN',
-          headers: res.metadata.headers,
-          body: res.data,
-          cause: res.data,
-          type: 'api_error',
-        });
-      }
-      const usenetDownload = await this.listNzbs(
-        res.data.data.usenetdownloadId.toString()
-      );
+      const usenetDownload = await this.listNzbs(String(created.id));
       if (Array.isArray(usenetDownload)) {
         return usenetDownload[0];
       }
@@ -360,6 +435,10 @@ export class TorboxDebridService
     } catch (error: any) {
       throw convertTorBoxError(error);
     }
+  }
+
+  public addNzb(nzb: string, name: string): Promise<DebridDownload> {
+    return this.addNzbFile(nzb, name, false);
   }
 
   private static libraryCache = Cache.getInstance<string, DebridDownload[]>(
@@ -633,35 +712,41 @@ export class TorboxDebridService
     return items[0];
   }
 
+  private resolveTorboxPlayback(
+    type: TorboxMediaType,
+    itemId: string | number,
+    fileId: string | number,
+    route?: PlaybackInfo['torbox']
+  ) {
+    const preferences = {
+      ...DEFAULT_TORBOX_PLAYBACK_PREFERENCES,
+      quality: this.credential.quality,
+      audioLanguage: this.credential.audioLanguage,
+      subtitleLanguage: this.credential.subtitleLanguage,
+      appendFilename: this.credential.appendFilename,
+      ...route,
+    };
+    return this.client.resolvePlayback({
+      type,
+      itemId,
+      fileId,
+      token: this.config.token,
+      ...preferences,
+    });
+  }
+
   public async generateUsenetLink(
     downloadId: string,
     fileId?: string,
-    clientIp?: string
+    _clientIp?: string
   ): Promise<string> {
-    const link = await this.torboxApi.usenet.requestDownloadLink(
-      this.apiVersion,
-      {
-        usenetId: downloadId,
-        fileId: fileId,
-        userIp: clientIp,
-        redirect: 'false',
-        token: this.config.token,
-      }
-    );
-
-    if (!link.data?.data) {
-      throw new DebridError('Failed to generate usenet download link', {
-        statusCode: link.metadata.status,
-        statusText: link.metadata.statusText,
-        code: 'UNKNOWN',
-        headers: link.metadata.headers,
-        body: link.data,
-        cause: link.data,
-        type: 'api_error',
-      });
-    }
-
-    return link.data.data;
+    return this.client.buildRequestDlPermalink({
+      type: 'usenet',
+      itemId: downloadId,
+      fileId: fileId ?? 0,
+      token: this.config.token,
+      ...DEFAULT_TORBOX_PLAYBACK_PREFERENCES,
+    });
   }
   public async resolve(
     playbackInfo: PlaybackInfo,
@@ -670,11 +755,18 @@ export class TorboxDebridService
     autoRemoveDownloads?: boolean,
     signal?: AbortSignal
   ): Promise<string | undefined> {
+    const accountCacheAndPlay =
+      playbackInfo.type === 'torrent'
+        ? (playbackInfo.torbox?.torrentCacheAndPlay ??
+          this.credential.torrentCacheAndPlay)
+        : (playbackInfo.torbox?.usenetCacheAndPlay ??
+          this.credential.usenetCacheAndPlay);
+    const effectiveCacheAndPlay = accountCacheAndPlay ?? cacheAndPlay;
     if (playbackInfo.type === 'torrent') {
       return this.stremthru.resolve(
         playbackInfo,
         filename,
-        cacheAndPlay,
+        effectiveCacheAndPlay,
         autoRemoveDownloads,
         signal
       );
@@ -687,19 +779,21 @@ export class TorboxDebridService
         filename,
         this.config.token,
         this.config.clientIp,
-        { cacheAndPlay, autoRemoveDownloads }
+        { cacheAndPlay: effectiveCacheAndPlay, autoRemoveDownloads }
       ),
       () =>
         this._resolve(
           playbackInfo,
           filename,
-          cacheAndPlay,
+          effectiveCacheAndPlay,
           autoRemoveDownloads,
           signal
         ),
       {
-        timeout: cacheAndPlay ? this.maxWaitTime + this.pollInterval : 30000,
-        ttl: cacheAndPlay
+        timeout: effectiveCacheAndPlay
+          ? this.maxWaitTime + this.pollInterval
+          : 30000,
+        ttl: effectiveCacheAndPlay
           ? this.maxWaitTime + this.pollInterval + 10000
           : 40000,
       }
@@ -788,7 +882,7 @@ export class TorboxDebridService
         hash,
       });
 
-      usenetDownload = await this.addNzb(nzb, filename);
+      usenetDownload = await this.addNzbFile(nzb, filename, !cacheAndPlay);
 
       logger.debug(`Usenet download added for ${makeUrlLogSafe(nzb)}`, {
         status: usenetDownload.status,
@@ -956,20 +1050,35 @@ export class TorboxDebridService
       fileId = file.id;
     }
 
-    const playbackLink = await this.generateUsenetLink(
+    fileId ??=
+      usenetDownload.files[0]?.id ?? usenetDownload.files[0]?.index ?? 0;
+    const playback = await this.resolveTorboxPlayback(
+      'usenet',
       usenetDownload.id.toString(),
-      fileId?.toString(),
-      this.config.clientIp
+      fileId,
+      playbackInfo.torbox
     );
+    const playbackLink = playback.url;
+    logger.debug('Resolved unified TorBox Usenet playback', {
+      mode: playback.mode,
+      target: playback.target,
+      fallbackReason: playback.fallbackReason,
+    });
+    if (playback.mode === 'native') {
+      await TorboxDebridService.playbackLinkCache.set(
+        cacheKey,
+        playbackLink,
+        appConfig.builtins.debrid.instantAvailabilityCacheTtl,
+        true
+      );
+    }
 
-    await TorboxDebridService.playbackLinkCache.set(
-      cacheKey,
-      playbackLink,
-      appConfig.builtins.debrid.instantAvailabilityCacheTtl,
-      true
-    );
-
-    if (autoRemoveDownloads && usenetDownload.id && nzb) {
+    if (
+      playback.mode === 'stream' &&
+      autoRemoveDownloads &&
+      usenetDownload.id &&
+      nzb
+    ) {
       this.removeNzb(usenetDownload.id.toString()).catch((err) => {
         logger.warn(
           `Failed to cleanup usenet download ${usenetDownload.id} after resolve: ${err.message}`

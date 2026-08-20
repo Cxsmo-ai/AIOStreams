@@ -19,6 +19,7 @@ import {
   ParsedMeta,
 } from '../db/index.js';
 import { createFormatter, FormatterContext } from '../formatters/index.js';
+import { applyTorboxPresentation } from '../debrid/torbox-presentation.js';
 import { AIOStreamsError, AIOStreamsResponse } from '../main/types.js';
 import { Cache, createLogger, getTimeTakenSincePoint } from '../utils/index.js';
 import { generateBingeGroup } from './utils.js';
@@ -78,6 +79,11 @@ export class StremioTransformer {
         }
       }
     }
+
+    ({ name, description } = applyTorboxPresentation(stream, {
+      name,
+      description,
+    }));
 
     const bingeGroup = options?.disableAutoplay
       ? undefined

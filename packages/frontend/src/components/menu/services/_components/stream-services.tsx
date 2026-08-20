@@ -35,6 +35,7 @@ import { Alert } from '../../../ui/alert';
 import TemplateOption from '../../../shared/template-option';
 import MarkdownLite from '../../../shared/markdown-lite';
 import { StatusResponse, UserData } from '@aiostreams/core';
+import { TorboxServiceModal } from './torbox-service-modal';
 
 // Usenet service IDs
 const USENET_SERVICE_IDS: string[] = [
@@ -587,6 +588,18 @@ function ServiceModal({
   useEffect(() => {
     if (open) setLocalValues(values);
   }, [open, values]);
+
+  if (serviceId === 'torbox') {
+    return (
+      <TorboxServiceModal
+        open={open}
+        onOpenChange={onOpenChange}
+        values={values}
+        onSubmit={onSubmit}
+        onClose={onClose}
+      />
+    );
+  }
 
   if (!status || !serviceId) return null;
   const meta = status.settings.services[serviceId]!;

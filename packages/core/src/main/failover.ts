@@ -87,6 +87,7 @@ function buildPlaybackInfo(
         filename,
         fileIndex: fileInfo.fileIndex,
         serviceItemId: fileInfo.serviceItemId,
+        torbox: fileInfo.torbox,
       }
     : {
         type: 'usenet',
@@ -104,6 +105,7 @@ function buildPlaybackInfo(
         filename,
         fileIndex: fileInfo.fileIndex,
         serviceItemId: fileInfo.serviceItemId,
+        torbox: fileInfo.torbox,
       };
 }
 

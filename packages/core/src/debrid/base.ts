@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { constants, ServiceId, Cache, appConfig } from '../utils/index.js';
 import { WD1_KEY_REGEX } from '../release-blocklist/keys.js';
+export { TorboxRouteSchema } from './torbox-route-schema.js';
+import { TorboxRouteSchema } from './torbox-route-schema.js';
 
 type DebridErrorCode =
   | 'BAD_GATEWAY'
@@ -224,6 +226,7 @@ const BasePlaybackInfoSchema = z.object({
   index: z.number().optional(),
   fileIndex: z.number().optional(),
   serviceItemId: z.string().optional(),
+  torbox: TorboxRouteSchema.optional(),
 });
 
 const BaseFileInfoSchema = z.object({
@@ -233,6 +236,7 @@ const BaseFileInfoSchema = z.object({
   autoRemoveDownloads: z.boolean().optional(),
   serviceItemId: z.string().optional(),
   fileIndex: z.number().optional(),
+  torbox: TorboxRouteSchema.optional(),
 });
 
 const TorrentInfoSchema = BaseFileInfoSchema.extend({
@@ -319,7 +323,7 @@ export interface TorrentDebridService extends BaseDebridService {
 
 export interface UsenetDebridService extends BaseDebridService {
   checkNzbs(
-    nzbs: { name?: string; hash?: string }[],
+    nzbs: { name?: string; hash?: string; nzb?: string }[],
     checkOwned?: boolean
   ): Promise<DebridDownload[]>;
   listNzbs?(id?: string): Promise<DebridDownload[]>;

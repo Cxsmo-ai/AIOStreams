@@ -153,6 +153,9 @@ export function buildResolveKey(
     absoluteEpisode ?? '-',
     airDates?.[0] ?? '-',
     filename ?? '-',
+    playbackInfo.torbox
+      ? getSimpleTextHash(JSON.stringify(playbackInfo.torbox))
+      : '-',
   ];
   if (flags !== undefined) {
     parts.push(String(flags.cacheAndPlay ?? '-'));

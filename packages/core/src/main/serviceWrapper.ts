@@ -19,6 +19,7 @@ import {
   NZB,
   NZBWithSelectedFile,
   hashNzbUrl,
+  getTorboxRouteConfig,
 } from '../debrid/index.js';
 import { processTorrents, processNZBs } from '../builtins/utils/debrid.js';
 import { StreamContext } from '../streams/context.js';
@@ -81,7 +82,8 @@ export async function resolveGlobalDeepbridNzbs(
       stream.indexer !== constants.DEEPBRID_SERVICE &&
       stream.addon.identifier !== 'deepbrid-usenet'
   );
-  if (candidates.length === 0) return { streams, errors: [], hasNewStreams: false };
+  if (candidates.length === 0)
+    return { streams, errors: [], hasNewStreams: false };
 
   const byHash = new Map<string, ParsedStream[]>();
   const nzbsByHash = new Map<string, NZB>();
@@ -563,6 +565,10 @@ async function buildDebridStreams(
               userData.cacheAndPlay?.enabled &&
               userData.cacheAndPlay?.streamTypes?.includes('torrent'),
             autoRemoveDownloads: userData.autoRemoveDownloads,
+            torbox:
+              result.service.id === 'torbox'
+                ? getTorboxRouteConfig(userData)
+                : undefined,
           }
         : undefined;
 

@@ -26,6 +26,11 @@ export function evaluateProxyStream(
   if (stream.proxied) {
     return 'skip';
   }
+  // TorBox Native and Stream/HLS URLs must be followed directly by the player.
+  // AIOStreams is control-plane only for every TorBox-routed result.
+  if (stream.service?.id === constants.TORBOX_SERVICE) {
+    return 'skip';
+  }
   // Native usenet streams are served directly from this instance's byte
   // endpoint (under BASE_URL) and must never be routed through any proxy.
   if (stream.service && stream.service.id === constants.AIOSTREAMS_SERVICE) {

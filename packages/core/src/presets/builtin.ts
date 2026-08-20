@@ -16,6 +16,7 @@ import {
 import { Preset } from './preset.js';
 import { releaseKeyKind } from '../release-blocklist/keys.js';
 import { stremthruSpecialCases } from './stremthru.js';
+import { getTorboxRouteConfig } from '../debrid/torbox-config.js';
 
 export class BuiltinStreamParser extends StreamParser {
   protected override getReleaseKey(stream: Stream): string | undefined {
@@ -287,13 +288,16 @@ export class BuiltinAddonPreset extends Preset {
     const orderedServices = services.includes(constants.DEEPBRID_SERVICE)
       ? [
           constants.DEEPBRID_SERVICE,
-          ...services.filter((service) => service !== constants.DEEPBRID_SERVICE),
+          ...services.filter(
+            (service) => service !== constants.DEEPBRID_SERVICE
+          ),
         ]
       : services;
     return {
       tmdbReadAccessToken: userData.tmdbAccessToken,
       tmdbApiKey: userData.tmdbApiKey,
       tvdbApiKey: userData.tvdbApiKey,
+      torbox: getTorboxRouteConfig(userData),
       services: orderedServices.map((service) => ({
         id: service,
         credential: this.getServiceCredential(service, userData),

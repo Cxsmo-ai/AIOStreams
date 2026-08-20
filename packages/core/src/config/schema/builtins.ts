@@ -246,6 +246,7 @@ export const builtinsSchema = {
         altmount: 2000,
         stremthru_newz: 2000,
         '*': 10000,
+        torbox: 5000,
       } as Record<string, number>,
       label: 'Download poll intervals (ms)',
       description:
@@ -261,6 +262,7 @@ export const builtinsSchema = {
         altmount: 90000,
         stremthru_newz: 90000,
         '*': 120000,
+        torbox: 90000,
       } as Record<string, number>,
       label: 'Download max wait times (ms)',
       description:

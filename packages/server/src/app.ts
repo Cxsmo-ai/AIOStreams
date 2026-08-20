@@ -9,6 +9,7 @@ import {
   postersApi,
   gdriveApi,
   debridApi,
+  torboxApi,
   searchApi,
   animeApi,
   proxyApi,
@@ -163,6 +164,7 @@ apiRouter.use('/catalogs', catalogApi);
 apiRouter.use('/posters', postersApi);
 apiRouter.use('/oauth/exchange/gdrive', gdriveApi);
 apiRouter.use('/debrid', debridApi);
+apiRouter.use('/torbox', torboxApi);
 apiRouter.use(
   '/search',
   (req, res, next) => {

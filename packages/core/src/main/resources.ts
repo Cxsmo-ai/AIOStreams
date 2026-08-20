@@ -21,6 +21,7 @@ import {
   resolveServiceWrappedStreams,
 } from './serviceWrapper.js';
 import type { ServiceWrapServiceTiming } from './serviceWrapper.js';
+import { decorateTorboxStreams } from '../debrid/torbox-presentation.js';
 import type { PrecomputeSubTimings } from '../streams/precomputer.js';
 import { StreamSelector } from '../parser/streamExpression.js';
 import type {
@@ -472,6 +473,8 @@ export async function processStreams(
     }
     return stream;
   });
+
+  finalStreams = decorateTorboxStreams(finalStreams, ctx.userData);
 
   if (ctx.userData.externalDownloads) {
     const streamsWithExternalDownloads: ParsedStream[] = [];
