@@ -23,6 +23,7 @@ export class ProwlarrPreset extends BuiltinAddonPreset {
       constants.STREMIO_NNTP_SERVICE,
       constants.STREMTHRU_NEWZ_SERVICE,
       constants.AIOSTREAMS_SERVICE,
+      constants.DEEPBRID_SERVICE,
     ];
     const options: Option[] = [
       ...(appConfig.builtins.prowlarr.url && appConfig.builtins.prowlarr.apiKey

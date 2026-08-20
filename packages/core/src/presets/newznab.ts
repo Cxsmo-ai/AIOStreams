@@ -122,6 +122,7 @@ export class NewznabPreset extends BuiltinAddonPreset {
       constants.STREMIO_NNTP_SERVICE,
       constants.STREMTHRU_NEWZ_SERVICE,
       constants.AIOSTREAMS_SERVICE,
+      constants.DEEPBRID_SERVICE,
     ] as ServiceId[];
     const options: Option[] = [
       {
