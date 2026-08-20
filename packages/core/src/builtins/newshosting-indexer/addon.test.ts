@@ -5,6 +5,7 @@ import {
   buildNewshostingQueries,
   decodeNewshostingNzbId,
   encodeNewshostingNzbId,
+  matchesNewshostingEpisode,
   rankNewshostingResult,
   searchNewshostingQueries,
 } from './addon.js';
@@ -197,6 +198,38 @@ test('applies file-count and playable-video ranking signals', () => {
   assert.ok(
     rankNewshostingResult({ ...base, files: 1 }, 800) >
       rankNewshostingResult({ ...base, files: 30 }, 800)
+  );
+});
+
+test('keeps requested episodes and season packs while rejecting explicit mismatches', () => {
+  const episode = { type: 'series', season: 1, episode: 1 } as const;
+  assert.equal(
+    matchesNewshostingEpisode(
+      parseNewshostingRelease('Tower Prep - 1x01'),
+      episode
+    ),
+    true
+  );
+  assert.equal(
+    matchesNewshostingEpisode(
+      parseNewshostingRelease('Tower Prep - 1x09'),
+      episode
+    ),
+    false
+  );
+  assert.equal(
+    matchesNewshostingEpisode(
+      parseNewshostingRelease('Tower.Prep.S01.Complete.720p'),
+      episode
+    ),
+    true
+  );
+  assert.equal(
+    matchesNewshostingEpisode(
+      parseNewshostingRelease('Tower Prep HDTV'),
+      episode
+    ),
+    true
   );
 });
 

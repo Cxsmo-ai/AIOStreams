@@ -23,6 +23,7 @@ import {
   NewshostingMediaMetadata,
   NewshostingMediaRequest,
   normalizeNewshostingComparableTitle,
+  ParsedNewshostingRelease,
   parseNewshostingRelease,
   scoreNewshostingReleaseMatch,
 } from './release.js';
@@ -177,6 +178,9 @@ function isSupportOnlyRelease(title: string): boolean {
 function looksLikeVideoRelease(title: string): boolean {
   return (
     /\.(?:mkv|mp4|m4v|avi|mov|ts|m2ts)(?:$|[\s._-])/i.test(title) ||
+    /\b(?:S\d{1,2}[\s._-]*E\d{1,3}|\d{1,2}x\d{1,3}|Season\s*\d{1,2}.*?(?:Episode|Ep)\s*\d{1,3})\b/i.test(
+      title
+    ) ||
     /\b(?:2160p|1080p|720p|480p|4k|uhd|web-?dl|webrip|blu-?ray|remux|hdtv)\b/i.test(
       title
     )
@@ -196,6 +200,30 @@ function sizeLooksPlayable(size: number): boolean {
   if (!size) return true;
   const gib = size / 1_073_741_824;
   return gib >= 0.05;
+}
+
+export function matchesNewshostingEpisode(
+  parsed: ParsedNewshostingRelease,
+  media: NewshostingMediaRequest
+): boolean {
+  if (media.type !== 'series' || !media.season || !media.episode) return true;
+  if (parsed.season !== undefined && parsed.season !== media.season) {
+    return false;
+  }
+  if (parsed.episodeRange) {
+    return (
+      parsed.episodeRange.start <= media.episode &&
+      parsed.episodeRange.end >= media.episode
+    );
+  }
+  if (parsed.episode !== undefined) return parsed.episode === media.episode;
+  if (parsed.absoluteEpisode !== undefined) {
+    return parsed.absoluteEpisode === media.episode;
+  }
+  if (parsed.seasonPack) {
+    return parsed.season === undefined || parsed.season === media.season;
+  }
+  return true;
 }
 
 function fileCountPenalty(files: number): number {
@@ -470,6 +498,7 @@ export class NewshostingIndexerAddon extends BaseDebridAddon<NewshostingIndexerA
           rankScore: rankNewshostingResult(result, match.score),
         };
       })
+      .filter((item) => matchesNewshostingEpisode(item.parsed, media))
       .filter(
         (item) => item.match.score >= (media.type === 'series' ? 650 : 600)
       )
