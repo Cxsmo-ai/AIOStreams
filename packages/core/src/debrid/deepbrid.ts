@@ -199,15 +199,25 @@ export class DeepbridService implements UsenetDebridService {
       }
     }
 
+    // Build once per check. Large established accounts can contain thousands
+    // of uploads, so repeatedly normalizing and linearly scanning for every
+    // external indexer result is needlessly expensive.
+    const bySourceUrl = new Map<string, DeepbridUpload>();
+    const byHash = new Map<string, DeepbridUpload>();
+    const byTitle = new Map<string, DeepbridUpload>();
+    for (const upload of uploads) {
+      if (upload.sourceUrl) bySourceUrl.set(upload.sourceUrl, upload);
+      if (upload.hash) byHash.set(upload.hash, upload);
+      const title = normalizedRelease(upload.title);
+      if (title.length > 3 && !byTitle.has(title)) byTitle.set(title, upload);
+    }
+
     return nzbs.map((nzb) => {
       const normalizedName = normalizedRelease(nzb.name ?? '');
-      const owned = uploads.find(
-        (upload) =>
-          (nzb.nzb && upload.sourceUrl === nzb.nzb) ||
-          (nzb.hash && upload.hash === nzb.hash) ||
-          (normalizedName.length > 3 &&
-            normalizedRelease(upload.title) === normalizedName)
-      );
+      const owned =
+        (nzb.nzb ? bySourceUrl.get(nzb.nzb) : undefined) ??
+        (nzb.hash ? byHash.get(nzb.hash) : undefined) ??
+        (normalizedName.length > 3 ? byTitle.get(normalizedName) : undefined);
       return {
         id: owned?.id ?? nzb.hash ?? nzb.name ?? 'unknown',
         name: nzb.name ?? owned?.title,
