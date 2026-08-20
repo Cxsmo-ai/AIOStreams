@@ -266,11 +266,14 @@ export function buildDeepbridQueries(
   if (media.type !== 'series' || !media.season || !media.episode) {
     return standard.slice(0, 2);
   }
-  const broad = standard.find((query) => !/\bS\d{2}E\d{2,3}\b/i.test(query));
-  const season = broad
-    ? `${broad} S${String(media.season).padStart(2, '0')}`
-    : undefined;
-  return [...new Set([standard[0], season, broad].filter(Boolean))] as string[];
+  const exact = standard.find((query) => /\bS\d{2}E\d{2,3}\b/i.test(query));
+  const season = standard.find(
+    (query) => /\bS\d{2}\b/i.test(query) && !/\bS\d{2}E\d{2,3}\b/i.test(query)
+  );
+  const broad = standard.find(
+    (query) => !/\bS\d{2}(?:E\d{2,3})?\b/i.test(query)
+  );
+  return [...new Set([exact, season, broad].filter(Boolean))] as string[];
 }
 
 function looksLikeVideoBytes(filename: string, bytes: Uint8Array): boolean {
@@ -430,7 +433,10 @@ export function prioritizeDeepbridSeasonPacks(
     const parsed = parseNewshostingRelease(item.result.title);
     return parsed.season === media.season && parsed.seasonPack === true;
   });
-  const packLimit = Math.min(packs.length, Math.max(1, Math.ceil(cappedLimit / 4)));
+  const packLimit = Math.min(
+    packs.length,
+    Math.max(1, Math.ceil(cappedLimit / 4))
+  );
   const selectedPacks = packs.slice(0, packLimit);
   const packTokens = new Set(selectedPacks.map((item) => item.result.token));
   return [
@@ -530,14 +536,21 @@ export async function resolveDeepbridFiles(
           item.result.title
         );
         if (!options.probeFile) {
-          const values = files.map((file) => ({ ...item, file, archiveExpanded }));
+          const values = files.map((file) => ({
+            ...item,
+            file,
+            archiveExpanded,
+          }));
           resolvedByIndex.set(index, values);
           resolvedCount += values.length;
           continue;
         }
         const probed = await Promise.all(
           files.map(async (file) => {
-            const probeTimeoutMs = remainingRequestBudget(options.deadline, now);
+            const probeTimeoutMs = remainingRequestBudget(
+              options.deadline,
+              now
+            );
             if (probeTimeoutMs < DEEPBRID_MIN_REQUEST_BUDGET_MS)
               return undefined;
             return (await options.probeFile!(file, {

@@ -38,12 +38,45 @@ import {
 } from './torbox-client.js';
 import pLimit from 'p-limit';
 import {
+  chunkTorboxNzbHashes,
   fetchTorboxNzbDocument,
   fetchTorboxNzbHashes,
   getTorboxNzbHashes,
 } from './torbox-nzb-hashes.js';
 
 const logger = createLogger('debrid:torbox');
+const TORBOX_NZB_HASH_CACHE_TTL_SECONDS = 24 * 60 * 60;
+const torboxNzbHashEnrichmentLimit = pLimit(4);
+const torboxNzbHashEnrichmentInFlight = new Map<string, Promise<void>>();
+const torboxNzbContentHashCache = Cache.getInstance<string, string[]>(
+  'tb:nzb-content-hashes'
+);
+
+function scheduleTorboxNzbHashEnrichment(url: string, title?: string): void {
+  const key = getSimpleTextHash(url);
+  if (torboxNzbHashEnrichmentInFlight.has(key)) return;
+  if (torboxNzbHashEnrichmentLimit.pendingCount >= 500) return;
+
+  const task = torboxNzbHashEnrichmentLimit(async () => {
+    try {
+      const hashes = await fetchTorboxNzbHashes(url);
+      await torboxNzbContentHashCache.set(
+        key,
+        hashes,
+        TORBOX_NZB_HASH_CACHE_TTL_SECONDS,
+        true
+      );
+    } catch (error) {
+      logger.debug('TorBox background NZB hash enrichment failed', {
+        name: title,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }).finally(() => {
+    torboxNzbHashEnrichmentInFlight.delete(key);
+  });
+  torboxNzbHashEnrichmentInFlight.set(key, task);
+}
 
 /**
  * TorBox reports the failure kind as a string enum in the `error` field of its
@@ -278,65 +311,58 @@ export class TorboxDebridService
     nzbs: { name?: string; hash?: string; nzb?: string }[]
   ): Promise<DebridDownload[]> {
     const sourceByCandidate = new Map<string, string>();
-    const hashLimit = pLimit(3);
     const candidateGroups = await Promise.all(
       nzbs
         .filter(
           (nzb): nzb is { name?: string; hash: string; nzb?: string } =>
             typeof nzb.hash === 'string' && nzb.hash.length > 0
         )
-        .map((source) =>
-          hashLimit(async () => {
-            const candidates = new Set<string>([source.hash.toLowerCase()]);
-            if (source.nzb) {
-              try {
-                for (const hash of await fetchTorboxNzbHashes(source.nzb)) {
-                  candidates.add(hash.toLowerCase());
-                }
-              } catch (error) {
-                logger.debug(
-                  'TorBox NZB content hash unavailable; using URL hashes',
-                  {
-                    name: source.name,
-                    error:
-                      error instanceof Error ? error.message : String(error),
-                  }
-                );
-                for (const hash of await getTorboxNzbHashes({
-                  url: source.nzb,
-                }))
-                  candidates.add(hash.toLowerCase());
-              }
+        .map(async (source) => {
+          const candidates = new Set<string>([source.hash.toLowerCase()]);
+          if (source.nzb) {
+            // TorBox officially accepts the MD5 of either an NZB link or file.
+            // Link hashes are immediate; full NZB generation can take seconds
+            // per result for protected indexers such as Newshosting, so reuse
+            // cached content hashes and enrich missing entries in the
+            // background without delaying or hiding the uncached result.
+            for (const hash of await getTorboxNzbHashes({ url: source.nzb })) {
+              candidates.add(hash.toLowerCase());
             }
-            return { source, candidates: [...candidates] };
-          })
-        )
-    );
-    nzbs = candidateGroups.flatMap(({ source, candidates }) =>
-      candidates.map((hash) => ({ name: source.name, hash }))
+            const hashCacheKey = getSimpleTextHash(source.nzb);
+            const cachedHashes =
+              await torboxNzbContentHashCache.get(hashCacheKey);
+            if (cachedHashes?.length) {
+              for (const hash of cachedHashes) {
+                candidates.add(hash.toLowerCase());
+              }
+            } else {
+              scheduleTorboxNzbHashEnrichment(source.nzb, source.name);
+            }
+          }
+          return { source, candidates: [...candidates] };
+        })
     );
     for (const { source, candidates } of candidateGroups)
       for (const candidate of candidates)
         sourceByCandidate.set(candidate, source.hash);
-    nzbs = nzbs.filter((nzb) => nzb.hash);
-    if (nzbs.length === 0) {
+    if (candidateGroups.length === 0) {
       return [];
     }
     const cachedResults: DebridDownload[] = [];
     const hashesToCheck: string[] = [];
-    const cachedSourceHashes = new Set<string>();
-    for (const { hash } of nzbs as { hash: string }[]) {
-      const sourceHash =
-        sourceByCandidate.get(hash.toLowerCase()) ?? hash.toLowerCase();
-      if (cachedSourceHashes.has(sourceHash)) continue;
-      const cacheKey = getSimpleTextHash(sourceHash);
-      const cached =
-        await TorboxDebridService.instantAvailabilityCache.get(cacheKey);
+    const availability = await Promise.all(
+      candidateGroups.map(async ({ source, candidates }) => ({
+        candidates,
+        cached: await TorboxDebridService.instantAvailabilityCache.get(
+          getSimpleTextHash(source.hash.toLowerCase())
+        ),
+      }))
+    );
+    for (const { candidates, cached } of availability) {
       if (cached) {
         cachedResults.push(cached);
-        cachedSourceHashes.add(sourceHash);
       } else {
-        hashesToCheck.push(hash);
+        hashesToCheck.push(...candidates);
       }
     }
 
@@ -344,51 +370,60 @@ export class TorboxDebridService
       let newResults: DebridDownload[] = [];
 
       try {
-        const result = await this.torboxApi.usenet.getUsenetCachedAvailability(
-          this.apiVersion,
-          {
-            hashes: hashesToCheck,
-            format: 'list',
-            listFiles: 'true',
-          }
+        const availabilityLimit = pLimit(3);
+        const responses = await Promise.all(
+          chunkTorboxNzbHashes(hashesToCheck).map((hashes) =>
+            availabilityLimit(() =>
+              this.torboxApi.usenet.getUsenetCachedAvailability(
+                this.apiVersion,
+                {
+                  hashes,
+                  format: 'list',
+                  listFiles: 'true',
+                }
+              )
+            )
+          )
         );
-        if (!result.data?.success) {
-          throw new DebridError(`Failed to check instant availability`, {
-            statusCode: result.metadata.status,
-            statusText: result.metadata.statusText,
-            code: 'UNKNOWN',
-            headers: result.metadata.headers,
-            body: result.data,
-          });
-        }
-
-        if (!Array.isArray(result.data.data)) {
-          throw new DebridError(
-            'Invalid response from Torbox API. Expected array, got object',
-            {
+        for (const result of responses) {
+          if (!result.data?.success) {
+            throw new DebridError(`Failed to check instant availability`, {
               statusCode: result.metadata.status,
               statusText: result.metadata.statusText,
               code: 'UNKNOWN',
               headers: result.metadata.headers,
               body: result.data,
-            }
+            });
+          }
+          if (!Array.isArray(result.data.data)) {
+            throw new DebridError(
+              'Invalid response from Torbox API. Expected array, got object',
+              {
+                statusCode: result.metadata.status,
+                statusText: result.metadata.statusText,
+                code: 'UNKNOWN',
+                headers: result.metadata.headers,
+                body: result.data,
+              }
+            );
+          }
+          newResults.push(
+            ...result.data.data.map((item) => ({
+              id: -1,
+              hash: item.hash
+                ? (sourceByCandidate.get(item.hash.toLowerCase()) ?? item.hash)
+                : undefined,
+              status: 'cached' as const,
+              size: item.size,
+              files: item.files?.map((file) => ({
+                id: file.id,
+                name: file.shortName ?? file.name ?? '',
+                size: file.size ?? 0,
+                mimeType: file.mimetype,
+              })),
+            }))
           );
         }
-
-        newResults = result.data.data.map((item) => ({
-          id: -1,
-          hash: item.hash
-            ? (sourceByCandidate.get(item.hash.toLowerCase()) ?? item.hash)
-            : undefined,
-          status: 'cached' as const,
-          size: item.size,
-          files: item.files?.map((file) => ({
-            id: file.id,
-            name: file.shortName ?? file.name ?? '',
-            size: file.size ?? 0,
-            mimeType: file.mimetype,
-          })),
-        }));
         newResults = [
           ...new Map(
             newResults.map((item) => [item.hash, item] as const)

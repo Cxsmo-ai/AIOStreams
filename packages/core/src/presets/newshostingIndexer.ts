@@ -9,6 +9,7 @@ import {
   ServiceId,
 } from '../utils/index.js';
 import { NewshostingPrivateConfigSchema } from '../builtins/newshosting-indexer/addon.js';
+import { withInternalTimeoutMargin } from './timeout.js';
 
 const SUPPORTED_SERVICES = [
   constants.TORBOX_SERVICE,
@@ -17,6 +18,7 @@ const SUPPORTED_SERVICES = [
   constants.STREMIO_NNTP_SERVICE,
   constants.STREMTHRU_NEWZ_SERVICE,
   constants.AIOSTREAMS_SERVICE,
+  constants.DEEPBRID_SERVICE,
 ] as ServiceId[];
 
 export class NewshostingIndexerPreset extends BuiltinAddonPreset {
@@ -53,8 +55,8 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
           'Maximum number of matched, filtered Newshosting results returned per title.',
         type: 'number',
         required: false,
-        default: 24,
-        constraints: { min: 1, max: 40, forceInUi: false },
+        default: 100,
+        constraints: { min: 1, max: 200, forceInUi: false },
       },
       {
         id: 'timeout',
@@ -90,7 +92,7 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
           'Timeout for fetching file details and creating an NZB after a result is selected.',
         type: 'number',
         required: false,
-        default: 30_000,
+        default: 60_000,
         constraints: {
           min: appConfig.userLimits.timeouts.minTimeout,
           max: appConfig.userLimits.timeouts.maxTimeout,
@@ -105,7 +107,7 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
         type: 'number',
         required: false,
         showInSimpleMode: false,
-        default: 32,
+        default: 160,
         constraints: { min: 1, max: 500, forceInUi: false },
       },
       {
@@ -232,8 +234,8 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
       host: connection.host || 'srv.aboutusenet.com',
       ip: connection.ip || '81.171.93.8',
       port: connection.port ?? 5598,
-      maxNzbFiles: options.maxNzbFiles ?? 32,
-      nzbTimeout: options.nzbTimeout ?? 30_000,
+      maxNzbFiles: options.maxNzbFiles ?? 160,
+      nzbTimeout: options.nzbTimeout ?? 60_000,
       proxyAuth: proxyGrant,
     });
     const encryptedNzbConfig = encryptString(JSON.stringify(privateConfig));
@@ -245,7 +247,7 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
     const config = {
       ...this.getBaseConfig(userData, services),
       ...privateConfig,
-      maxResults: options.maxResults ?? 24,
+      maxResults: options.maxResults ?? 100,
       searchTimeout: options.searchTimeout ?? 8_000,
       proxyAuth: proxyGrant,
       nzbConfig: encryptedNzbConfig.data,
@@ -268,9 +270,9 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
         mediaTypes: options.mediaTypes || [],
         timeout: Math.min(
           appConfig.userLimits.timeouts.maxTimeout,
-          Math.max(
-            options.timeout || this.METADATA.TIMEOUT,
-            (options.searchTimeout ?? 8_000) * 4 + 5_000
+          withInternalTimeoutMargin(
+            options.timeout,
+            (options.searchTimeout ?? 8_000) * 2
           )
         ),
         preset: {

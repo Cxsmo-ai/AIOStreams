@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
   cleanTorboxNzbXml,
+  chunkTorboxNzbHashes,
   fetchTorboxNzbDocument,
   fetchTorboxNzbHashes,
   getTorboxNzbHashes,
@@ -44,6 +45,18 @@ test('generates exact URL, normalized URL, raw, cleaned, and first-message hashe
   assert.ok(hashes.includes(md5('second-file-part-1@example')));
   assert.ok(!hashes.includes(md5('first-file-part-2@example')));
   assert.equal(hashes.length, 6);
+});
+
+test('deduplicates and batches TorBox Usenet hashes at the documented limit', () => {
+  const hashes = Array.from({ length: 205 }, (_, index) =>
+    index.toString(16).padStart(32, '0')
+  );
+  const batches = chunkTorboxNzbHashes([...hashes, hashes[0].toUpperCase()]);
+  assert.deepEqual(
+    batches.map((batch) => batch.length),
+    [100, 100, 5]
+  );
+  assert.equal(new Set(batches.flat()).size, 205);
 });
 
 test('rejects internal DTDs, entities, malformed documents, and over-limit NZBs', async () => {

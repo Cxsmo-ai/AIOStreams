@@ -2,12 +2,14 @@ import { z } from 'zod';
 import { ParsedId } from '../../utils/id-parser.js';
 import {
   appConfig,
+  Cache,
   constants,
   createLogger,
   fromUrlSafeBase64,
   getSimpleTextHash,
   toUrlSafeBase64,
 } from '../../utils/index.js';
+import pLimit from 'p-limit';
 import { hashNzbUrl, NZB, Torrent } from '../../debrid/index.js';
 import {
   BaseDebridAddon,
@@ -26,6 +28,14 @@ import {
 } from './release.js';
 
 const logger = createLogger('newshosting-indexer');
+const NEWSHOSTING_NZB_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const NEWSHOSTING_NZB_CACHE_MAX_ENTRIES = 128;
+const newshostingNzbCache = Cache.getInstance<string, string>(
+  'newshosting:nzb',
+  NEWSHOSTING_NZB_CACHE_MAX_ENTRIES,
+  'memory'
+);
+const newshostingNzbInFlight = new Map<string, Promise<string>>();
 
 const SUPPORTED_SERVICES = new Set<BuiltinServiceId>([
   constants.TORBOX_SERVICE,
@@ -34,6 +44,7 @@ const SUPPORTED_SERVICES = new Set<BuiltinServiceId>([
   constants.STREMIO_NNTP_SERVICE,
   constants.STREMTHRU_NEWZ_SERVICE,
   constants.AIOSTREAMS_SERVICE,
+  constants.DEEPBRID_SERVICE,
 ]);
 
 export const NewshostingPrivateConfigSchema = z.object({
@@ -42,8 +53,8 @@ export const NewshostingPrivateConfigSchema = z.object({
   host: z.string().trim().min(1).max(253).default('srv.aboutusenet.com'),
   ip: z.string().trim().min(1).max(253).default('81.171.93.8'),
   port: z.number().int().min(1).max(65_535).default(5598),
-  maxNzbFiles: z.number().int().min(1).max(500).default(32),
-  nzbTimeout: z.number().int().min(1_000).max(120_000).default(30_000),
+  maxNzbFiles: z.number().int().min(1).max(500).default(160),
+  nzbTimeout: z.number().int().min(1_000).max(120_000).default(60_000),
   proxyAuth: z.string().min(1),
 });
 export type NewshostingPrivateConfig = z.infer<
@@ -57,10 +68,10 @@ export const NewshostingIndexerAddonConfigSchema =
     host: z.string().trim().min(1).max(253).default('srv.aboutusenet.com'),
     ip: z.string().trim().min(1).max(253).default('81.171.93.8'),
     port: z.number().int().min(1).max(65_535).default(5598),
-    maxResults: z.number().int().min(1).max(40).default(24),
-    maxNzbFiles: z.number().int().min(1).max(500).default(32),
+    maxResults: z.number().int().min(1).max(200).default(100),
+    maxNzbFiles: z.number().int().min(1).max(500).default(160),
     searchTimeout: z.number().int().min(1_000).max(120_000).default(8_000),
-    nzbTimeout: z.number().int().min(1_000).max(120_000).default(30_000),
+    nzbTimeout: z.number().int().min(1_000).max(120_000).default(60_000),
     proxyAuth: z.string().min(1),
     nzbConfig: z.string().min(32).max(16_384),
   });
@@ -139,11 +150,16 @@ export function buildNewshostingQueries(
   const selectedTitles = queryTitles.slice(0, 3);
   if (media.type === 'series' && media.season && media.episode) {
     const code = `S${String(media.season).padStart(2, '0')}E${String(media.episode).padStart(2, '0')}`;
+    const season = `S${String(media.season).padStart(2, '0')}`;
     return [
       ...new Set(
-        selectedTitles.flatMap((title) => [`${title} ${code}`, title])
+        selectedTitles.flatMap((title) => [
+          `${title} ${code}`,
+          `${title} ${season}`,
+          title,
+        ])
       ),
-    ].slice(0, 4);
+    ].slice(0, 6);
   }
   return [
     ...new Set(
@@ -154,10 +170,8 @@ export function buildNewshostingQueries(
   ].slice(0, 4);
 }
 
-function isArchiveRelease(title: string): boolean {
-  return /(?:^|[.\s_-])(?:rar|r\d{2}|7z(?:\.\d{3})?|zip|par2|sfv|nfo)(?:$|[.\s_-])/i.test(
-    title
-  );
+function isSupportOnlyRelease(title: string): boolean {
+  return /(?:^|[.\s_-])(?:par2|sfv|nfo)(?:$|[.\s_-])/i.test(title);
 }
 
 function looksLikeVideoRelease(title: string): boolean {
@@ -181,7 +195,7 @@ function hasBadReleaseSignal(title: string): boolean {
 function sizeLooksPlayable(size: number): boolean {
   if (!size) return true;
   const gib = size / 1_073_741_824;
-  return gib >= 0.25 && gib <= 90;
+  return gib >= 0.05;
 }
 
 function fileCountPenalty(files: number): number {
@@ -253,6 +267,59 @@ async function withTimeout<T>(
   }
 }
 
+interface NewshostingSearchClient {
+  connect(): Promise<void>;
+  search(
+    query: string,
+    page?: number,
+    perPage?: number
+  ): Promise<{ results: NewshostingResult[] }>;
+  close(): void;
+}
+
+export async function searchNewshostingQueries(
+  queries: string[],
+  createClient: () => NewshostingSearchClient,
+  timeoutMs: number,
+  perPage = 100
+): Promise<{ results: NewshostingResult[]; errors: Error[] }> {
+  const concurrency = pLimit(Math.min(3, Math.max(1, queries.length)));
+  const settled = await Promise.allSettled(
+    queries.map((query) =>
+      concurrency(async () => {
+        const client = createClient();
+        try {
+          return await withTimeout(
+            (async () => {
+              await client.connect();
+              return client.search(query, 1, perPage);
+            })(),
+            timeoutMs,
+            'newshosting_search_timeout'
+          );
+        } finally {
+          client.close();
+        }
+      })
+    )
+  );
+
+  const results: NewshostingResult[] = [];
+  const errors: Error[] = [];
+  for (const result of settled) {
+    if (result.status === 'fulfilled') {
+      results.push(...result.value.results);
+    } else {
+      errors.push(
+        result.reason instanceof Error
+          ? result.reason
+          : new Error(String(result.reason))
+      );
+    }
+  }
+  return { results, errors };
+}
+
 export async function createNewshostingNzb(
   encodedId: string,
   rawConfig: NewshostingPrivateConfig
@@ -262,21 +329,51 @@ export async function createNewshostingNzb(
   if (id.files && id.files > config.maxNzbFiles) {
     throw new Error('newshosting_nzb_too_many_files');
   }
-  const client = new NewshostingClient({
-    ...config,
-    timeoutMs: config.nzbTimeout,
-  });
+  const cacheKey = getSimpleTextHash(
+    JSON.stringify([
+      config.host,
+      config.ip,
+      config.port,
+      id.index,
+      id.scope,
+      id.itemId,
+    ])
+  );
+  const cached = await newshostingNzbCache.get(cacheKey);
+  if (cached) return cached;
+  const existing = newshostingNzbInFlight.get(cacheKey);
+  if (existing) return existing;
+
+  const task = (async () => {
+    const client = new NewshostingClient({
+      ...config,
+      timeoutMs: config.nzbTimeout,
+    });
+    try {
+      const nzb = await withTimeout(
+        (async () => {
+          await client.connect();
+          return client.createNzb(id.index, id.scope, id.itemId);
+        })(),
+        config.nzbTimeout,
+        'newshosting_nzb_timeout'
+      );
+      await newshostingNzbCache.set(
+        cacheKey,
+        nzb,
+        NEWSHOSTING_NZB_CACHE_TTL_SECONDS,
+        true
+      );
+      return nzb;
+    } finally {
+      client.close();
+    }
+  })();
+  newshostingNzbInFlight.set(cacheKey, task);
   try {
-    return await withTimeout(
-      (async () => {
-        await client.connect();
-        return client.createNzb(id.index, id.scope, id.itemId);
-      })(),
-      config.nzbTimeout,
-      'newshosting_nzb_timeout'
-    );
+    return await task;
   } finally {
-    client.close();
+    newshostingNzbInFlight.delete(cacheKey);
   }
 }
 
@@ -306,39 +403,41 @@ export class NewshostingIndexerAddon extends BaseDebridAddon<NewshostingIndexerA
     const queries = buildNewshostingQueries(metadata, media);
     if (!queries.length) return [];
 
-    const client = new NewshostingClient({
-      username: this.userData.username,
-      password: this.userData.password,
-      host: this.userData.host,
-      ip: this.userData.ip,
-      port: this.userData.port,
-      maxNzbFiles: this.userData.maxNzbFiles,
-      timeoutMs: this.userData.searchTimeout,
-    });
     const seen = new Set<string>();
     const results: NewshostingResult[] = [];
-    try {
-      await withTimeout(
-        client.connect(),
-        this.userData.searchTimeout,
-        'newshosting_search_timeout'
-      );
-      for (const query of queries) {
-        const response = await withTimeout(
-          client.search(query, 1, 50),
-          this.userData.searchTimeout,
-          'newshosting_search_timeout'
-        );
-        for (const result of response.results) {
-          const key = `${result.index}_${result.scope}_${result.itemId}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            results.push(result);
-          }
-        }
+    const search = await searchNewshostingQueries(
+      queries,
+      () =>
+        new NewshostingClient({
+          username: this.userData.username,
+          password: this.userData.password,
+          host: this.userData.host,
+          ip: this.userData.ip,
+          port: this.userData.port,
+          maxNzbFiles: this.userData.maxNzbFiles,
+          timeoutMs: this.userData.searchTimeout,
+        }),
+      this.userData.searchTimeout
+    );
+    for (const result of search.results) {
+      const key = `${result.index}_${result.scope}_${result.itemId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        results.push(result);
       }
-    } finally {
-      client.close();
+    }
+    if (search.errors.length) {
+      this.logger.warn(
+        'Some Newshosting searches failed; keeping partial results',
+        {
+          failed: search.errors.length,
+          successful: queries.length - search.errors.length,
+          errors: search.errors.map((error) => error.message),
+        }
+      );
+      if (!results.length) {
+        throw search.errors[0];
+      }
     }
 
     const ranked = results
@@ -348,7 +447,7 @@ export class NewshostingIndexerAddon extends BaseDebridAddon<NewshostingIndexerA
           result.index &&
           result.scope &&
           result.itemId &&
-          !isArchiveRelease(result.name)
+          !isSupportOnlyRelease(result.name)
       )
       .filter(
         (result) => !result.files || result.files <= this.userData.maxNzbFiles

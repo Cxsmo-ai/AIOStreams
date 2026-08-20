@@ -8,6 +8,23 @@ export interface TorboxNzbHashOptions {
   maxSegments?: number;
 }
 
+export const TORBOX_USENET_HASH_BATCH_SIZE = 100;
+
+export function chunkTorboxNzbHashes(
+  hashes: string[],
+  size = TORBOX_USENET_HASH_BATCH_SIZE
+): string[][] {
+  if (!Number.isInteger(size) || size < 1) {
+    throw new Error('TorBox hash batch size must be a positive integer');
+  }
+  const unique = [...new Set(hashes.map((hash) => hash.toLowerCase()))];
+  const batches: string[][] = [];
+  for (let offset = 0; offset < unique.length; offset += size) {
+    batches.push(unique.slice(offset, offset + size));
+  }
+  return batches;
+}
+
 const md5 = (value: string | Buffer): string =>
   createHash('md5').update(value).digest('hex').toLowerCase();
 

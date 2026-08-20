@@ -6,6 +6,7 @@ import {
   decodeNewshostingNzbId,
   encodeNewshostingNzbId,
   rankNewshostingResult,
+  searchNewshostingQueries,
 } from './addon.js';
 import {
   buildNewshostingNzb,
@@ -130,7 +131,7 @@ test('builds the proven episode-first search plan', () => {
       },
       { type: 'series', season: 1, episode: 1 }
     ),
-    ['The Mentalist S01E01', 'The Mentalist']
+    ['The Mentalist S01E01', 'The Mentalist S01', 'The Mentalist']
   );
 });
 
@@ -197,6 +198,45 @@ test('applies file-count and playable-video ranking signals', () => {
     rankNewshostingResult({ ...base, files: 1 }, 800) >
       rankNewshostingResult({ ...base, files: 30 }, 800)
   );
+});
+
+test('keeps successful Newshosting query results when another query fails', async () => {
+  let created = 0;
+  let closed = 0;
+  const successful = {
+    name: 'Game.of.Thrones.S01E01.1080p.WEB-DL.mkv',
+    size: 4_000_000_000,
+    date: '2026-01-02T03:04:05Z',
+    files: 1,
+    category: 'TV',
+    author: 'poster',
+    index: 'idx',
+    scope: 'scope',
+    itemId: 'item',
+  };
+
+  const result = await searchNewshostingQueries(
+    ['exact', 'broad'],
+    () => {
+      const index = created++;
+      return {
+        async connect() {},
+        async search() {
+          if (index === 1) throw new Error('temporary_search_failure');
+          return { results: [successful] };
+        },
+        close() {
+          closed += 1;
+        },
+      };
+    },
+    1_000
+  );
+
+  assert.deepEqual(result.results, [successful]);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0].message, /temporary_search_failure/);
+  assert.equal(closed, 2);
 });
 
 test('binds Newshosting grants to only the protected NZB route', () => {
