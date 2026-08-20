@@ -414,6 +414,264 @@ function VariantSelector({
   );
 }
 
+type ManifestAddonOption = {
+  instanceId: string;
+  name: string;
+  p2pCapable: boolean;
+};
+
+interface ClientManifestProfilesCardProps {
+  addons: ManifestAddonOption[];
+  value: UserData['clientManifests'];
+  onChange: (value: NonNullable<UserData['clientManifests']>) => void;
+  wakoManifestUrl: string;
+  usingAlias: boolean;
+  onCopyWakoManifestUrl: () => void;
+}
+
+function ClientManifestProfilesCard({
+  addons,
+  value,
+  onChange,
+  wakoManifestUrl,
+  usingAlias,
+  onCopyWakoManifestUrl,
+}: ClientManifestProfilesCardProps) {
+  const excludedNormal = new Set(value?.normal?.excludedPresetIds ?? []);
+  const selectedWako = new Set(value?.wakoP2p?.presetIds ?? []);
+  const p2pAddons = addons.filter((addon) => addon.p2pCapable);
+  const normalCount = addons.filter(
+    (addon) => !excludedNormal.has(addon.instanceId)
+  ).length;
+  const wakoCount = p2pAddons.filter((addon) =>
+    selectedWako.has(addon.instanceId)
+  ).length;
+  const wakoEnabled = value?.wakoP2p?.enabled === true;
+
+  const updateNormal = (excludedPresetIds: string[]) =>
+    onChange({
+      ...value,
+      normal: { ...value?.normal, excludedPresetIds },
+    });
+
+  const updateWako = (
+    patch: Partial<NonNullable<UserData['clientManifests']>['wakoP2p']>
+  ) =>
+    onChange({
+      ...value,
+      wakoP2p: {
+        ...value?.wakoP2p,
+        enabled: value?.wakoP2p?.enabled ?? false,
+        presetIds: value?.wakoP2p?.presetIds ?? [],
+        waitForAll: true,
+        ...patch,
+      },
+    });
+
+  const toggleNormal = (instanceId: string, included: boolean) => {
+    const next = new Set(excludedNormal);
+    if (included) next.delete(instanceId);
+    else next.add(instanceId);
+    updateNormal([...next]);
+  };
+
+  const toggleWako = (instanceId: string, included: boolean) => {
+    const next = new Set(selectedWako);
+    if (included) next.add(instanceId);
+    else next.delete(instanceId);
+    updateWako({ presetIds: [...next] });
+  };
+
+  return (
+    <SettingsCard
+      title="Manifest Profiles"
+      description="Choose addon membership once, then use the regular AIOStreams manifest and a separate Wako-native P2P manifest independently."
+    >
+      <div className="space-y-5">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-xl border border-gray-700 bg-gray-800/30 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-white">Regular manifest</h3>
+                <p className="mt-1 text-xs text-gray-400">
+                  Uses your normal services, proxying, Usenet, filtering, and
+                  playback settings.
+                </p>
+              </div>
+              <span className="shrink-0 rounded-full bg-brand-500/15 px-2.5 py-1 text-xs font-medium text-brand-300">
+                {normalCount}/{addons.length}
+              </span>
+            </div>
+          </div>
+          <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-white">Wako P2P manifest</h3>
+                <p className="mt-1 text-xs text-gray-400">
+                  Native torrents only. Debrid and Usenet resolution are
+                  disabled, and AIOStreams waits for every selected addon.
+                </p>
+              </div>
+              <Switch
+                id="enable-wako-p2p-manifest"
+                aria-label="Enable Wako P2P manifest"
+                value={wakoEnabled}
+                onValueChange={(enabled) =>
+                  updateWako({
+                    enabled,
+                    presetIds:
+                      enabled && selectedWako.size === 0
+                        ? p2pAddons.map((addon) => addon.instanceId)
+                        : [...selectedWako],
+                  })
+                }
+              />
+            </div>
+          </div>
+        </div>
+
+        {addons.length === 0 ? (
+          <Alert
+            intent="warning"
+            description="Enable at least one stream addon before creating manifest profiles."
+          />
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-gray-700">
+            <div className="grid grid-cols-[minmax(0,1fr)_76px_92px] items-center gap-2 border-b border-gray-700 bg-gray-900/70 px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-gray-400 sm:grid-cols-[minmax(0,1fr)_120px_150px]">
+              <span>Enabled addon</span>
+              <button
+                type="button"
+                className="text-center normal-case tracking-normal text-brand-300 hover:text-brand-200"
+                onClick={() =>
+                  updateNormal(
+                    normalCount === addons.length
+                      ? [
+                          ...new Set([
+                            ...(value?.normal?.excludedPresetIds ?? []),
+                            ...addons.map((addon) => addon.instanceId),
+                          ]),
+                        ]
+                      : (value?.normal?.excludedPresetIds ?? []).filter(
+                          (id) =>
+                            !addons.some((addon) => addon.instanceId === id)
+                        )
+                  )
+                }
+              >
+                {normalCount === addons.length ? 'None' : 'All'}
+              </button>
+              <button
+                type="button"
+                disabled={!wakoEnabled || p2pAddons.length === 0}
+                className="text-center normal-case tracking-normal text-violet-300 hover:text-violet-200 disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={() =>
+                  updateWako({
+                    presetIds:
+                      wakoCount === p2pAddons.length
+                        ? []
+                        : p2pAddons.map((addon) => addon.instanceId),
+                  })
+                }
+              >
+                {wakoCount === p2pAddons.length && p2pAddons.length > 0
+                  ? 'None'
+                  : 'All P2P'}
+              </button>
+            </div>
+
+            <div className="max-h-96 divide-y divide-gray-800 overflow-y-auto">
+              {addons.map((addon) => {
+                const normalIncluded = !excludedNormal.has(addon.instanceId);
+                const wakoIncluded = selectedWako.has(addon.instanceId);
+                return (
+                  <div
+                    key={addon.instanceId}
+                    className="grid grid-cols-[minmax(0,1fr)_76px_92px] items-center gap-2 bg-gray-800/20 px-3 py-3 hover:bg-gray-800/45 sm:grid-cols-[minmax(0,1fr)_120px_150px]"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-gray-100">
+                        {addon.name}
+                      </p>
+                      {!addon.p2pCapable && (
+                        <p className="mt-0.5 truncate text-[11px] text-gray-500">
+                          No native P2P mode declared
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex justify-center">
+                      <Checkbox
+                        id={`normal-manifest-${addon.instanceId}`}
+                        aria-label={`Include ${addon.name} in regular manifest`}
+                        size="sm"
+                        value={normalIncluded}
+                        onValueChange={(checked) =>
+                          toggleNormal(addon.instanceId, checked === true)
+                        }
+                      />
+                    </div>
+                    <div className="flex justify-center">
+                      <Checkbox
+                        id={`wako-manifest-${addon.instanceId}`}
+                        aria-label={`Include ${addon.name} in Wako P2P manifest`}
+                        size="sm"
+                        value={wakoIncluded && addon.p2pCapable}
+                        disabled={!wakoEnabled || !addon.p2pCapable}
+                        onValueChange={(checked) =>
+                          toggleWako(addon.instanceId, checked === true)
+                        }
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {wakoEnabled && wakoCount === 0 && (
+          <Alert
+            intent="warning"
+            description="Select at least one P2P-capable addon before using the Wako manifest."
+          />
+        )}
+
+        {wakoEnabled && wakoCount > 0 && wakoManifestUrl && (
+          <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+              <div className="min-w-0 flex-1 space-y-1.5">
+                <label className="text-xs font-medium text-gray-300">
+                  {usingAlias
+                    ? 'Wako P2P Manifest URL (alias)'
+                    : 'Wako P2P Manifest URL'}
+                </label>
+                <TextInput
+                  type="text"
+                  readOnly
+                  value={wakoManifestUrl}
+                  className="font-mono text-sm bg-black/20"
+                  onClick={(event) => event.currentTarget.select()}
+                />
+              </div>
+              <Button
+                type="button"
+                intent="primary"
+                onClick={onCopyWakoManifestUrl}
+                leftIcon={<CopyIcon className="h-4 w-4" />}
+              >
+                Copy for Wako
+              </Button>
+            </div>
+            <p className="mt-2 text-xs text-gray-400">
+              Save first, then add this separate manifest in Wako. It exposes
+              only stream resources and only native P2P results.
+            </p>
+          </div>
+        )}
+      </div>
+    </SettingsCard>
+  );
+}
+
 interface InstallCardProps {
   encodedManifest: string;
   manifestUrl: string;
@@ -1578,6 +1836,11 @@ function Content() {
     : aliasForInstall
       ? `${baseUrl}/stremio/u/${aliasForInstall}/manifest.json${variantQuery}`
       : `${baseUrl}/stremio/${uuid}/${encryptedPassword}/manifest.json${variantQuery}`;
+  const wakoManifestUrl = !uuid
+    ? ''
+    : aliasForInstall
+      ? `${baseUrl}/stremio/u/${aliasForInstall}/client/wako-p2p/manifest.json${variantQuery}`
+      : `${baseUrl}/stremio/${uuid}/${encryptedPassword}/client/wako-p2p/manifest.json${variantQuery}`;
   const chillLinkUrl = uuid
     ? `${baseUrl}/chilllink/${uuid}/${encryptedPassword}${variantQuery}`
     : '';
@@ -1598,6 +1861,27 @@ function Content() {
       onError: () => toast.error('Failed to copy manifest URL'),
     });
   };
+
+  const copyWakoManifestUrl = async () => {
+    await copyToClipboard(wakoManifestUrl, {
+      onSuccess: () =>
+        toast.success('Wako P2P manifest URL copied to clipboard'),
+      onError: () => toast.error('Failed to copy Wako manifest URL'),
+    });
+  };
+
+  const manifestAddons: ManifestAddonOption[] = userData.presets
+    .filter((preset) => preset.enabled)
+    .map((preset) => {
+      const metadata = status?.settings?.presets.find(
+        (entry) => entry.ID === preset.type
+      );
+      return {
+        instanceId: preset.instanceId,
+        name: metadata?.NAME ?? preset.type,
+        p2pCapable: metadata?.SUPPORTED_STREAM_TYPES?.includes('p2p') ?? false,
+      };
+    });
 
   const copyChillLinkUrl = async () => {
     await copyToClipboard(chillLinkUrl, {
@@ -1779,6 +2063,17 @@ function Content() {
               onShowChangesChange={(val) =>
                 setUserData((prev) => ({ ...prev, showChanges: val }))
               }
+            />
+
+            <ClientManifestProfilesCard
+              addons={manifestAddons}
+              value={userData.clientManifests}
+              onChange={(clientManifests) =>
+                setUserData((prev) => ({ ...prev, clientManifests }))
+              }
+              wakoManifestUrl={wakoManifestUrl}
+              usingAlias={!!aliasForInstall}
+              onCopyWakoManifestUrl={copyWakoManifestUrl}
             />
 
             <InstallCard

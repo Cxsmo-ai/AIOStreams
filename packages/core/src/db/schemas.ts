@@ -196,6 +196,8 @@ const AddonSchema = z.object({
   identifier: z.string().optional(), // true identifier for generating IDs
   displayIdentifier: z.string().optional(), // identifier for display purposes
   timeout: z.number().min(1),
+  /** Request-scoped: skip AIOStreams' aggregate addon timeout for client profiles that wait for all addons. */
+  disableAioTimeouts: z.boolean().optional(),
   library: z.boolean().optional(),
   formatPassthrough: z.boolean().optional(),
   resultPassthrough: z.boolean().optional(),
@@ -516,6 +518,26 @@ export const UserDataSchema = z.object({
     .optional(),
   /** Request scoped: the variant ids applied to this instance. Never persisted. */
   activeVariants: z.array(z.string()).optional(),
+  /** Request scoped: the client-specific manifest currently being served. Never persisted by the UI. */
+  activeClientManifest: z.enum(['wako-p2p']).optional(),
+  /** Per-client addon membership. Missing values preserve legacy behaviour. */
+  clientManifests: z
+    .object({
+      normal: z
+        .object({
+          excludedPresetIds: z.array(z.string().min(1)).optional(),
+        })
+        .optional(),
+      wakoP2p: z
+        .object({
+          enabled: z.boolean().optional(),
+          presetIds: z.array(z.string().min(1)).optional(),
+          /** Wait for all selected addons instead of an AIOStreams aggregate cutoff. */
+          waitForAll: z.boolean().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   encryptedPassword: z.string().min(1).optional(),
   trusted: z.boolean().optional(),
   showChanges: z.boolean().optional(),

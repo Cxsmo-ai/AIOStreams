@@ -16,9 +16,13 @@ const router: Router = Router();
 export default router;
 
 const manifest = async (config?: UserData): Promise<Manifest> => {
+  const isWakoP2p = config?.activeClientManifest === 'wako-p2p';
   let addonId = appConfig.branding.addonId;
   if (config) {
     addonId = addonId += `.${userScopeIdSuffix(config)}`;
+  }
+  if (isWakoP2p) {
+    addonId += '.wako-p2p';
   }
   let catalogs: Manifest['catalogs'] = [];
   let resources: Manifest['resources'] = [];
@@ -31,9 +35,20 @@ const manifest = async (config?: UserData): Promise<Manifest> => {
     catalogs = aiostreams.getCatalogs();
     resources = aiostreams.getResources();
     addonCatalogs = aiostreams.getAddonCatalogs();
+
+    if (isWakoP2p) {
+      catalogs = [];
+      addonCatalogs = [];
+      resources = resources.filter(
+        (resource) =>
+          (typeof resource === 'string' ? resource : resource.name) === 'stream'
+      );
+    }
   }
   return {
-    name: config?.addonName || appConfig.branding.addonName,
+    name: isWakoP2p
+      ? `${config?.addonName || appConfig.branding.addonName} · Wako P2P`
+      : config?.addonName || appConfig.branding.addonName,
     id: addonId,
     version:
       !appConfig.bootstrap.version ||
@@ -41,12 +56,13 @@ const manifest = async (config?: UserData): Promise<Manifest> => {
       appConfig.bootstrap.version === '0.0.0'
         ? '2.33.0'
         : appConfig.bootstrap.version,
-    description:
-      config?.addonDescription ||
-      (appConfig.bootstrap.description &&
-      appConfig.bootstrap.description !== 'unknown'
-        ? appConfig.bootstrap.description
-        : 'Consolidate multiple Stremio addons and debrid/usenet services into a single super-addon with custom filtering, sorting, and formatting.'),
+    description: isWakoP2p
+      ? 'AIOStreams client profile for Wako. Returns native P2P torrents from only the addons selected for this profile and waits for every selected addon.'
+      : config?.addonDescription ||
+        (appConfig.bootstrap.description &&
+        appConfig.bootstrap.description !== 'unknown'
+          ? appConfig.bootstrap.description
+          : 'Consolidate multiple Stremio addons and debrid/usenet services into a single super-addon with custom filtering, sorting, and formatting.'),
     catalogs,
     resources,
     types: resources.reduce((types, resource) => {

@@ -223,6 +223,10 @@ stremioAuthRouter.use('/subtitles', subtitle);
 stremioAuthRouter.use('/addon_catalog', addonCatalog);
 
 app.use('/stremio', stremioRouter); // For public routes
+app.use(
+  '/stremio/:uuid/:encryptedPassword/client/:clientProfile',
+  stremioAuthRouter
+); // For client-specific authenticated manifests (must precede the generic mount)
 app.use('/stremio/:uuid/:encryptedPassword', stremioAuthRouter); // For authenticated routes
 
 const chillLinkRouter = express.Router({ mergeParams: true });

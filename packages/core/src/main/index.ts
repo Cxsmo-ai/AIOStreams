@@ -5,12 +5,7 @@ import {
   StrictManifestResource,
   UserData,
 } from '../db/index.js';
-import {
-  Cache,
-  createLogger,
-  IdParser,
-  userScopeKey,
-} from '../utils/index.js';
+import { Cache, createLogger, IdParser, userScopeKey } from '../utils/index.js';
 import { withVariantQuery } from '../variants/runtime.js';
 import Proxifier from '../streams/proxifier.js';
 import StreamLimiter from '../streams/limiter.js';
@@ -49,7 +44,9 @@ export class AIOStreams {
       userData,
       options,
       manifestUrl: withVariantQuery(
-        `${appConfig.bootstrap.baseUrl}/stremio/${userData.uuid}/${userData.encryptedPassword}/manifest.json`,
+        `${appConfig.bootstrap.baseUrl}/stremio/${userData.uuid}/${userData.encryptedPassword}${
+          userData.activeClientManifest === 'wako-p2p' ? '/client/wako-p2p' : ''
+        }/manifest.json`,
         userData.activeVariants
       ),
       manifests: {},

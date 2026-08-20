@@ -15,10 +15,27 @@ import {
   parseVariantSelector,
   logVariantNotes,
   VARIANT_QUERY_PARAM,
+  applyClientManifestProfile,
+  CLIENT_MANIFEST_PROFILES,
+  type ClientManifestProfile,
+  PresetManager,
 } from '@aiostreams/core';
 import { syncUserDataUrls } from '../utils/syncUserData.js';
 
 const logger = createLogger('server');
+
+let p2pPresetTypes: ReadonlySet<string> | undefined;
+
+function getP2pPresetTypes(): ReadonlySet<string> {
+  // Preset metadata reads validated runtime configuration, so this must stay
+  // lazy instead of running during server module initialisation.
+  p2pPresetTypes ??= new Set(
+    PresetManager.getPresetList()
+      .filter((preset) => preset.SUPPORTED_STREAM_TYPES.includes('p2p'))
+      .map((preset) => preset.ID)
+  );
+  return p2pPresetTypes;
+}
 
 // Valid resources that require authentication
 const VALID_RESOURCES = [
@@ -34,6 +51,7 @@ const RESOURCE_REGEX = new RegExp(`/(${VALID_RESOURCES.join('|')})`);
 interface UserDataParams {
   uuid?: string;
   encryptedPassword?: string;
+  clientProfile?: string;
   // match Express.Request<ParamsDictionary> to keep middleware flexible
   [key: string]: string | string[] | undefined;
 }
@@ -43,7 +61,7 @@ export const userDataMiddleware = async (
   res: Response,
   next: NextFunction
 ) => {
-  const { uuid: uuidOrAlias, encryptedPassword } = req.params;
+  const { uuid: uuidOrAlias, encryptedPassword, clientProfile } = req.params;
 
   // Both uuid and encryptedPassword should be present since we mounted the router on this path
   if (!uuidOrAlias || !encryptedPassword) {
@@ -72,6 +90,20 @@ export const userDataMiddleware = async (
   }
 
   const resource = resourceMatch[1];
+
+  if (
+    clientProfile &&
+    !(CLIENT_MANIFEST_PROFILES as readonly string[]).includes(clientProfile)
+  ) {
+    next(
+      new APIError(
+        constants.ErrorCode.USER_INVALID_CONFIG,
+        undefined,
+        `Unsupported client manifest profile: ${clientProfile}`
+      )
+    );
+    return;
+  }
 
   try {
     // Check if user exists
@@ -180,6 +212,31 @@ export const userDataMiddleware = async (
           return;
         }
         logger.error(`Invalid config for ${uuid}: ${error.message}`);
+        next(
+          new APIError(
+            constants.ErrorCode.USER_INVALID_CONFIG,
+            undefined,
+            error.message
+          )
+        );
+        return;
+      }
+
+      try {
+        userData = applyClientManifestProfile(
+          userData,
+          clientProfile as ClientManifestProfile | undefined,
+          getP2pPresetTypes()
+        );
+      } catch (error: any) {
+        if (constants.RESOURCES.includes(resource as Resource)) {
+          res.status(200).json(
+            StremioTransformer.createDynamicError(resource as Resource, {
+              errorDescription: error.message,
+            })
+          );
+          return;
+        }
         next(
           new APIError(
             constants.ErrorCode.USER_INVALID_CONFIG,
