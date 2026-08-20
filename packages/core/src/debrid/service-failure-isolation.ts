@@ -69,9 +69,7 @@ function failureTtl(error: unknown): number | undefined {
   ) {
     return AUTH_FAILURE_TTL_MS;
   }
-  if (status === 429 || code === 'TOO_MANY_REQUESTS') {
-    return Math.max(retryAfterMs(error) ?? RATE_LIMIT_TTL_MS, 1000);
-  }
+  // Rate limits are transient throughput throttles; do not trip the global circuit breaker
   if (
     [502, 503, 504].includes(status ?? 0) ||
     ['BAD_GATEWAY', 'SERVICE_UNAVAILABLE'].includes(code ?? '')
