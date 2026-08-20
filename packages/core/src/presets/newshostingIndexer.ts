@@ -92,7 +92,7 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
           'Timeout for fetching file details and creating an NZB after a result is selected.',
         type: 'number',
         required: false,
-        default: 60_000,
+        default: Math.min(60_000, appConfig.userLimits.timeouts.maxTimeout),
         constraints: {
           min: appConfig.userLimits.timeouts.minTimeout,
           max: appConfig.userLimits.timeouts.maxTimeout,
@@ -235,7 +235,9 @@ export class NewshostingIndexerPreset extends BuiltinAddonPreset {
       ip: connection.ip || '81.171.93.8',
       port: connection.port ?? 5598,
       maxNzbFiles: options.maxNzbFiles ?? 160,
-      nzbTimeout: options.nzbTimeout ?? 60_000,
+      nzbTimeout:
+        options.nzbTimeout ??
+        Math.min(60_000, appConfig.userLimits.timeouts.maxTimeout),
       proxyAuth: proxyGrant,
     });
     const encryptedNzbConfig = encryptString(JSON.stringify(privateConfig));
