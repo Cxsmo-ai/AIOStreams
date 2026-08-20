@@ -102,15 +102,6 @@ export async function applyPresets(ctx: AIOStreamsContext): Promise<void> {
             // if no identifier is present, we can assume that the preset can only generate one addon at a time and so no
             // unique identifier is needed as the preset instance id is enough to identify the addon
             instanceId: `${preset.instanceId}${getSimpleTextHash(`${a.identifier ?? ''}`).slice(0, 4)}`,
-            ...(ctx.userData.activeClientManifest === 'wako-p2p'
-              ? {
-                  // The Wako profile waits for every selected addon and only
-                  // advertises native torrent streams.
-                  disableAioTimeouts: true,
-                  resources: ['stream' as Resource],
-                  resultPassthrough: false,
-                }
-              : {}),
           })
         )
       );

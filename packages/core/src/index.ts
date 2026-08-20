@@ -8,7 +8,6 @@ export * from './analytics/repository.js';
 export * from './tasks/index.js';
 export * from './main/types.js';
 export * from './main/index.js';
-export * from './main/client-manifests.js';
 export * from './parser/index.js';
 export * from './formatters/index.js';
 export * from './transformers/index.js';

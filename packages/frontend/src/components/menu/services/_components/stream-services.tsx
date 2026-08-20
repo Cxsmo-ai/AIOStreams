@@ -64,7 +64,6 @@ const SERVICE_LOGO_MAP: Record<ServiceId, string> = {
   premiumize: 'https://www.premiumize.me/icon_normal.svg',
   alldebrid: 'https://cdn.alldebrid.com/lib/images/default/logo_alldebrid.png',
   torbox: 'https://torbox.app/assets/logo-bb7a9579.svg',
-  deepbrid: 'https://www.deepbrid.com/favicon.ico',
   putio:
     'https://images.seeklogo.com/logo-png/51/1/put-io-logo-png_seeklogo-516681.png',
   pikpak: 'https://mypikpak.com/apple-touch-icon.png',

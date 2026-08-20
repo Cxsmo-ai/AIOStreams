@@ -75,7 +75,6 @@ type IgnoredKeys =
   | 'encryptedPassword'
   | 'trusted'
   | 'activeVariants'
-  | 'activeClientManifest'
   | 'addons'
   | 'proxies'
   | 'ip'
@@ -87,7 +86,6 @@ type IgnoredKeys =
 
 // prettier-ignore
 export const FIELD_META: Omit<Record<keyof UserData, FieldMeta>, IgnoredKeys> = {
-  clientManifests: { label: 'Manifest Profiles', group: 'misc', type: 'scalar', menu: 'save-install', ignoreForParentConfig: true },
   excludedResolutions: { label: 'Excluded Resolutions', group: 'filters', type: 'list', menu: 'filters', subTab: 'resolution' },
   includedResolutions: { label: 'Included Resolutions', group: 'filters', type: 'list', menu: 'filters', subTab: 'resolution' },
   requiredResolutions: { label: 'Required Resolutions', group: 'filters', type: 'list', menu: 'filters', subTab: 'resolution' },

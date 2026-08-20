@@ -61,8 +61,7 @@ export type FetchContext =
   | 'torznab';
 
 export interface RequestOptions {
-  /** Undefined only when the caller deliberately owns request lifetime. */
-  timeout: number | undefined;
+  timeout: number;
   signal?: AbortSignal;
   method?: string;
   forwardIp?: string;
@@ -105,11 +104,7 @@ export async function makeRequest(url: string, options: RequestOptions) {
   }
 
   // One signal for the whole redirect chain.
-  const signal =
-    options.signal ??
-    (options.timeout === undefined
-      ? undefined
-      : AbortSignal.timeout(options.timeout));
+  const signal = options.signal ?? AbortSignal.timeout(options.timeout);
   const { redirect: redirectMode, ...rawOptions } = options.rawOptions ?? {};
   let method = options.method ?? 'GET';
   let body = options.body;

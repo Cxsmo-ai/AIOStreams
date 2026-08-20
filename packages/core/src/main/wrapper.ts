@@ -202,19 +202,15 @@ export class Wrapper {
         'fetching manifest'
       );
       try {
-        const backgroundTimeout = this.addon.disableAioTimeouts
-          ? undefined
-          : (appConfig.resources.background.timeout ??
-            appConfig.userLimits.timeouts.maxTimeout);
+        const backgroundTimeout =
+          appConfig.resources.background.timeout ??
+          appConfig.userLimits.timeouts.maxTimeout;
         const res = await makeRequest(this.manifestUrl, {
           timeout: backgroundTimeout,
-          signal:
-            backgroundTimeout === undefined
-              ? signal
-              : AbortSignal.any([
-                  signal,
-                  AbortSignal.timeout(backgroundTimeout),
-                ]),
+          signal: AbortSignal.any([
+            signal,
+            AbortSignal.timeout(backgroundTimeout),
+          ]),
           headers: this.addon.headers,
           forwardIp: this.addon.ip,
         });
@@ -265,9 +261,7 @@ export class Wrapper {
     try {
       return await this._request({
         requestFn,
-        timeout: this.addon.disableAioTimeouts
-          ? undefined
-          : (options?.timeout ?? appConfig.resources.timeouts.manifest),
+        timeout: options?.timeout ?? appConfig.resources.timeouts.manifest,
         resourceName: 'manifest',
         cacher: manifestCache,
         cacheKey,
@@ -309,7 +303,7 @@ export class Wrapper {
     const upstreamStreams = await this.makeResourceRequest(
       'stream',
       { type, id },
-      this.addon.disableAioTimeouts ? undefined : this.addon.timeout,
+      this.addon.timeout,
       validator,
       streamTtl != -1 ? streamsCache : undefined,
       streamTtl,
@@ -324,28 +318,26 @@ export class Wrapper {
     let streams: Stream[];
     try {
       streams = await this.preset.transformStreamResponse({
-        addon: this.addon,
-        type,
-        id,
-        streams: upstreamStreams,
-        fetchStreams: async (replacementId: string): Promise<Stream[]> => {
-          const replacementUrl = this.buildResourceUrl(
-            'stream',
-            type,
-            replacementId
-          );
-          const response = await makeRequest(replacementUrl, {
-            timeout: this.addon.disableAioTimeouts
-              ? undefined
-              : this.addon.timeout,
-            headers: this.addon.headers,
-            forwardIp: this.addon.ip,
-          });
-          if (!response.ok) {
-            throw new Error(`${response.status} - ${response.statusText}`);
-          }
-          return validator(await response.json());
-        },
+      addon: this.addon,
+      type,
+      id,
+      streams: upstreamStreams,
+      fetchStreams: async (replacementId: string): Promise<Stream[]> => {
+        const replacementUrl = this.buildResourceUrl(
+          'stream',
+          type,
+          replacementId
+        );
+        const response = await makeRequest(replacementUrl, {
+          timeout: this.addon.timeout,
+          headers: this.addon.headers,
+          forwardIp: this.addon.ip,
+        });
+        if (!response.ok) {
+          throw new Error(`${response.status} - ${response.statusText}`);
+        }
+        return validator(await response.json());
+      },
       });
     } catch (error) {
       await streamsCache.delete(cacheKey);
@@ -597,7 +589,7 @@ export class Wrapper {
 
   private async _request<T>(options: {
     requestFn: (signal: AbortSignal) => Promise<T>;
-    timeout?: number;
+    timeout: number;
     resourceName: string;
     cacher?: Cache<string, T>;
     cacheKey: string;
@@ -644,7 +636,7 @@ export class Wrapper {
 
     const requestPromise = processRequest();
 
-    if (!doBackground || timeout === undefined) {
+    if (!doBackground) {
       return await requestPromise;
     }
 
@@ -689,7 +681,7 @@ export class Wrapper {
   private async makeResourceRequest<T>(
     resource: Resource,
     params: ResourceParams,
-    timeout: number | undefined,
+    timeout: number,
     validator: (data: unknown) => T,
     cacher: Cache<string, T> | undefined,
     cacheTtl: number,
@@ -712,18 +704,13 @@ export class Wrapper {
     );
 
     const requestFn = async (signal: AbortSignal): Promise<T> => {
-      const timeout = this.addon.disableAioTimeouts
-        ? undefined
-        : doBackground
-          ? (appConfig.resources.background.timeout ??
-            appConfig.userLimits.timeouts.maxTimeout)
-          : this.addon.timeout;
+      const timeout = doBackground
+        ? (appConfig.resources.background.timeout ??
+          appConfig.userLimits.timeouts.maxTimeout)
+        : this.addon.timeout;
       const res = await makeRequest(url, {
         timeout,
-        signal:
-          timeout === undefined
-            ? signal
-            : AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
         headers: this.addon.headers,
         forwardIp: this.addon.ip,
       });
