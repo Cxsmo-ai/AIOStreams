@@ -20,6 +20,7 @@ import { baseOptions, Preset, StreamResponseHookOptions } from './preset.js';
 import {
   filterTorrentClawPlaybackActions,
   getTorrentClawCachedStatus,
+  getTorrentClawSource,
   streamText,
   type TorrentClawPlaybackOptions,
 } from './torrentclaw-cache.js';
@@ -55,6 +56,7 @@ type RemapCacheEntry = {
 
 const logger = createLogger('torrentclaw');
 const remapCache = new Map<string, RemapCacheEntry>();
+const remapInFlight = new Map<string, Promise<string[] | null>>();
 const episodeSizeCache = new Map<
   string,
   { value: number | null; expires: number }
@@ -242,23 +244,41 @@ function mergeStreams(original: Stream[], additions: Stream[][]): Stream[] {
   });
 }
 
-async function fetchJson(url: string): Promise<any> {
-  const response = await makeRequest(url, {
-    timeout: 20_000,
-    headers: {
-      'User-Agent': 'AIOStreams native TorrentClaw metadata remapper',
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`${response.status} - ${response.statusText}`);
+async function fetchJson(
+  url: string,
+  headers: Record<string, string> = {}
+): Promise<any> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await makeRequest(url, {
+      timeout: 20_000,
+      headers: {
+        'User-Agent': 'AIOStreams native TorrentClaw metadata remapper',
+        ...headers,
+      },
+    });
+    if (response.ok) return response.json();
+    if (![429, 502, 503].includes(response.status) || attempt === 2) {
+      throw new Error(`${response.status} - ${response.statusText}`);
+    }
+    const retryAfter = Number(response.headers.get('retry-after'));
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        Math.min(
+          4_000,
+          Number.isFinite(retryAfter) ? retryAfter * 1000 : 500 * 2 ** attempt
+        )
+      )
+    );
   }
-  return response.json();
 }
 
 async function discoverTorrentClawIds(
   type: string,
   requestedId: string,
-  remapping: TorrentClawRemappingOptions
+  remapping: TorrentClawRemappingOptions,
+  season?: number,
+  episode?: number
 ): Promise<string[] | null> {
   if (!/^tt\d+$/i.test(requestedId)) return null;
 
@@ -271,84 +291,110 @@ async function discoverTorrentClawIds(
     titleMatch,
     yearTolerance,
     searchLimit,
+    season ?? '',
+    episode ?? '',
   ].join(':');
   const cached = remapCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) return cached.value;
+  const inFlight = remapInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
 
-  const metadataUrl = new URL(
-    `/meta/${type}/${requestedId}.json`,
-    'https://v3-cinemeta.strem.io'
-  );
-  const metadata = (await fetchJson(metadataUrl.toString()))?.meta;
-  if (!metadata?.name) return null;
+  const discover = (async () => {
+    const metadataUrl = new URL(
+      `/meta/${type}/${requestedId}.json`,
+      'https://v3-cinemeta.strem.io'
+    );
+    const metadata = (await fetchJson(metadataUrl.toString()))?.meta;
+    if (!metadata?.name) return null;
 
-  const expectedTitle = normaliseTitle(metadata.name);
-  const expectedYear = extractYear(metadata.year || metadata.releaseInfo);
-  const searchUrl = new URL('https://torrentclaw.com/api/v1/search');
-  searchUrl.searchParams.set('q', metadata.name);
-  searchUrl.searchParams.set('limit', String(searchLimit));
-  const searchPayload = await fetchJson(searchUrl.toString());
-  const candidates = Array.isArray(searchPayload?.results)
-    ? searchPayload.results
-    : [];
+    const expectedTitle = normaliseTitle(metadata.name);
+    const expectedYear = extractYear(metadata.year || metadata.releaseInfo);
+    const searchUrl = new URL('https://torrentclaw.com/api/v1/search');
+    searchUrl.searchParams.set('q', metadata.name);
+    searchUrl.searchParams.set('limit', String(searchLimit));
+    searchUrl.searchParams.set('type', type === 'series' ? 'show' : 'movie');
+    searchUrl.searchParams.set('sort', 'relevance');
+    if (type === 'series' && season !== undefined) {
+      searchUrl.searchParams.set('season', String(season));
+    }
+    if (type === 'series' && episode !== undefined) {
+      searchUrl.searchParams.set('episode', String(episode));
+    }
+    const searchPayload = await fetchJson(searchUrl.toString(), {
+      'X-Search-Source': 'aiostreams',
+    });
+    const candidates = Array.isArray(searchPayload?.results)
+      ? searchPayload.results
+      : [];
 
-  const ranked = candidates
-    .map((item: any) => {
-      const matchesTitle = [item?.title, item?.originalTitle]
-        .map(normaliseTitle)
-        .some((candidateTitle) =>
-          titleMatch === 'contains'
-            ? candidateTitle.length >= 4 &&
-              (candidateTitle.includes(expectedTitle) ||
-                expectedTitle.includes(candidateTitle))
-            : candidateTitle === expectedTitle
-        );
-      const candidateYear = extractYear(item?.year);
-      const yearDelta =
-        expectedYear && candidateYear
-          ? Math.abs(expectedYear - candidateYear)
-          : null;
-      const yearScore = !expectedYear
-        ? 30
-        : yearDelta === 0
+    const ranked = candidates
+      .map((item: any) => {
+        const matchesTitle = [
+          item?.title,
+          item?.titleOriginal,
+          item?.originalTitle,
+        ]
+          .map(normaliseTitle)
+          .some((candidateTitle) =>
+            titleMatch === 'contains'
+              ? candidateTitle.length >= 4 &&
+                (candidateTitle.includes(expectedTitle) ||
+                  expectedTitle.includes(candidateTitle))
+              : candidateTitle === expectedTitle
+          );
+        const candidateYear = extractYear(item?.year);
+        const yearDelta =
+          expectedYear && candidateYear
+            ? Math.abs(expectedYear - candidateYear)
+            : null;
+        const yearScore = !expectedYear
           ? 30
-          : yearDelta !== null && yearDelta <= yearTolerance
-            ? 10
-            : 0;
-      return {
-        id: item?.imdbId,
-        score: (matchesTitle ? 100 : 0) + yearScore,
-        yearDelta,
-      };
-    })
-    .filter(
-      (item: { id?: string; score: number; yearDelta: number | null }) =>
-        /^tt\d+$/i.test(item.id || '') &&
-        item.id !== requestedId &&
-        item.score >= 110 &&
-        (!expectedYear ||
-          (item.yearDelta !== null && item.yearDelta <= yearTolerance))
-    )
-    .sort(
-      (left: { score: number }, right: { score: number }) =>
-        right.score - left.score
-    );
+          : yearDelta === 0
+            ? 30
+            : yearDelta !== null && yearDelta <= yearTolerance
+              ? 10
+              : 0;
+        return {
+          id: item?.imdbId,
+          score: (matchesTitle ? 100 : 0) + yearScore,
+          yearDelta,
+        };
+      })
+      .filter(
+        (item: { id?: string; score: number; yearDelta: number | null }) =>
+          /^tt\d+$/i.test(item.id || '') &&
+          item.id !== requestedId &&
+          item.score >= 110 &&
+          (!expectedYear ||
+            (item.yearDelta !== null && item.yearDelta <= yearTolerance))
+      )
+      .sort(
+        (left: { score: number }, right: { score: number }) =>
+          right.score - left.score
+      );
 
-  let value: string[] | null = null;
-  if (ranked.length) {
-    const ids: string[] = ranked.map((item: { id?: string }) =>
-      String(item.id)
-    );
-    value = Array.from(new Set<string>(ids));
+    let value: string[] | null = null;
+    if (ranked.length) {
+      const ids: string[] = ranked.map((item: { id?: string }) =>
+        String(item.id)
+      );
+      value = Array.from(new Set<string>(ids));
+    }
+    const cacheMinutes = value
+      ? numberInRange(remapping.positiveCacheMinutes, 360, 1, 1440)
+      : numberInRange(remapping.negativeCacheMinutes, 10, 1, 120);
+    remapCache.set(cacheKey, {
+      value,
+      expires: Date.now() + cacheMinutes * 60 * 1000,
+    });
+    return value;
+  })();
+  remapInFlight.set(cacheKey, discover);
+  try {
+    return await discover;
+  } finally {
+    remapInFlight.delete(cacheKey);
   }
-  const cacheMinutes = value
-    ? numberInRange(remapping.positiveCacheMinutes, 360, 1, 1440)
-    : numberInRange(remapping.negativeCacheMinutes, 10, 1, 120);
-  remapCache.set(cacheKey, {
-    value,
-    expires: Date.now() + cacheMinutes * 60 * 1000,
-  });
-  return value;
 }
 
 export class TorrentClawStreamParser extends StreamParser {
@@ -368,6 +414,26 @@ export class TorrentClawStreamParser extends StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
+    const source = getTorrentClawSource(stream);
+    const structuredProviders: Record<string, ServiceId> = {
+      realdebrid: constants.REALDEBRID_SERVICE,
+      rd: constants.REALDEBRID_SERVICE,
+      alldebrid: constants.ALLDEBRID_SERVICE,
+      ad: constants.ALLDEBRID_SERVICE,
+      torbox: constants.TORBOX_SERVICE,
+      tb: constants.TORBOX_SERVICE,
+      premiumize: constants.PREMIUMIZE_SERVICE,
+      pm: constants.PREMIUMIZE_SERVICE,
+      deepbrid: constants.DEEPBRID_SERVICE,
+      deepbriddb: constants.DEEPBRID_SERVICE,
+      db: constants.DEEPBRID_SERVICE,
+    };
+    if (structuredProviders[source]) {
+      return {
+        id: structuredProviders[source],
+        cached: getTorrentClawCachedStatus(stream),
+      };
+    }
     const text = streamText(stream);
     const providers: Array<{ id: ServiceId; pattern: RegExp }> = [
       {
@@ -385,6 +451,10 @@ export class TorrentClawStreamParser extends StreamParser {
       {
         id: constants.PREMIUMIZE_SERVICE,
         pattern: /(?:^|[\s·|[(])(?:PM|PREMIUMIZE)(?=$|[\s·|)\]])/i,
+      },
+      {
+        id: constants.DEEPBRID_SERVICE,
+        pattern: /(?:^|[\s·|[(])(?:DB|DEEPBRID)(?=$|[\s·|)\]])/i,
       },
     ];
     const provider = providers.find(({ pattern }) => pattern.test(text));
@@ -748,11 +818,15 @@ export class TorrentClawPreset extends Preset {
 
     const parts = id.split(':');
     const requestedId = parts[0];
+    const season = parts[1] !== undefined ? Number(parts[1]) : undefined;
+    const episode = parts[2] !== undefined ? Number(parts[2]) : undefined;
     try {
       const alternatives = await discoverTorrentClawIds(
         type,
         requestedId,
-        remapping
+        remapping,
+        Number.isFinite(season) ? season : undefined,
+        Number.isFinite(episode) ? episode : undefined
       );
       const additions: Stream[][] = [];
       for (const alternativeId of (alternatives || []).slice(0, 3)) {

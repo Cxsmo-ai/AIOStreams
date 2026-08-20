@@ -151,7 +151,14 @@ export function getDebridService(
     case constants.AIOSTREAMS_SERVICE:
       return new NativeUsenetService(config);
     case constants.DEEPBRID_SERVICE:
-      return new DeepbridService(config);
+      return isolateDebridService(
+        new DeepbridService(config),
+        serviceName,
+        token,
+        {
+          credentialProbe: () => new DeepbridService(config).validateAccount(),
+        }
+      );
     default:
       if (StremThruPreset.supportedServices.includes(serviceName)) {
         return new StremThruService({

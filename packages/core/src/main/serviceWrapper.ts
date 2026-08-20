@@ -156,6 +156,7 @@ export async function resolveGlobalDeepbridNzbs(
           userData.cacheAndPlay?.enabled &&
           userData.cacheAndPlay.streamTypes?.includes('usenet'),
         autoRemoveDownloads: userData.autoRemoveDownloads,
+        serviceItemId: result.serviceItemId,
       };
       const url = generatePlaybackUrl(auth, metadataId, fileInfo, filename);
       resolvedStreams.push({

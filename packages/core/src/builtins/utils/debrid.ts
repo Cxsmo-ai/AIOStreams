@@ -743,6 +743,10 @@ async function processNZBsForDebridService(
     if (file) {
       results.push({
         ...nzb,
+        serviceItemId:
+          nzbCheckResult?.id !== undefined
+            ? String(nzbCheckResult.id)
+            : nzb.serviceItemId,
         title: nzb.title ?? nzbCheckResult?.name,
         size: nzbCheckResult?.size || nzb.size,
         indexer: nzb.library ? undefined : nzb.indexer,

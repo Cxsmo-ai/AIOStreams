@@ -11,6 +11,7 @@ export type TorrentClawStreamShape = {
   url?: string | null;
   infoHash?: string | null;
   externalUrl?: string | null;
+  type?: string | null;
   behaviorHints?: Record<string, unknown>;
 };
 
@@ -48,17 +49,34 @@ export function getTorrentClawCachedStatus(
 }
 
 function isWatchInBrowser(stream: TorrentClawStreamShape): boolean {
+  if (stream.behaviorHints?.tcAction === 'watch-in-browser') return true;
   return /watch in your browser/i.test(streamText(stream));
 }
 
 function isDownloadAction(stream: TorrentClawStreamShape): boolean {
+  const action =
+    typeof stream.behaviorHints?.tcAction === 'string'
+      ? stream.behaviorHints.tcAction
+      : undefined;
+  if (action && ['download', 'cache-on-play', 'debrid'].includes(action)) {
+    return true;
+  }
   return /(?:^|\s)download\b|cache(?:s|d)? on play/i.test(streamText(stream));
 }
 
 function isUnavailableNotice(stream: TorrentClawStreamShape): boolean {
+  if (stream.behaviorHints?.tcAction === 'notice') return true;
   return /debrid-only:\s*no instant|no instant streams/i.test(
     streamText(stream)
   );
+}
+
+/** Normalize TorrentClaw's current structured provider hint. */
+export function getTorrentClawSource(stream: TorrentClawStreamShape): string {
+  return String(stream.behaviorHints?.tcSource || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
 }
 
 export function filterTorrentClawPlaybackActions<

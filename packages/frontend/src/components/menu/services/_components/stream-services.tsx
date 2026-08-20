@@ -9,6 +9,7 @@ import {
   EASYNEWS_SERVICE,
   STREMTHRU_NEWZ_SERVICE,
   AIOSTREAMS_SERVICE,
+  DEEPBRID_SERVICE,
 } from '../../../../../../core/src/utils/constants';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import {
@@ -45,6 +46,7 @@ const USENET_SERVICE_IDS: string[] = [
   EASYNEWS_SERVICE,
   STREMTHRU_NEWZ_SERVICE,
   AIOSTREAMS_SERVICE,
+  DEEPBRID_SERVICE,
 ];
 
 const DUAL_SERVICE_IDS: string[] = ['torbox'];
@@ -81,6 +83,8 @@ const SERVICE_LOGO_MAP: Record<ServiceId, string> = {
   altmount:
     'https://raw.githubusercontent.com/javi11/altmount/refs/heads/main/docs/static/img/logo.png',
   aiostreams: '/logo.png',
+  deepbrid:
+    'https://www.deepbrid.com/application/default/themes/okagev4/public/img/logo-light.png',
   torrin: 'https://torrin.app/favicon.png',
 };
 

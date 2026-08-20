@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   filterTorrentClawPlaybackActions,
   getTorrentClawCachedStatus,
+  getTorrentClawSource,
   type TorrentClawStreamShape,
 } from './torrentclaw-cache.js';
 
@@ -76,5 +77,29 @@ test('keeps standard Stremio info-hash streams as playable uncached P2P results'
       downloadActions: false,
     }),
     [p2pStream]
+  );
+});
+
+test('uses current structured TorrentClaw action hints before display text', () => {
+  const notice: TorrentClawStreamShape = {
+    title: 'generic response',
+    externalUrl: 'https://torrentclaw.com/notice',
+    behaviorHints: { tcAction: 'notice' },
+  };
+  assert.deepEqual(filterTorrentClawPlaybackActions([notice], {}), []);
+  assert.deepEqual(
+    filterTorrentClawPlaybackActions([notice], { unavailableNotices: true }),
+    [notice]
+  );
+});
+
+test('normalizes current structured TorrentClaw provider hints', () => {
+  assert.equal(
+    getTorrentClawSource({ behaviorHints: { tcSource: 'Deepbrid DB' } }),
+    'deepbriddb'
+  );
+  assert.equal(
+    getTorrentClawSource({ behaviorHints: { tcSource: 'P2P' } }),
+    'p2p'
   );
 });
