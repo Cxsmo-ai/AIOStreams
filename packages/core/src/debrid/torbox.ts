@@ -370,42 +370,32 @@ export class TorboxDebridService
       let newResults: DebridDownload[] = [];
 
       try {
-        const availabilityLimit = pLimit(3);
+        const availabilityLimit = pLimit(1);
         const responses = await Promise.all(
           chunkTorboxNzbHashes(hashesToCheck).map((hashes) =>
-            availabilityLimit(() =>
-              this.torboxApi.usenet.getUsenetCachedAvailability(
-                this.apiVersion,
-                {
-                  hashes,
-                  format: 'list',
-                  listFiles: 'true',
-                }
-              )
-            )
+            availabilityLimit(async () => {
+              try {
+                return await this.torboxApi.usenet.getUsenetCachedAvailability(
+                  this.apiVersion,
+                  {
+                    hashes,
+                    format: 'list',
+                    listFiles: 'true',
+                  }
+                );
+              } catch (err: any) {
+                logger.warn(
+                  { err: err?.message, hashesCount: hashes.length },
+                  'TorBox Usenet chunk availability check failed or was rate-limited'
+                );
+                return null;
+              }
+            })
           )
         );
         for (const result of responses) {
-          if (!result.data?.success) {
-            throw new DebridError(`Failed to check instant availability`, {
-              statusCode: result.metadata.status,
-              statusText: result.metadata.statusText,
-              code: 'UNKNOWN',
-              headers: result.metadata.headers,
-              body: result.data,
-            });
-          }
-          if (!Array.isArray(result.data.data)) {
-            throw new DebridError(
-              'Invalid response from Torbox API. Expected array, got object',
-              {
-                statusCode: result.metadata.status,
-                statusText: result.metadata.statusText,
-                code: 'UNKNOWN',
-                headers: result.metadata.headers,
-                body: result.data,
-              }
-            );
+          if (!result || !result.data?.success || !Array.isArray(result.data.data)) {
+            continue;
           }
           newResults.push(
             ...result.data.data.map((item) => ({
@@ -440,7 +430,18 @@ export class TorboxDebridService
             );
           });
       } catch (error: any) {
-        throw convertTorBoxError(error);
+        const converted = convertTorBoxError(error);
+        if (
+          converted.code === 'TOO_MANY_REQUESTS' ||
+          converted.message.toLowerCase().includes('rate limit')
+        ) {
+          logger.warn(
+            { error: converted.message, hashesCount: hashesToCheck.length },
+            'TorBox availability check was rate-limited; returning partial availability without failing scrape'
+          );
+        } else {
+          throw converted;
+        }
       }
 
       return [...cachedResults, ...newResults];
