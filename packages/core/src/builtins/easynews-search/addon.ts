@@ -92,6 +92,7 @@ export class EasynewsSearchAddon extends BaseDebridAddon<EasynewsSearchAddonConf
             constants.EASYNEWS_SERVICE,
             constants.STREMTHRU_NEWZ_SERVICE,
             constants.AIOSTREAMS_SERVICE,
+            constants.DEEPBRID_SERVICE,
           ].includes(s.id)
       )
     ) {

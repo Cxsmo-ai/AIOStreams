@@ -270,6 +270,7 @@ export class UnarrIndexerAddon extends BaseDebridAddon<UnarrIndexerAddonConfig> 
       constants.STREMIO_NNTP_SERVICE,
       constants.STREMTHRU_NEWZ_SERVICE,
       constants.AIOSTREAMS_SERVICE,
+      constants.DEEPBRID_SERVICE,
     ]);
     if (this.userData.services.some((service) => !supported.has(service.id))) {
       throw new Error('Unarr index-only mode only supports Usenet services');
