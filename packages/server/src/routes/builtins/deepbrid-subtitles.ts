@@ -62,7 +62,7 @@ router.get(
       const langs = (cfg.languages || 'en').split(',').map((l) => l.trim()).filter(Boolean);
 
       // Resolve query title via MetadataService
-      const metadataService = new MetadataService();
+      const metadataService = new MetadataService({});
       let queryTitle: string | undefined;
 
       try {
