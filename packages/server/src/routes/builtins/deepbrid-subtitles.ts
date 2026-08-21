@@ -8,6 +8,7 @@ import {
   DEEPBRID_SUBTITLE_USER_AGENT,
   config as appConfig,
   MetadataService,
+  IdParser,
 } from '@aiostreams/core';
 import { pipeline } from 'node:stream/promises';
 
@@ -66,7 +67,8 @@ router.get(
       let queryTitle: string | undefined;
 
       try {
-        const meta = await metadataService.getMetadata(type, id);
+        const parsed = new IdParser().parse(id, type);
+        const meta = parsed ? await metadataService.getMetadata(parsed) : null;
         if (meta?.title) {
           if (type === 'series') {
             const parts = id.split(':');
