@@ -12,3 +12,5 @@ export { default as torrentGalaxy } from './torrent-galaxy.js';
 export { default as seadex } from './seadex.js';
 export { default as easynews } from './easynews.js';
 export { default as library } from './library.js';
+
+export { default as deepbridSubtitles } from './deepbrid-subtitles.js';

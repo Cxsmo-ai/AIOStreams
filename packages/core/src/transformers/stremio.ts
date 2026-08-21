@@ -1,3 +1,4 @@
+import { searchDeepbridOpenSubtitles, formatDeepbridSubtitles } from '../debrid/deepbrid-subtitles.js';
 import { constants } from '../index.js';
 import { config as appConfig } from '../config/index.js';
 import {
@@ -198,13 +199,41 @@ export class StremioTransformer {
 
     const start = Date.now();
 
+    // Universal Subtitle Resolution: Fetch Deepbrid OpenSubtitles for this media title
+    let globalSubtitles: Subtitle[] = [];
+    try {
+      const mediaTitle = formatterContext.title;
+      if (mediaTitle) {
+        let subQuery = mediaTitle;
+        if (formatterContext.type === 'series' && formatterContext.season !== undefined && formatterContext.episode !== undefined) {
+          subQuery = `${mediaTitle} S${formatterContext.season.toString().padStart(2, '0')}E${formatterContext.episode.toString().padStart(2, '0')}`;
+        } else if (formatterContext.year) {
+          subQuery = `${mediaTitle} ${formatterContext.year}`;
+        }
+        const deepbridItems = await searchDeepbridOpenSubtitles(subQuery, 'en', { timeout: 4000 });
+        if (deepbridItems.length > 0) {
+          const baseUrl = appConfig.bootstrap.baseUrl || '';
+          globalSubtitles = formatDeepbridSubtitles(deepbridItems, baseUrl, 8);
+        }
+      }
+    } catch (err: any) {
+      logger.debug({ err: err?.message }, 'Universal Deepbrid OpenSubtitles resolution skipped or failed');
+    }
+
     transformedStreams = await Promise.all(
-      streams.map((stream: ParsedStream, index: number) =>
-        this.convertParsedStreamToStream(stream, formatter, index, {
+      streams.map(async (stream: ParsedStream, index: number) => {
+        const aioStream = await this.convertParsedStreamToStream(stream, formatter, index, {
           disableAutoplay: disableAutoplay ?? false,
           provideStreamData: provideStreamData ?? false,
-        })
-      )
+        });
+        if (globalSubtitles.length > 0) {
+          const existing = aioStream.subtitles || [];
+          const existingIds = new Set(existing.map(s => s.id || s.url));
+          const additions = globalSubtitles.filter(s => !existingIds.has(s.id || s.url));
+          aioStream.subtitles = [...existing, ...additions];
+        }
+        return aioStream;
+      })
     );
 
     logger.info(

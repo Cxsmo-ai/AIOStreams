@@ -41,6 +41,7 @@ import { TorrentsDbPreset } from './torrentsDb.js';
 import { USATVPreset } from './usaTv.js';
 import { ArgentinaTVPreset } from './argentinaTv.js';
 import { OpenSubtitlesV3PlusPreset } from './opensubtitles-v3-plus.js';
+import { DeepbridOpenSubtitlesPreset } from './deepbridOpenSubtitles.js';
 import { SubSourcePreset } from './subsource.js';
 import { SubDLPreset } from './subdl.js';
 import { AISearchPreset } from './aiSearch.js';
@@ -159,6 +160,7 @@ let PRESET_LIST: string[] = [
   'dc-universe',
   'doctor-who-universe',
   'opensubtitles',
+  'deepbrid-opensubtitles',
   'opensubtitles-v3-plus',
   'subsource',
   'subdl',
@@ -233,6 +235,8 @@ export class PresetManager {
         return AIOStreamsPreset;
       case 'opensubtitles':
         return OpenSubtitlesPreset;
+      case 'deepbrid-opensubtitles':
+        return DeepbridOpenSubtitlesPreset;
       case 'peerflix':
         return PeerflixPreset;
       case 'dmm-cast':

@@ -238,3 +238,5 @@ function createStremThruNewzService(
     },
   });
 }
+
+export * from './deepbrid-subtitles.js';

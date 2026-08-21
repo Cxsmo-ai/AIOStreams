@@ -45,6 +45,7 @@ import {
   unarrIndexer,
   newshostingIndexer,
   deepbridUsenet,
+  deepbridSubtitles,
   prowlarr,
   knaben,
   eztv,
@@ -252,6 +253,7 @@ builtinsRouter.use('/newznab', newznab);
 builtinsRouter.use('/unarr-indexer', unarrIndexer);
 builtinsRouter.use('/newshosting-indexer', newshostingIndexer);
 builtinsRouter.use('/deepbrid-usenet', deepbridUsenet);
+builtinsRouter.use('/deepbrid-subtitles', deepbridSubtitles);
 builtinsRouter.use('/prowlarr', prowlarr);
 builtinsRouter.use('/knaben', knaben);
 builtinsRouter.use('/eztv', eztv);
