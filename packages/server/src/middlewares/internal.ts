@@ -10,6 +10,7 @@ const WHIELIST = [
   '/torznab/test',
   '/unarr-indexer/auth',
   '/deepbrid-usenet/play',
+  '/deepbrid-subtitles/download',
 ];
 
 export const internalMiddleware = (
