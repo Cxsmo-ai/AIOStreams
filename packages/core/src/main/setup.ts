@@ -502,12 +502,30 @@ export function buildResources(ctx: AIOStreamsContext): void {
       !addon.resources?.length ||
       (addon.resources && addon.resources.includes('catalog'))
     ) {
-      ctx.finalCatalogs.push(
-        ...manifest.catalogs.map((catalog) => ({
-          ...catalog,
-          id: `${addon.instanceId}.${catalog.id}`,
-        }))
-      );
+      for (const catalog of manifest.catalogs) {
+        if (catalog.id === 'tc-streaming-top') {
+          const streamingPlatforms = [
+            { id: 'netflix', name: 'TorrentClaw \u00b7 · Netflix', genre: 'Netflix' },
+            { id: 'prime', name: 'TorrentClaw \u00b7 · Prime Video', genre: 'Prime Video' },
+            { id: 'disney', name: 'TorrentClaw \u00b7 · Disney+', genre: 'Disney+' },
+            { id: 'hbo', name: 'TorrentClaw \u00b7 · HBO Max', genre: 'HBO Max' },
+            { id: 'apple', name: 'TorrentClaw \u00b7 · Apple TV+', genre: 'Apple TV+' },
+          ];
+          for (const sp of streamingPlatforms) {
+            ctx.finalCatalogs.push({
+              type: catalog.type,
+              id: `${addon.instanceId}.tc-streaming-${sp.id}`,
+              name: sp.name,
+              extra: [],
+            });
+          }
+        } else {
+          ctx.finalCatalogs.push({
+            ...catalog,
+            id: `${addon.instanceId}.${catalog.id}`,
+          });
+        }
+      }
     }
 
     if (manifest.addonCatalogs) {
@@ -566,19 +584,19 @@ export function buildResources(ctx: AIOStreamsContext): void {
     }
   }
 
-  // Format TorrentClaw catalogs: rename watchlist to "What you gives should watch"
+  // Format TorrentClaw ·catalogs: rename watchlist to "What you guys should watch"
   for (const cat of ctx.finalCatalogs) {
     if (cat.id.includes('tc-watchlist')) {
-      cat.name = 'What you gives should watch';
+      cat.name = 'What you guys should watch';
     }
   }
 
   if (ctx.userData.catalogModifications) {
     ctx.finalCatalogs = ctx.finalCatalogs
       .sort((a, b) => {
-        // "What you gives should watch" / tc-watchlist always floats to the very top
-        const aIsWatchlist = a.id.includes('tc-watchlist') || a.name === 'What you gives should watch';
-        const bIsWatchlist = b.id.includes('tc-watchlist') || b.name === 'What you gives should watch';
+        // "What you guys should watch" / tc-watchlist always floats to the very top
+        const aIsWatchlist = a.id.includes('tc-watchlist') || a.name === 'What you guys should watch';
+        const bIsWatchlist = b.id.includes('tc-watchlist') || b.name === 'What you guys should watch';
         if (aIsWatchlist && !bIsWatchlist) return -1;
         if (!aIsWatchlist && bIsWatchlist) return 1;
         const aModIndex = ctx.userData.catalogModifications!.findIndex(

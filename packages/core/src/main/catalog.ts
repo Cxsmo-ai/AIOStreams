@@ -718,9 +718,22 @@ export async function getCatalog(
   }
 
   const addonInstanceId = id.split('.', 2)[0];
-  const actualCatalogId = id.split('.').slice(1).join('.');
+  let actualCatalogId = id.split('.').slice(1).join('.');
 
   const parsedExtras = new ExtrasParser(extras);
+
+  // Map individual streaming platform catalogs back to tc-streaming-top with genre injected
+  const platformGenres: Record<string, string> = {
+    'tc-streaming-netflix': 'Netflix',
+    'tc-streaming-prime': 'Prime Video',
+    'tc-streaming-disney': 'Disney+',
+    'tc-streaming-hbo': 'HBO Max',
+    'tc-streaming-apple': 'Apple TV+',
+  };
+  if (platformGenres[actualCatalogId]) {
+    parsedExtras.genre = platformGenres[actualCatalogId];
+    actualCatalogId = 'tc-streaming-top';
+  }
 
   const result = await fetchRawCatalogItems(
     ctx,
