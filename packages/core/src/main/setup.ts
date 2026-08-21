@@ -589,6 +589,7 @@ export function buildResources(ctx: AIOStreamsContext): void {
     if (cat.id.includes('tc-watchlist')) {
       cat.name = 'What you guys should watch';
     }
+    cat.name = cat.name.replace(/·\s*·/g, '·').replace(/\s+/g, ' ').trim();
   }
 
   if (ctx.userData.catalogModifications) {
