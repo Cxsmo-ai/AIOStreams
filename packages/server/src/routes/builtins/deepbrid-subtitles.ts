@@ -67,8 +67,8 @@ router.get(
       let queryTitle: string | undefined;
 
       try {
-        const parsed = new IdParser().parse(id, type);
-        const meta = parsed ? await metadataService.getMetadata(parsed) : null;
+        const parsed = IdParser.parse(id, type);
+        const meta = parsed ? await metadataService.getMetadata(parsed, undefined) : null;
         if (meta?.title) {
           if (type === 'series') {
             const parts = id.split(':');
