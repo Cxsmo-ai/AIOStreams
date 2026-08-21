@@ -1,4 +1,4 @@
-import { createLogger, makeRequest, Cache, appConfig } from '../utils/index.js';
+import { createLogger, makeRequest, Cache, appConfig, normaliseLanguage } from '../utils/index.js';
 import { Subtitle } from '../db/schemas.js';
 
 const logger = createLogger('deepbrid:subtitles');
@@ -82,7 +82,7 @@ export async function searchDeepbridOpenSubtitles(
 }
 
 /**
- * Convert OpenSubtitles items into standard Stremio Subtitle descriptors
+ * Convert OpenSubtitles items into standardized, beautifully formatted Stremio Subtitle descriptors
  */
 export function formatDeepbridSubtitles(
   items: DeepbridOpenSubtitleItem[],
@@ -91,19 +91,30 @@ export function formatDeepbridSubtitles(
 ): Subtitle[] {
   const root = baseUrl.replace(/\/+$/, '');
   return items.slice(0, maxResults).map((item) => {
-    const title =
-      item.release || item.file_name || item.title || 'Deepbrid OpenSubtitles';
-    const lang = item.lang || 'en';
-    const filename = `${encodeURIComponent(
-      title.replace(/[^a-zA-Z0-9.-]/g, '_')
+    const rawLang = item.lang || 'en';
+    const langName = normaliseLanguage(rawLang) || rawLang;
+    
+    // Clean release/title
+    const releaseTitle = (item.release || item.file_name || item.title || 'OpenSubtitles')
+      .replace(/\.srt$|\.vtt$/i, '')
+      .trim();
+
+    const hiTag = item.hearing_impaired ? ' [SDH]' : '';
+    const aiTag = item.ai_translated ? ' [AI]' : '';
+    const dlCount = item.downloads ? ` (${item.downloads} dl)` : '';
+
+    // Standard Stremio Subtitle specification
+    const displayTitle = `[DB] ${releaseTitle}${hiTag}${aiTag}${dlCount}`;
+    const cleanFilename = `${encodeURIComponent(
+      releaseTitle.replace(/[^a-zA-Z0-9.-]/g, '_')
     )}.vtt`;
-    const url = `${root}/builtins/deepbrid-subtitles/download/${item.file_id}/${filename}`;
+    const url = `${root}/builtins/deepbrid-subtitles/download/${item.file_id}/${cleanFilename}`;
 
     return {
       id: `deepbrid-os-${item.file_id}`,
       url,
-      lang,
-      title: `[DB] ${title}${item.hearing_impaired ? ' (HI)' : ''}`,
+      lang: rawLang.toLowerCase(),
+      title: displayTitle,
     };
   });
 }
