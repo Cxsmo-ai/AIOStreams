@@ -505,11 +505,11 @@ export function buildResources(ctx: AIOStreamsContext): void {
       for (const catalog of manifest.catalogs) {
         if (catalog.id === 'tc-streaming-top') {
           const streamingPlatforms = [
-            { id: 'netflix', name: 'TorrentClaw \u00b7 · Netflix', genre: 'Netflix' },
-            { id: 'prime', name: 'TorrentClaw \u00b7 · Prime Video', genre: 'Prime Video' },
-            { id: 'disney', name: 'TorrentClaw \u00b7 · Disney+', genre: 'Disney+' },
-            { id: 'hbo', name: 'TorrentClaw \u00b7 · HBO Max', genre: 'HBO Max' },
-            { id: 'apple', name: 'TorrentClaw \u00b7 · Apple TV+', genre: 'Apple TV+' },
+            { id: 'netflix', name: 'TorrentClaw · Netflix', genre: 'Netflix' },
+            { id: 'prime', name: 'TorrentClaw · Prime Video', genre: 'Prime Video' },
+            { id: 'disney', name: 'TorrentClaw · Disney+', genre: 'Disney+' },
+            { id: 'hbo', name: 'TorrentClaw · HBO Max', genre: 'HBO Max' },
+            { id: 'apple', name: 'TorrentClaw · Apple TV+', genre: 'Apple TV+' },
           ];
           for (const sp of streamingPlatforms) {
             ctx.finalCatalogs.push({

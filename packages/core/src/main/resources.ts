@@ -43,6 +43,7 @@ import { precacheCache } from './caches.js';
 import {
   applyPosterModifications,
   convertDiscoverDeepLinks,
+  isNsfwContent,
 } from './catalog.js';
 import {
   hmac,
@@ -1073,6 +1074,19 @@ export async function getMeta(
         { addon: candidate.addon.name, instanceId: candidate.instanceId },
         'successfully got meta from addon'
       );
+      if (isNsfwContent(meta as any)) {
+        logger.warn({ id, name: meta.name }, 'meta is NSFW, filtering out');
+        return { success: false, data: null, errors: [] };
+      }
+      if (!meta.poster && /^tt\d+/i.test(id)) {
+        meta.poster = `https://images.metahub.space/poster/medium/${id}/img.jpg`;
+      }
+      if (!meta.background && /^tt\d+/i.test(id)) {
+        meta.background = `https://images.metahub.space/background/medium/${id}/img.jpg`;
+      }
+      if (!meta.logo && /^tt\d+/i.test(id)) {
+        meta.logo = `https://images.metahub.space/logo/medium/${id}/img.png`;
+      }
       if (ctx.userData.usePosterServiceForMeta) {
         await applyPosterModifications(ctx, [meta], type, true);
       } else {

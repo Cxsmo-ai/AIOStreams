@@ -108,11 +108,46 @@ export async function fetchRawCatalogItems(
 
   try {
     const start = Date.now();
-    const catalog = await new Wrapper(addon).getCatalog(
+    let catalog = await new Wrapper(addon).getCatalog(
       actualType,
       catalogId,
       extrasString
     );
+
+    // Deep catalog fetching: if the catalog has pagination and returned items on first page, fetch next pages to populate deep/richer catalogs (up to ~80-100 items)
+    if (
+      !parsedExtras?.search &&
+      (!parsedExtras?.skip || parsedExtras.skip === 0) &&
+      catalog &&
+      catalog.length > 0 &&
+      catalog.length < 80
+    ) {
+      try {
+        const seenIds = new Set(catalog.map((i) => i.id));
+        let currentSkip = catalog.length;
+        for (let page = 0; page < 3 && catalog.length < 80; page++) {
+          const nextExtras = new ExtrasParser(extrasString);
+          nextExtras.skip = currentSkip;
+          const nextPage = await new Wrapper(addon).getCatalog(
+            actualType,
+            catalogId,
+            nextExtras.toString()
+          );
+          if (!nextPage || nextPage.length === 0) break;
+          let added = 0;
+          for (const item of nextPage) {
+            if (item?.id && !seenIds.has(item.id)) {
+              seenIds.add(item.id);
+              catalog.push(item);
+              added++;
+            }
+          }
+          currentSkip += nextPage.length;
+          if (added === 0 || nextPage.length === 0) break;
+        }
+      } catch {}
+    }
+
     logger.debug(
       {
         addon: addon.name,
@@ -135,10 +170,6 @@ export async function fetchRawCatalogItems(
   }
 }
 
-/**
- * Gets the extras configuration for a specific catalog from an addon's manifest.
- * Used to determine what extras (search, genre, etc.) a catalog supports.
- */
 export function getCatalogExtras(
   ctx: Pick<AIOStreamsContext, 'manifests'>,
   addonInstanceId: string,
@@ -188,6 +219,9 @@ export async function applyPosterModifications(
         }
         item.poster = posterUrl;
       }
+      if (!item.poster && item.id && /^tt\d+/i.test(item.id)) {
+        item.poster = `https://images.metahub.space/poster/medium/${item.id}/img.jpg`;
+      }
 
       if (item.links) {
         item.links = convertDiscoverDeepLinks(ctx, item.links);
@@ -201,6 +235,33 @@ export async function applyPosterModifications(
  * Applies catalog modifications like shuffle, reverse, poster service, etc.
  * Used by getCatalog for standalone catalogs and getMergedCatalog for source catalogs.
  */
+export function isNsfwContent(item: {
+  name?: string;
+  title?: string;
+  description?: string;
+  genres?: string[];
+  tags?: string[];
+  isAdult?: boolean;
+  adult?: boolean;
+}): boolean {
+  if (item.isAdult || item.adult) return true;
+  const nsfwPatterns =
+    /\b(xxx|porn|porno|pornography|erotica?|hentai|jav|adult|nsfw|sensual|18\+|sex\s*tape|brazzers|onlyfans|blowjob|hardcore|softcore|nude|nudity|milf|shemale|femdom|incest|dildo|vibrator|fetish)\b/i;
+  const text = `${item.name || ''} ${item.title || ''} ${item.description || ''} ${(item.genres || []).join(' ')} ${(item.tags || []).join(' ')}`;
+  if (nsfwPatterns.test(text)) return true;
+  if (
+    item.genres?.some((g: string) =>
+      ['Adult', 'Erotica', 'Hentai', 'Pornography', 'XXX', 'NSFW'].includes(g)
+    )
+  )
+    return true;
+  return false;
+}
+
+export function filterNsfwCatalogItems(items: MetaPreview[]): MetaPreview[] {
+  return items.filter((item) => !isNsfwContent(item as any));
+}
+
 export async function applyCatalogModifications(
   ctx: AIOStreamsContext,
   items: MetaPreview[],
@@ -259,6 +320,7 @@ export async function applyCatalogModifications(
     applyPosterService
   );
 
+  catalog = filterNsfwCatalogItems(catalog);
   return catalog;
 }
 
