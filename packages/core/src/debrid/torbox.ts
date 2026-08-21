@@ -368,25 +368,31 @@ export class TorboxDebridService
 
     if (hashesToCheck.length > 0) {
       let newResults: DebridDownload[] = [];
+      const prioritizedHashes = hashesToCheck.slice(0, 100);
 
       try {
         const availabilityLimit = pLimit(1);
         const responses = await Promise.all(
-          chunkTorboxNzbHashes(hashesToCheck).map((hashes) =>
+          chunkTorboxNzbHashes(prioritizedHashes).map((hashes) =>
             availabilityLimit(async () => {
               try {
-                return await this.torboxApi.usenet.getUsenetCachedAvailability(
-                  this.apiVersion,
-                  {
-                    hashes,
-                    format: 'list',
-                    listFiles: 'true',
-                  }
-                );
+                return await Promise.race([
+                  this.torboxApi.usenet.getUsenetCachedAvailability(
+                    this.apiVersion,
+                    {
+                      hashes,
+                      format: 'list',
+                      listFiles: 'true',
+                    }
+                  ),
+                  new Promise<null>((_, reject) =>
+                    setTimeout(() => reject(new Error('TorBox usenet check timeout')), 4500)
+                  ),
+                ]);
               } catch (err: any) {
                 logger.warn(
                   { err: err?.message, hashesCount: hashes.length },
-                  'TorBox Usenet chunk availability check failed or was rate-limited'
+                  'TorBox Usenet chunk availability check failed, timed out, or was rate-limited'
                 );
                 return null;
               }
