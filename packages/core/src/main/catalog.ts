@@ -114,18 +114,17 @@ export async function fetchRawCatalogItems(
       extrasString
     );
 
-    // Deep catalog fetching: if the catalog has pagination and returned items on first page, fetch next pages to populate deep/richer catalogs (up to ~80-100 items)
+    // Deep catalog fetching: fetch multiple pages (up to 200 items or 4-5 pages) so catalogs are large and populated
     if (
       !parsedExtras?.search &&
-      (!parsedExtras?.skip || parsedExtras.skip === 0) &&
       catalog &&
       catalog.length > 0 &&
-      catalog.length < 80
+      catalog.length < 200
     ) {
       try {
         const seenIds = new Set(catalog.map((i) => i.id));
-        let currentSkip = catalog.length;
-        for (let page = 0; page < 3 && catalog.length < 80; page++) {
+        let currentSkip = (parsedExtras?.skip || 0) + catalog.length;
+        for (let page = 0; page < 4 && catalog.length < 200; page++) {
           const nextExtras = new ExtrasParser(extrasString);
           nextExtras.skip = currentSkip;
           const nextPage = await new Wrapper(addon).getCatalog(
@@ -153,6 +152,7 @@ export async function fetchRawCatalogItems(
         addon: addon.name,
         catalogId,
         type: actualType,
+        count: catalog?.length || 0,
         took: getTimeTakenSincePoint(start),
       },
       'received catalog'

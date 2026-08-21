@@ -590,6 +590,14 @@ export function buildResources(ctx: AIOStreamsContext): void {
       cat.name = 'What you guys should watch';
     }
     cat.name = cat.name.replace(/·\s*·/g, '·').replace(/\s+/g, ' ').trim();
+    if (!cat.extra) {
+      cat.extra = [{ name: 'skip' }];
+    } else if (
+      !cat.extra.some((e) => e.name === 'skip') &&
+      !cat.extra.some((e) => e.name === 'search' && e.isRequired)
+    ) {
+      cat.extra.push({ name: 'skip' });
+    }
   }
 
   if (ctx.userData.catalogModifications) {
