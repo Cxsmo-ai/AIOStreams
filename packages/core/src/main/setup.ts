@@ -566,9 +566,21 @@ export function buildResources(ctx: AIOStreamsContext): void {
     }
   }
 
+  // Format TorrentClaw catalogs: rename watchlist to "What you gives should watch"
+  for (const cat of ctx.finalCatalogs) {
+    if (cat.id.includes('tc-watchlist')) {
+      cat.name = 'What you gives should watch';
+    }
+  }
+
   if (ctx.userData.catalogModifications) {
     ctx.finalCatalogs = ctx.finalCatalogs
       .sort((a, b) => {
+        // "What you gives should watch" / tc-watchlist always floats to the very top
+        const aIsWatchlist = a.id.includes('tc-watchlist') || a.name === 'What you gives should watch';
+        const bIsWatchlist = b.id.includes('tc-watchlist') || b.name === 'What you gives should watch';
+        if (aIsWatchlist && !bIsWatchlist) return -1;
+        if (!aIsWatchlist && bIsWatchlist) return 1;
         const aModIndex = ctx.userData.catalogModifications!.findIndex(
           (mod) => mod.id === a.id && mod.type === a.type
         );

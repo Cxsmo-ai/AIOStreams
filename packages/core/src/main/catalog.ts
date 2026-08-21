@@ -730,6 +730,20 @@ export async function getCatalog(
     parsedExtras
   );
 
+  // If this is the watchlist catalog, normalize any single-season/episode entries to the whole series
+  if (result.success && (actualCatalogId.includes('watchlist') || actualCatalogId.includes('tc-watchlist'))) {
+    result.items = result.items.map((item) => {
+      if (item.type === 'series' && item.id && item.id.includes(':')) {
+        const rootId = item.id.split(':')[0];
+        return {
+          ...item,
+          id: rootId,
+        };
+      }
+      return item;
+    });
+  }
+
   if (!result.success) {
     if (extras && extras.includes('skip')) {
       return { success: true, data: [], errors: [] };

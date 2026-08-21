@@ -540,7 +540,7 @@ export class TorrentClawPreset extends Preset {
       constants.TORBOX_SERVICE,
       constants.PREMIUMIZE_SERVICE,
     ];
-    const supportedResources = [constants.STREAM_RESOURCE];
+    const supportedResources = [constants.STREAM_RESOURCE, constants.CATALOG_RESOURCE, constants.META_RESOURCE];
     const options: Option[] = [
       ...baseOptions(
         'TorrentClaw',
@@ -784,6 +784,7 @@ export class TorrentClawPreset extends Preset {
         constants.STREMIO_USENET_STREAM_TYPE,
       ],
       SUPPORTED_RESOURCES: supportedResources,
+      CATEGORY: constants.PresetCategory.STREAMS,
       CATEGORY: constants.PresetCategory.STREAMS,
     };
   }
