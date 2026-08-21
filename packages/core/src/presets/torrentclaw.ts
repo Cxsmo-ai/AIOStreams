@@ -785,7 +785,6 @@ export class TorrentClawPreset extends Preset {
       ],
       SUPPORTED_RESOURCES: supportedResources,
       CATEGORY: constants.PresetCategory.STREAMS,
-      CATEGORY: constants.PresetCategory.STREAMS,
     };
   }
 
