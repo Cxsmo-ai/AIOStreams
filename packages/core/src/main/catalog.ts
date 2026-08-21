@@ -114,7 +114,7 @@ export async function fetchRawCatalogItems(
       extrasString
     );
 
-    // Deep catalog fetching: fetch multiple pages (up to 200 items or 4-5 pages) so catalogs are large and populated
+    // Deep catalog fetching: fetch additional pages in parallel to keep latency low (~3s) while populating up to 200 items
     if (
       !parsedExtras?.search &&
       catalog &&
@@ -122,27 +122,38 @@ export async function fetchRawCatalogItems(
       catalog.length < 200
     ) {
       try {
+        const pageSize = catalog.length;
+        const startSkip = (parsedExtras?.skip || 0) + pageSize;
+        const pageSkips = [
+          startSkip,
+          startSkip + pageSize,
+          startSkip + pageSize * 2,
+        ];
+        const pageResults = await Promise.all(
+          pageSkips.map(async (skip) => {
+            try {
+              const nextExtras = new ExtrasParser(extrasString);
+              nextExtras.skip = skip;
+              return await new Wrapper(addon).getCatalog(
+                actualType,
+                catalogId,
+                nextExtras.toString()
+              );
+            } catch {
+              return [];
+            }
+          })
+        );
         const seenIds = new Set(catalog.map((i) => i.id));
-        let currentSkip = (parsedExtras?.skip || 0) + catalog.length;
-        for (let page = 0; page < 4 && catalog.length < 200; page++) {
-          const nextExtras = new ExtrasParser(extrasString);
-          nextExtras.skip = currentSkip;
-          const nextPage = await new Wrapper(addon).getCatalog(
-            actualType,
-            catalogId,
-            nextExtras.toString()
-          );
-          if (!nextPage || nextPage.length === 0) break;
-          let added = 0;
-          for (const item of nextPage) {
-            if (item?.id && !seenIds.has(item.id)) {
-              seenIds.add(item.id);
-              catalog.push(item);
-              added++;
+        for (const pageItems of pageResults) {
+          if (Array.isArray(pageItems)) {
+            for (const item of pageItems) {
+              if (item?.id && !seenIds.has(item.id)) {
+                seenIds.add(item.id);
+                catalog.push(item);
+              }
             }
           }
-          currentSkip += nextPage.length;
-          if (added === 0 || nextPage.length === 0) break;
         }
       } catch {}
     }
