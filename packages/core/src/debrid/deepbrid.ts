@@ -10,11 +10,13 @@ import { constants } from '../utils/index.js';
 import {
   DeepbridApiError,
   DeepbridAddResult,
+  DeepbridFinderFile,
   DeepbridOfficialClient,
   DeepbridUpload,
   DeepbridUploadInfo,
   isDeepbridVideoName,
 } from '../builtins/deepbrid-usenet/client.js';
+import { probeDeepbridVideo } from '../builtins/deepbrid-usenet/probe.js';
 import { createHash } from 'node:crypto';
 
 const uploadCache = new Map<string, { id: string; expiresAt: number }>();
@@ -141,14 +143,17 @@ export class DeepbridService implements UsenetDebridService {
   readonly serviceName = constants.DEEPBRID_SERVICE;
   readonly capabilities = { torrents: false, usenet: true } as const;
   private readonly credentialKey: string;
+  private readonly apiKey: string;
 
   constructor(
     config: DebridServiceConfig,
     private client: DeepbridOfficialApi = new DeepbridOfficialClient(
       config.token,
       30_000
-    )
+    ),
+    private readonly probeVideo: typeof probeDeepbridVideo = probeDeepbridVideo
   ) {
+    this.apiKey = config.token;
     this.credentialKey = createHash('sha256')
       .update(config.token)
       .digest('hex')
@@ -271,19 +276,19 @@ export class DeepbridService implements UsenetDebridService {
     );
   }
 
-  private selectResolvedFile(
+  private async selectResolvedFile(
     info: DeepbridUploadInfo | DeepbridAddResult,
     playbackInfo: DeepbridUsenetPlaybackInfo,
-    filename: string
-  ): string | undefined {
+    filename: string,
+    signal?: AbortSignal
+  ): Promise<string | undefined> {
     if (!info.files.length) return undefined;
     const target = selectDeepbridUploadFile(
       info.files,
       filename,
       playbackInfo.metadata
-    );
-    if (target?.link) return target.link;
-    if (playbackInfo.metadata?.episode !== undefined) {
+    ) as DeepbridFinderFile | undefined;
+    if (!target && playbackInfo.metadata?.episode !== undefined) {
       throw new DebridError(
         'Deepbrid resolved the NZB but did not contain the requested episode file',
         {
@@ -296,7 +301,39 @@ export class DeepbridService implements UsenetDebridService {
         }
       );
     }
-    return undefined;
+    if (!target) return undefined;
+
+    // A single NZB can expose duplicate video members. Try the preferred file
+    // first, then only same-media alternatives; never substitute another
+    // episode from a season pack.
+    const candidates = [
+      target,
+      ...info.files.filter(
+        (file) =>
+          file.link !== target.link &&
+          selectDeepbridUploadFile([file], filename, playbackInfo.metadata) !==
+            undefined
+      ),
+    ];
+    for (const candidate of candidates) {
+      const playable = await this.probeVideo(candidate, this.apiKey, {
+        timeoutMs: 8_000,
+        signal,
+      });
+      if (playable) return candidate.link;
+    }
+
+    throw new DebridError(
+      'Deepbrid resolved the NZB but did not return a playable video file',
+      {
+        statusCode: 502,
+        statusText: 'Bad Gateway',
+        code: 'BAD_GATEWAY',
+        headers: {},
+        body: null,
+        type: 'api_error',
+      }
+    );
   }
 
   private async recoverUploadId(
@@ -374,10 +411,11 @@ export class DeepbridService implements UsenetDebridService {
     try {
       if (!uploadId && playbackInfo.nzb) {
         added = await this.client.addNzbUrl(playbackInfo.nzb, { signal });
-        const directLink = this.selectResolvedFile(
+        const directLink = await this.selectResolvedFile(
           added,
           playbackInfo,
-          filename
+          filename,
+          signal
         );
         if (directLink) return directLink;
         uploadId = added.id;
@@ -390,6 +428,7 @@ export class DeepbridService implements UsenetDebridService {
         uploadListCache.delete(this.credentialKey);
       }
     } catch (error) {
+      if (error instanceof DebridError) throw error;
       throw toDebridError('Deepbrid failed to add NZB', error);
     }
     if (!uploadId && playbackInfo.nzb) {
@@ -412,7 +451,12 @@ export class DeepbridService implements UsenetDebridService {
       if (signal?.aborted) return undefined;
       try {
         const info = await this.client.getUploadInfo(uploadId, { signal });
-        const link = this.selectResolvedFile(info, playbackInfo, filename);
+        const link = await this.selectResolvedFile(
+          info,
+          playbackInfo,
+          filename,
+          signal
+        );
         if (link) return link;
       } catch (error) {
         if (error instanceof DebridError) throw error;

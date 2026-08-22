@@ -95,6 +95,8 @@ export const convertStatusCodeToError = (code: number): DebridError['code'] => {
       return 'INTERNAL_SERVER_ERROR';
     case 501:
       return 'NOT_IMPLEMENTED';
+    case 502:
+      return 'BAD_GATEWAY';
     case 503:
       return 'SERVICE_UNAVAILABLE';
     default:

@@ -9,6 +9,7 @@ import {
   DeepbridApiError,
   parseDeepbridAddResponse,
 } from '../builtins/deepbrid-usenet/client.js';
+import { DebridError } from './base.js';
 
 test('parses the direct files returned by Deepbrid NZB add', () => {
   const result = parseDeepbridAddResponse({
@@ -175,7 +176,11 @@ function fakeDeepbridApi(): DeepbridOfficialApi {
 }
 
 test('Deepbrid service recognizes an already-owned external NZB', async () => {
-  const service = new DeepbridService({ token: 'test' }, fakeDeepbridApi());
+  const service = new DeepbridService(
+    { token: 'test' },
+    fakeDeepbridApi(),
+    async () => true
+  );
   const [result] = await service.checkNzbs([
     {
       name: 'Tower Prep S01',
@@ -190,7 +195,11 @@ test('Deepbrid service recognizes an already-owned external NZB', async () => {
 });
 
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {
-  const service = new DeepbridService({ token: 'test' }, fakeDeepbridApi());
+  const service = new DeepbridService(
+    { token: 'test' },
+    fakeDeepbridApi(),
+    async () => true
+  );
   const url = await service.resolve(
     {
       type: 'usenet',
@@ -232,7 +241,11 @@ test('Deepbrid service uses playable files returned directly by NZB add', async 
     throw new Error('must not poll when add already returned files');
   };
 
-  const service = new DeepbridService({ token: 'direct-add' }, client);
+  const service = new DeepbridService(
+    { token: 'direct-add' },
+    client,
+    async () => true
+  );
   const url = await service.resolve(
     {
       type: 'usenet',
@@ -284,7 +297,11 @@ test('Deepbrid service recovers the canonical upload id after a missing-id respo
     };
   };
 
-  const service = new DeepbridService({ token: 'recover-id' }, client);
+  const service = new DeepbridService(
+    { token: 'recover-id' },
+    client,
+    async () => true
+  );
   const url = await service.resolve(
     {
       type: 'usenet',
@@ -297,4 +314,42 @@ test('Deepbrid service recovers the canonical upload id after a missing-id respo
   );
   assert.equal(url, 'https://usenet.myfast.link/e9');
   assert.equal(listCalls, 1);
+});
+
+test('Deepbrid service rejects generated error videos as retryable playback failures', async () => {
+  const client = fakeDeepbridApi();
+  client.listUploads = async () => [];
+  client.addNzbUrl = async () => ({
+    id: 'job-id',
+    title: 'Broken release',
+    files: [
+      {
+        name: 'Broken.Release.1080p.mkv',
+        link: 'https://usenet.myfast.link/error-video',
+        size: 21_982,
+        sizeHuman: '21 KB',
+      },
+    ],
+  });
+  const service = new DeepbridService(
+    { token: 'error-video' },
+    client,
+    async () => false
+  );
+
+  await assert.rejects(
+    service.resolve(
+      {
+        type: 'usenet',
+        hash: 'broken-hash',
+        nzb: 'https://indexer.example/broken.nzb',
+      },
+      'Broken.Release.1080p.mkv',
+      true
+    ),
+    (error: unknown) =>
+      error instanceof DebridError &&
+      error.statusCode === 502 &&
+      error.code === 'BAD_GATEWAY'
+  );
 });
