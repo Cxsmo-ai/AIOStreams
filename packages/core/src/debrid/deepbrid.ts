@@ -4,6 +4,7 @@ import {
   DebridDownload,
   DebridError,
   PlaybackInfo,
+  TorrentDebridService,
   convertStatusCodeToError,
 } from './base.js';
 import { constants, createLogger } from '../utils/index.js';
@@ -13,6 +14,7 @@ import {
   DeepbridOfficialClient,
   DeepbridUpload,
   DeepbridUploadInfo,
+  DeepbridTorrent,
   isDeepbridVideoName,
 } from '../builtins/deepbrid-usenet/client.js';
 import { createHash } from 'node:crypto';
@@ -50,6 +52,11 @@ export interface DeepbridOfficialApi {
     id: string,
     options?: { signal?: AbortSignal }
   ): Promise<DeepbridUploadInfo>;
+  listTorrents?(options?: { signal?: AbortSignal }): Promise<DeepbridTorrent[]>;
+  getTorrentInfo?(
+    id: string,
+    options?: { signal?: AbortSignal }
+  ): Promise<DeepbridTorrent | undefined>;
 }
 
 type DeepbridUsenetPlaybackInfo = Extract<PlaybackInfo, { type: 'usenet' }>;
@@ -144,9 +151,9 @@ function toDebridError(message: string, error: unknown): DebridError {
   );
 }
 
-export class DeepbridService implements UsenetDebridService {
+export class DeepbridService implements UsenetDebridService, TorrentDebridService {
   readonly serviceName = constants.DEEPBRID_SERVICE;
-  readonly capabilities = { torrents: false, usenet: true } as const;
+  readonly capabilities = { torrents: true, usenet: true } as const;
   private readonly credentialKey: string;
   private readonly preCache: boolean;
   private readonly preCacheLimit: number;
@@ -171,6 +178,68 @@ export class DeepbridService implements UsenetDebridService {
 
   async validateAccount(): Promise<void> {
     await this.client.getUser();
+  }
+
+  /**
+   * Deepbrid torrent support is intentionally library-only. Matching is done
+   * against /torrents/info; no magnet is submitted and no torrent scraper is
+   * called from this service.
+   */
+  async listMagnets(): Promise<DebridDownload[]> {
+    const torrents = this.client.listTorrents
+      ? await this.client.listTorrents()
+      : [];
+    return torrents.flatMap((torrent) => {
+      const files = torrent.files.filter((file) => isDeepbridVideoName(file.name));
+      const ready = /^(completed|complete|finished|downloaded|cached|seeding)$/i.test(
+        torrent.status.trim()
+      ) || (torrent.progress ?? 0) >= 100;
+      if (!torrent.hash || !ready || files.length === 0) return [];
+      return [{
+        id: torrent.id,
+        hash: torrent.hash,
+        name: torrent.title,
+        size: torrent.size,
+        status: 'cached' as const,
+        library: true,
+        files: torrent.files.map((file, index) => ({ ...file, index })),
+      }];
+    });
+  }
+
+  async checkMagnets(
+    magnets: string[],
+    _sid?: string,
+    _checkOwned = true
+  ): Promise<DebridDownload[]> {
+    const library = await this.listMagnets();
+    const byHash = new Map(library.map((item) => [item.hash!.toLowerCase(), item]));
+    return magnets.flatMap((hash) => {
+      const item = byHash.get(hash.toLowerCase());
+      return item ? [{ ...item, hash }] : [];
+    });
+  }
+
+  async addMagnet(_magnet: string): Promise<DebridDownload> {
+    throw new DebridError('Deepbrid torrent library is read-only', {
+      statusCode: 400, statusText: 'Bad Request', code: 'BAD_REQUEST',
+      headers: {}, body: null, type: 'api_error',
+    });
+  }
+
+  async addTorrent(_torrent: string): Promise<DebridDownload> {
+    return this.addMagnet(_torrent);
+  }
+
+  async removeMagnet(_magnetId: string): Promise<void> {
+    throw new DebridError('Deepbrid torrent library is read-only', {
+      statusCode: 400, statusText: 'Bad Request', code: 'BAD_REQUEST',
+      headers: {}, body: null, type: 'api_error',
+    });
+  }
+
+  async generateTorrentLink(link: string): Promise<string> {
+    return link;
   }
 
   private async getUploads(force = false): Promise<DeepbridUpload[]> {
@@ -457,6 +526,27 @@ export class DeepbridService implements UsenetDebridService {
     _autoRemoveDownloads?: boolean,
     signal?: AbortSignal
   ): Promise<string | undefined> {
+    if (playbackInfo.type === 'torrent') {
+      const torrents = playbackInfo.serviceItemId
+        ? [
+            await this.client.getTorrentInfo?.(playbackInfo.serviceItemId, {
+              signal,
+            }),
+          ]
+        : this.client.listTorrents
+          ? await this.client.listTorrents({ signal })
+          : [];
+      const torrent = torrents.find(
+        (item) => item?.hash?.toLowerCase() === playbackInfo.hash.toLowerCase()
+      );
+      if (!torrent) return undefined;
+      const requested = playbackInfo.fileIndex ?? playbackInfo.index;
+      const file =
+        (requested !== undefined ? torrent.files[requested] : undefined) ??
+        torrent.files.find((item) => item.name === filename) ??
+        torrent.files.find((item) => isDeepbridVideoName(item.name));
+      return file?.link;
+    }
     if (playbackInfo.type !== 'usenet') {
       throw new DebridError('Deepbrid service cannot resolve torrents', {
         statusCode: 400,

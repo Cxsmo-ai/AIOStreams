@@ -190,6 +190,35 @@ test('Deepbrid service recognizes an already-owned external NZB', async () => {
   assert.equal(result.hash, 'external-hash');
 });
 
+test('Deepbrid torrent library is read-only and matches only account torrents', async () => {
+  const client = fakeDeepbridApi();
+  client.listTorrents = async () => [
+    {
+      id: 'torrent-1',
+      hash: 'ABC123',
+      title: 'Manually added movie',
+      status: 'completed',
+      progress: 100,
+      size: 12_000_000_000,
+      files: [
+        {
+          name: 'Manually.Added.Movie.1080p.mkv',
+          link: 'https://premium-dl.deepbrid.com/movie',
+          size: 12_000_000_000,
+          sizeHuman: '12 GB',
+        },
+      ],
+    },
+  ];
+  const service = new DeepbridService({ token: 'torrent-library' }, client);
+  const [match] = await service.checkMagnets(['abc123', 'not-owned']);
+
+  assert.equal(match.id, 'torrent-1');
+  assert.equal(match.library, true);
+  assert.equal(match.status, 'cached');
+  await assert.rejects(() => service.addMagnet('magnet:?xt=urn:btih:not-owned'));
+});
+
 test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   const client = fakeDeepbridApi();
   client.listUploads = async () => [];

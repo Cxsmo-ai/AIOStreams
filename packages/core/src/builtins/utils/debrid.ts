@@ -778,7 +778,13 @@ async function processNZBsForDebridService(
           cached:
             nzbCheckResult?.status === 'cached' ||
             (nzbCheckResult?.library || nzb.library) === true,
-          library: (nzbCheckResult?.library || nzb.library) === true,
+          // An external indexer result may already exist in Deepbrid's
+          // account. Keep its cached status, but do not relabel it as the
+          // user's media unless the source itself is a library/Finder item.
+          library:
+            nzb.library === true ||
+            (nzbCheckResult?.library === true &&
+              (!nzb.indexer || nzb.indexer === service.id)),
         },
       });
     }

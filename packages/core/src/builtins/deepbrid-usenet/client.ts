@@ -89,6 +89,16 @@ export interface DeepbridUpload {
   addedAt?: string;
 }
 
+export interface DeepbridTorrent {
+  id: string;
+  hash?: string;
+  title: string;
+  status: string;
+  progress?: number;
+  size?: number;
+  files: DeepbridFinderFile[];
+}
+
 export interface DeepbridUser {
   id?: string;
   username?: string;
@@ -467,6 +477,66 @@ export class DeepbridOfficialClient {
       title: typeof json.title === 'string' ? json.title : '',
       files,
     };
+  }
+
+  /** Read-only account torrent library. It never adds or scrapes torrents. */
+  async listTorrents(
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridTorrent[]> {
+    const json = await this.requestJson('/torrents/info', options);
+    const values = Array.isArray(json.items)
+      ? json.items
+      : Array.isArray(json.torrents)
+        ? json.torrents
+        : Array.isArray(json.data)
+          ? json.data
+          : [];
+    return values.flatMap((value) => this.parseTorrent(value));
+  }
+
+  async getTorrentInfo(
+    id: string,
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridTorrent | undefined> {
+    const json = await this.requestJson(
+      `/torrents/info?id=${encodeURIComponent(id)}`,
+      options
+    );
+    const value =
+      json.torrent && typeof json.torrent === 'object'
+        ? json.torrent
+        : json.data && !Array.isArray(json.data) && typeof json.data === 'object'
+          ? json.data
+          : json;
+    return this.parseTorrent(value)[0];
+  }
+
+  private parseTorrent(value: unknown): DeepbridTorrent[] {
+    if (!value || typeof value !== 'object') return [];
+    const item = value as Record<string, unknown>;
+    const id = item.id ?? item.torrent_id ?? item.torrentId;
+    if (typeof id !== 'string' && typeof id !== 'number') return [];
+    const title =
+      (typeof item.title === 'string' && item.title) ||
+      (typeof item.name === 'string' && item.name) ||
+      (typeof item.filename === 'string' && item.filename) ||
+      '';
+    const hash = [item.hash, item.infohash, item.info_hash].find(
+      (v): v is string => typeof v === 'string' && v.length > 0
+    );
+    const rawStatus = item.status ?? item.state ?? '';
+    const status = typeof rawStatus === 'string' ? rawStatus : String(rawStatus);
+    const progress = Number(item.progress ?? item.percentage ?? 0);
+    const size = Number(item.size ?? item.total_size ?? 0);
+    return [{
+      id: String(id),
+      hash,
+      title,
+      status,
+      progress: Number.isFinite(progress) ? progress : undefined,
+      size: Number.isFinite(size) && size > 0 ? size : undefined,
+      files: parseDeepbridFiles(item),
+    }];
   }
 }
 

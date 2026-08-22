@@ -376,7 +376,7 @@ export async function resolveServiceWrappedStreams(
 
   // Split services into torrent-capable only (exclude usenet-only services)
   const torrentServices = debridServices.filter(
-    (s) => !['nzbdav', 'altmount'].includes(s.id)
+    (s) => !['nzbdav', 'altmount', constants.DEEPBRID_SERVICE].includes(s.id)
   );
 
   // Reconstruct Torrent[] from wrapped external P2P AND reconfigure streams
