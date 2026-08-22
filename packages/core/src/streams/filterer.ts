@@ -135,6 +135,18 @@ export interface FilterTimings {
   };
 }
 
+export function isOnDemandUsenetStream(stream: ParsedStream): boolean {
+  const isUsenet =
+    stream.type === 'usenet' ||
+    stream.type === 'stremio-usenet' ||
+    (stream.type === 'debrid' && Boolean(stream.nzbUrl));
+  return (
+    isUsenet &&
+    stream.service?.cached === false &&
+    stream.otherBehaviorHints?.aioOnDemandPlayable === true
+  );
+}
+
 class StreamFilterer {
   private userData: UserData;
   private filterStatistics: FilterStatistics;
@@ -2043,7 +2055,12 @@ class StreamFilterer {
 
       // uncached
 
-      if (this.userData.excludeUncached && stream.service?.cached === false) {
+      const preserveOnDemandUsenet = isOnDemandUsenetStream(stream);
+      if (
+        !preserveOnDemandUsenet &&
+        this.userData.excludeUncached &&
+        stream.service?.cached === false
+      ) {
         this.incrementRemovalReason('excludedUncached');
         return false;
       }
@@ -2054,6 +2071,7 @@ class StreamFilterer {
       }
 
       if (
+        !preserveOnDemandUsenet &&
         filterBasedOnCacheStatus(
           stream,
           this.userData.excludeCachedMode || 'or',

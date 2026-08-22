@@ -57,6 +57,66 @@ export interface ServiceWrapError {
   description: string;
 }
 
+function normaliseDeepbridReleaseTitle(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const normalised = value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\.(mkv|mp4|avi|mov|wmv|m2ts|ts|nzb)$/i, '')
+    .replace(/[^a-z0-9]+/gi, '')
+    .toLowerCase();
+  return normalised.length >= 8 ? normalised : undefined;
+}
+
+function positiveSize(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined;
+}
+
+/**
+ * Secret-free, deliberately conservative identities for direct Finder and
+ * external-indexer streams. Exact NZB hashes are strongest; release title plus
+ * exact byte size handles indexers that expose a different signed NZB URL.
+ */
+export function getDeepbridFinderIdentities(stream: ParsedStream): Set<string> {
+  const identities = new Set<string>();
+  if (stream.releaseKey) identities.add(`release-key:${stream.releaseKey}`);
+  if (stream.nzbUrl) identities.add(`nzb:${hashNzbUrl(stream.nzbUrl)}`);
+
+  const hints = stream.otherBehaviorHints;
+  const hintedHash = hints?.deepbridNzbHash;
+  if (typeof hintedHash === 'string' && hintedHash.length > 0) {
+    identities.add(`nzb:${hintedHash.toLowerCase()}`);
+  }
+
+  const hintedTitle = normaliseDeepbridReleaseTitle(
+    hints?.deepbridReleaseTitle
+  );
+  const hintedSize = positiveSize(hints?.deepbridReleaseSize);
+  const fallbackTitle =
+    hintedTitle ??
+    normaliseDeepbridReleaseTitle(
+      stream.folderName ?? stream.filename ?? stream.originalName
+    );
+  const fallbackSize =
+    hintedSize ?? positiveSize(stream.folderSize) ?? positiveSize(stream.size);
+  if (fallbackTitle && fallbackSize) {
+    identities.add(`release:${fallbackTitle}:${fallbackSize}`);
+  }
+  return identities;
+}
+
+export function isAlreadyResolvedByDeepbridFinder(
+  stream: ParsedStream,
+  finderIdentities: ReadonlySet<string>
+): boolean {
+  for (const identity of getDeepbridFinderIdentities(stream)) {
+    if (finderIdentities.has(identity)) return true;
+  }
+  return false;
+}
+
 /**
  * Resolve every external NZB through Deepbrid once, centrally, after all
  * indexer addons have been scraped. This is deliberately independent of the
@@ -70,17 +130,26 @@ export async function resolveGlobalDeepbridNzbs(
   userData: UserData,
   addons: Addon[]
 ): Promise<ServiceWrapResult> {
-  const deepbrid = buildDebridServices(userData).find(
+  const deepbrid = buildDebridServices(userData, false).find(
     (service) => service.id === constants.DEEPBRID_SERVICE
   );
   if (!deepbrid) return { streams, errors: [], hasNewStreams: false };
+
+  const finderIdentities = new Set<string>();
+  for (const stream of streams) {
+    if (stream.addon.identifier !== 'deepbrid-usenet') continue;
+    for (const identity of getDeepbridFinderIdentities(stream)) {
+      finderIdentities.add(identity);
+    }
+  }
 
   const candidates = streams.filter(
     (stream) =>
       !!stream.nzbUrl &&
       stream.service?.id !== constants.DEEPBRID_SERVICE &&
       stream.indexer !== constants.DEEPBRID_SERVICE &&
-      stream.addon.identifier !== 'deepbrid-usenet'
+      stream.addon.identifier !== 'deepbrid-usenet' &&
+      !isAlreadyResolvedByDeepbridFinder(stream, finderIdentities)
   );
   if (candidates.length === 0)
     return { streams, errors: [], hasNewStreams: false };
@@ -172,6 +241,11 @@ export async function resolveGlobalDeepbridNzbs(
         size: result.file.size ?? original.size,
         folderSize: result.size ?? original.folderSize,
         nzbUrl: result.nzb,
+        otherBehaviorHints: {
+          ...original.otherBehaviorHints,
+          aioOnDemandPlayable:
+            result.service?.cached === false ? true : undefined,
+        },
       });
     }
   }
@@ -406,7 +480,10 @@ export async function resolveServiceWrappedStreams(
 // Helper functions
 // ---------------------------------------------------------------------------
 
-function buildDebridServices(userData: UserData): BuiltinDebridServices {
+function buildDebridServices(
+  userData: UserData,
+  respectServiceWrapFilter = true
+): BuiltinDebridServices {
   const enabledServices =
     userData.services?.filter((s) => s.enabled !== false) ?? [];
   const serviceWrapFilter = userData.serviceWrap?.services;
@@ -416,6 +493,7 @@ function buildDebridServices(userData: UserData): BuiltinDebridServices {
   for (const service of enabledServices) {
     if (!builtinServiceIds.has(service.id as BuiltinServiceId)) continue;
     if (
+      respectServiceWrapFilter &&
       serviceWrapFilter &&
       serviceWrapFilter.length > 0 &&
       !serviceWrapFilter.includes(service.id as any)

@@ -922,6 +922,16 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
         : '⏳'
       : '';
     const isFreeleech = torrentOrNzb?.downloadvolumefactor === 0;
+    const globalUsenetCacheAndPlay =
+      this.userData.cacheAndPlay?.enabled === true &&
+      this.userData.cacheAndPlay.streamTypes?.includes('usenet') === true;
+    const onDemandUsenetPlayable =
+      torrentOrNzb.type === 'usenet' &&
+      torrentOrNzb.service?.cached === false &&
+      (torrentOrNzb.service.id === constants.DEEPBRID_SERVICE ||
+        (torrentOrNzb.service.id === constants.TORBOX_SERVICE &&
+          (this.userData.torbox?.usenetCacheAndPlay ??
+            globalUsenetCacheAndPlay)));
 
     const name = `${torrentOrNzb.service?.library ? '🗃️ ' : ''}${isPrivate ? '🔑 ' : ''}[${shortCode} ${cacheIndicator}] ${this.name} ${isFreeleech ? 'FREELEECH' : ''} `;
     const description = `${torrentOrNzb.title ? torrentOrNzb.title : ''}\n${torrentOrNzb.file.name ? torrentOrNzb.file.name : ''}\n${
@@ -970,6 +980,10 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
         videoSize: torrentOrNzb.file.size,
         filename: torrentOrNzb.file.name,
         folderSize: torrentOrNzb.size,
+        // This is not a false cache hit. It identifies services configured to
+        // add and wait for an NZB when clicked, so valid queued results survive
+        // generic "exclude uncached" filters while keeping the ⏳ label.
+        aioOnDemandPlayable: onDemandUsenetPlayable || undefined,
       },
       parsedMediaInfo: torrentOrNzb.parsedMediaInfo,
     };

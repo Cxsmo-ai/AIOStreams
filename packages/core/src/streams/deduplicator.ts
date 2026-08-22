@@ -240,7 +240,9 @@ class StreamDeduplicator {
         const hash = getSimpleTextHash(
           parts.filter((p) => p !== undefined).join('|')
         );
-        currentStreamKeyStrings.push(`smartDetect:${hash}`);
+        currentStreamKeyStrings.push(
+          `smartDetect:${usenetDeduplicationDomain(stream)}:${hash}`
+        );
       }
 
       if (currentStreamKeyStrings.length > 0) {
@@ -482,32 +484,38 @@ class StreamDeduplicator {
     tiebreakerCmp: TiebreakerCmp,
     libraryCmp: (a: ParsedStream, b: ParsedStream) => number
   ): number {
+    const enabledServices =
+      this.userData.services?.filter((service) => service.enabled !== false) ??
+      [];
+    const serviceIndex = (serviceId?: string): number => {
+      const index = enabledServices.findIndex(
+        (service) => service.id === serviceId
+      );
+      return index === -1 ? Infinity : index;
+    };
+    const aServiceIndex = serviceIndex(a.service?.id);
+    const bServiceIndex = serviceIndex(b.service?.id);
+    const externalUsenetServices = new Set<string>([
+      constants.TORBOX_SERVICE,
+      constants.DEEPBRID_SERVICE,
+    ]);
+    const isExternalUsenetResolverPair =
+      usenetDeduplicationDomain(a) === 'deepbrid-torbox' &&
+      usenetDeduplicationDomain(b) === 'deepbrid-torbox' &&
+      externalUsenetServices.has(a.service?.id ?? '') &&
+      externalUsenetServices.has(b.service?.id ?? '') &&
+      a.service?.id !== b.service?.id;
+
+    // For equivalent external Usenet copies, the drag order under Services is
+    // authoritative—even when one copy is already owned. This is the explicit
+    // TB/DB resolver preference the user configured.
+    if (isExternalUsenetResolverPair && aServiceIndex !== bServiceIndex) {
+      return aServiceIndex - bServiceIndex;
+    }
+
     const lc = libraryCmp(a, b);
     if (lc !== 0) return lc;
 
-    const explicitPriority = (serviceId?: string): number | undefined => {
-      if (serviceId === constants.DEEPBRID_SERVICE) return 0;
-      if (serviceId === constants.TORBOX_SERVICE) return 1;
-      return undefined;
-    };
-    const aExplicit = explicitPriority(a.service?.id);
-    const bExplicit = explicitPriority(b.service?.id);
-    if (aExplicit !== undefined || bExplicit !== undefined) {
-      if (aExplicit === undefined) return 1;
-      if (bExplicit === undefined) return -1;
-      if (aExplicit !== bExplicit) return aExplicit - bExplicit;
-    }
-
-    let aServiceIndex =
-      this.userData.services
-        ?.filter((service) => service.enabled)
-        .findIndex((service) => service.id === a.service?.id) ?? 0;
-    let bServiceIndex =
-      this.userData.services
-        ?.filter((service) => service.enabled)
-        .findIndex((service) => service.id === b.service?.id) ?? 0;
-    aServiceIndex = aServiceIndex === -1 ? Infinity : aServiceIndex;
-    bServiceIndex = bServiceIndex === -1 ? Infinity : bServiceIndex;
     if (aServiceIndex !== bServiceIndex) {
       return aServiceIndex - bServiceIndex;
     }

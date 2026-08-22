@@ -764,6 +764,9 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
             parseNewshostingRelease(result.title).seasonPack === true,
           deepbridReleaseTitle: result.title,
           deepbridReleaseSize: result.size || undefined,
+          // Stable, secret-free identity used to avoid re-adding this Finder
+          // NZB through Deepbrid when another indexer returns the same URL.
+          deepbridNzbHash: file.nzbUrl ? hashNzbUrl(file.nzbUrl) : undefined,
           deepbridArchiveExpanded: archiveExpanded,
         },
       } satisfies Stream;

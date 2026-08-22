@@ -355,7 +355,10 @@ export function StreamServices() {
       ) : (
         <p className="text-sm text-[--muted]">
           Drag to reorder by priority. Enable a service and click{' '}
-          <strong>Configure</strong> to enter credentials.
+          <strong>Configure</strong> to enter credentials. For duplicate Usenet
+          resolutions, whichever of <strong>TorBox</strong> or{' '}
+          <strong>Deepbrid</strong> is higher wins; native AIOStreams Usenet is
+          always kept as a separate playback method.
         </p>
       )}
 

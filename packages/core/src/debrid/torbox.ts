@@ -368,12 +368,15 @@ export class TorboxDebridService
 
     if (hashesToCheck.length > 0) {
       let newResults: DebridDownload[] = [];
-      const prioritizedHashes = hashesToCheck.slice(0, 100);
+      // The TorBox endpoint accepts 100 hashes per request, not 100 hashes per
+      // scrape. Check every unique candidate in bounded batches so later
+      // indexers are not silently starved by earlier results.
+      const allUniqueHashes = [...new Set(hashesToCheck)];
 
       try {
-        const availabilityLimit = pLimit(1);
+        const availabilityLimit = pLimit(2);
         const responses = await Promise.all(
-          chunkTorboxNzbHashes(prioritizedHashes).map((hashes) =>
+          chunkTorboxNzbHashes(allUniqueHashes).map((hashes) =>
             availabilityLimit(async () => {
               try {
                 return await Promise.race([
@@ -386,7 +389,10 @@ export class TorboxDebridService
                     }
                   ),
                   new Promise<null>((_, reject) =>
-                    setTimeout(() => reject(new Error('TorBox usenet check timeout')), 4500)
+                    setTimeout(
+                      () => reject(new Error('TorBox usenet check timeout')),
+                      4500
+                    )
                   ),
                 ]);
               } catch (err: any) {
@@ -400,7 +406,11 @@ export class TorboxDebridService
           )
         );
         for (const result of responses) {
-          if (!result || !result.data?.success || !Array.isArray(result.data.data)) {
+          if (
+            !result ||
+            !result.data?.success ||
+            !Array.isArray(result.data.data)
+          ) {
             continue;
           }
           newResults.push(
