@@ -265,17 +265,13 @@ export class LibraryAddon extends BaseDebridAddon<LibraryAddonConfig> {
     // Find the file identifier separator colon AFTER the prefix
     // (the prefix itself contains '::' which must be skipped)
     const colonAfterPrefix = id.indexOf(':', LIBRARY_ID_PREFIX.length);
-    if (colonAfterPrefix === -1) {
-      // No file identifier — could be an action item
-      const { itemType } = parseLibraryId(id);
-      if (itemType === 'action') {
-        return [];
-      }
-      throw new Error(`Invalid library stream ID: ${id}`);
-    }
-
-    const metaId = id.substring(0, colonAfterPrefix);
-    const fileIdentifier = id.substring(colonAfterPrefix + 1);
+    // Some clients request the catalog item's bare id instead of appending
+    // the single-video `:default` identifier. Treat both forms identically;
+    // rejecting the bare form causes a misleading 500 in Wako/Stremio.
+    const metaId =
+      colonAfterPrefix === -1 ? id : id.substring(0, colonAfterPrefix);
+    const fileIdentifier =
+      colonAfterPrefix === -1 ? 'default' : id.substring(colonAfterPrefix + 1);
 
     const { serviceId, itemType, itemId } = parseLibraryId(metaId);
 
