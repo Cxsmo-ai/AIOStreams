@@ -15,6 +15,7 @@ import { Meta } from '../../db/schemas.js';
 import { formatSmartBytes } from '../../formatters/utils.js';
 import { parseTorrentTitleCached } from '../../parser/title.js';
 import { LIBRARY_ID_PREFIX } from './catalog.js';
+import { isLikelyDeepbridVideoName } from '../deepbrid-usenet/client.js';
 
 const logger = createLogger('library:meta');
 
@@ -151,7 +152,9 @@ function buildVideos(
 ): Meta['videos'] & object {
   const files = item.files ?? [];
   const videoFiles = files.filter(
-    (file) => isVideoFile(file) && file.name && file.size > 0
+    (file) =>
+      file.name &&
+      (isVideoFile(file) || isLikelyDeepbridVideoName(file.name))
   );
 
   if (videoFiles.length === 0) {
