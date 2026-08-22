@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { defineConfig, loadEnv } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
 import { pluginNodePolyfill } from '@rsbuild/plugin-node-polyfill';
@@ -8,6 +9,25 @@ const { publicVars, parsed } = loadEnv({ prefixes: ['PUBLIC_'] });
 const devServerPort = Number(parsed.PORT) || 21456;
 const backendBaseUrl =
   parsed.PUBLIC_BACKEND_BASE_URL || 'http://localhost:3001';
+
+function readBuildCommit(): string {
+  try {
+    const metadataPath = path.resolve(
+      import.meta.dirname,
+      '../../resources/metadata.json'
+    );
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as {
+      commitHash?: unknown;
+    };
+    return typeof metadata.commitHash === 'string'
+      ? metadata.commitHash
+      : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+const buildCommit = readBuildCommit();
 
 export default defineConfig({
   // @aiostreams/core resolves via its built dist (self-consistent .js
@@ -23,6 +43,7 @@ export default defineConfig({
       'process.env.NEXT_PUBLIC_PLATFORM': JSON.stringify(
         parsed.PUBLIC_PLATFORM ?? parsed.NEXT_PUBLIC_PLATFORM ?? ''
       ),
+      __AIOSTREAMS_BUILD_COMMIT__: JSON.stringify(buildCommit),
       ...publicVars,
     },
   },

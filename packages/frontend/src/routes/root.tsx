@@ -5,6 +5,7 @@ import { LuffyError } from '@/components/shared/luffy-error';
 import { LoadingOverlay } from '@/components/ui/loading-spinner';
 import type { QueryClient } from '@tanstack/react-query';
 import { lazy, Suspense } from 'react';
+import { BuildSyncGuard } from '@/components/shared/build-sync-guard';
 
 const DevTools = import.meta.env.DEV
   ? lazy(async () => {
@@ -48,6 +49,7 @@ function NotFound() {
 function RootComponent() {
   return (
     <ThemeProvider attribute="class" defaultTheme="dark" forcedTheme="dark">
+      <BuildSyncGuard />
       <Toaster swipeDirections={['top', 'right']} />
       <Outlet />
       {DevTools && (
