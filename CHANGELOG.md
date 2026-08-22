@@ -1,5 +1,26 @@
 # Changelog
 
+## Cxsmo-ai Fork Updates — 2026-08-22
+
+These fork-specific changes are deployed in commit [`bba16c53`](https://github.com/Cxsmo-ai/AIOStreams/commit/bba16c532f9b57c4900aabeb0de0b2921586c025) and are not part of the upstream AIOStreams release notes.
+
+### Deepbrid and Library Playback
+
+* Fixed Deepbrid library playback for multi-file torrents by honoring the exact requested file index instead of silently falling back to the first video.
+* Preserved separate playable entries for large Deepbrid library items containing many video files, including season packs and multi-file media releases.
+* Kept authenticated Deepbrid torrent-library resolution read-only and refreshed the current file links at playback time.
+* Accepted bare library stream IDs from clients such as Wako, preventing misleading internal-server errors when `:default` is omitted.
+* Added support for extensionless Deepbrid release names when quality/container markers identify them as video files.
+* Added regression coverage for exact second-file playback in a multi-file Deepbrid torrent.
+
+### Validation and Deployment
+
+* Core test suite: 154 passed, 0 failed.
+* Production build completed successfully.
+* Oracle Podman deployment updated to `localhost/aiostreams:bba16c53` for both AIOStreams and the Miatrix proxy.
+* GitHub `main` and `aiostreams-native-nightly-pr` are synchronized at `bba16c53`.
+* Live service root returned HTTP 200 after deployment; the previously supplied Tower Prep media URL returned HTTP 404, indicating an expired link rather than a resolver-generated playback failure.
+
 ## [2.33.0](https://github.com/Viren070/AIOStreams/compare/v2.32.1...v2.33.0) (2026-08-09)
 
 
