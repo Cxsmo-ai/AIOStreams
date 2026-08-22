@@ -10,13 +10,11 @@ import { constants } from '../utils/index.js';
 import {
   DeepbridApiError,
   DeepbridAddResult,
-  DeepbridFinderFile,
   DeepbridOfficialClient,
   DeepbridUpload,
   DeepbridUploadInfo,
   isDeepbridVideoName,
 } from '../builtins/deepbrid-usenet/client.js';
-import { probeDeepbridVideo } from '../builtins/deepbrid-usenet/probe.js';
 import { createHash } from 'node:crypto';
 
 const uploadCache = new Map<string, { id: string; expiresAt: number }>();
@@ -27,6 +25,7 @@ const uploadListCache = new Map<
   { value: DeepbridUpload[]; expiresAt: number }
 >();
 const uploadListInFlight = new Map<string, Promise<DeepbridUpload[]>>();
+const MIN_DEEPBRID_PLAYABLE_BYTES = 16 * 1024 * 1024;
 
 export interface DeepbridResolvedFile {
   name: string;
@@ -143,17 +142,14 @@ export class DeepbridService implements UsenetDebridService {
   readonly serviceName = constants.DEEPBRID_SERVICE;
   readonly capabilities = { torrents: false, usenet: true } as const;
   private readonly credentialKey: string;
-  private readonly apiKey: string;
 
   constructor(
     config: DebridServiceConfig,
     private client: DeepbridOfficialApi = new DeepbridOfficialClient(
       config.token,
       30_000
-    ),
-    private readonly probeVideo: typeof probeDeepbridVideo = probeDeepbridVideo
+    )
   ) {
-    this.apiKey = config.token;
     this.credentialKey = createHash('sha256')
       .update(config.token)
       .digest('hex')
@@ -276,17 +272,33 @@ export class DeepbridService implements UsenetDebridService {
     );
   }
 
-  private resolvedCandidates(
+  private selectResolvedFile(
     info: DeepbridUploadInfo | DeepbridAddResult,
     playbackInfo: DeepbridUsenetPlaybackInfo,
     filename: string
-  ): DeepbridFinderFile[] {
-    if (!info.files.length) return [];
+  ): string | undefined {
+    if (!info.files.length) return undefined;
+    const plausibleFiles = info.files.filter(
+      (file) => !file.size || file.size >= MIN_DEEPBRID_PLAYABLE_BYTES
+    );
+    if (!plausibleFiles.length) {
+      throw new DebridError(
+        'Deepbrid resolved the NZB to a generated error file instead of media',
+        {
+          statusCode: 502,
+          statusText: 'Bad Gateway',
+          code: 'BAD_GATEWAY',
+          headers: {},
+          body: null,
+          type: 'api_error',
+        }
+      );
+    }
     const target = selectDeepbridUploadFile(
-      info.files,
+      plausibleFiles,
       filename,
       playbackInfo.metadata
-    ) as DeepbridFinderFile | undefined;
+    );
     if (!target && playbackInfo.metadata?.episode !== undefined) {
       throw new DebridError(
         'Deepbrid resolved the NZB but did not contain the requested episode file',
@@ -300,66 +312,7 @@ export class DeepbridService implements UsenetDebridService {
         }
       );
     }
-    if (!target) return [];
-
-    // A single NZB can expose duplicate video members. Try the preferred file
-    // first, then only same-media alternatives; never substitute another
-    // episode from a season pack.
-    return [
-      target,
-      ...info.files.filter(
-        (file) =>
-          file.link !== target.link &&
-          selectDeepbridUploadFile([file], filename, playbackInfo.metadata) !==
-            undefined
-      ),
-    ];
-  }
-
-  private async selectResolvedFile(
-    info: DeepbridUploadInfo | DeepbridAddResult,
-    playbackInfo: DeepbridUsenetPlaybackInfo,
-    filename: string,
-    refresh: () => Promise<DeepbridUploadInfo | DeepbridAddResult>,
-    signal?: AbortSignal
-  ): Promise<string | undefined> {
-    const candidates = this.resolvedCandidates(info, playbackInfo, filename);
-    if (!candidates.length) return undefined;
-    for (const candidate of candidates) {
-      const playable = await this.probeVideo(candidate, this.apiKey, {
-        timeoutMs: 8_000,
-        signal,
-      });
-      if (!playable) continue;
-
-      // Deepbrid's NZB links are one-time capabilities. The range probe above
-      // intentionally consumes the checked URL, so refresh the same upload and
-      // return a pristine capability to the player.
-      const refreshed = await refresh();
-      const freshCandidates = this.resolvedCandidates(
-        refreshed,
-        playbackInfo,
-        filename
-      );
-      const exact = freshCandidates.find(
-        (file) =>
-          normalizedFilename(file.name) === normalizedFilename(candidate.name)
-      );
-      const fresh = exact ?? freshCandidates[0];
-      if (fresh?.link) return fresh.link;
-    }
-
-    throw new DebridError(
-      'Deepbrid resolved the NZB but did not return a playable video file',
-      {
-        statusCode: 502,
-        statusText: 'Bad Gateway',
-        code: 'BAD_GATEWAY',
-        headers: {},
-        body: null,
-        type: 'api_error',
-      }
-    );
+    return target?.link;
   }
 
   private async recoverUploadId(
@@ -437,12 +390,10 @@ export class DeepbridService implements UsenetDebridService {
     try {
       if (!uploadId && playbackInfo.nzb) {
         added = await this.client.addNzbUrl(playbackInfo.nzb, { signal });
-        const directLink = await this.selectResolvedFile(
+        const directLink = this.selectResolvedFile(
           added,
           playbackInfo,
-          filename,
-          () => this.client.addNzbUrl(playbackInfo.nzb!, { signal }),
-          signal
+          filename
         );
         if (directLink) return directLink;
         uploadId = added.id;
@@ -478,14 +429,7 @@ export class DeepbridService implements UsenetDebridService {
       if (signal?.aborted) return undefined;
       try {
         const info = await this.client.getUploadInfo(uploadId, { signal });
-        const currentUploadId = uploadId;
-        const link = await this.selectResolvedFile(
-          info,
-          playbackInfo,
-          filename,
-          () => this.client.getUploadInfo(currentUploadId, { signal }),
-          signal
-        );
+        const link = this.selectResolvedFile(info, playbackInfo, filename);
         if (link) return link;
       } catch (error) {
         if (error instanceof DebridError) throw error;
