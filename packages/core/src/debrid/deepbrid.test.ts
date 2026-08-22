@@ -5,6 +5,36 @@ import {
   selectDeepbridUploadFile,
   type DeepbridOfficialApi,
 } from './deepbrid.js';
+import {
+  DeepbridApiError,
+  parseDeepbridAddResponse,
+} from '../builtins/deepbrid-usenet/client.js';
+
+test('parses the direct files returned by Deepbrid NZB add', () => {
+  const result = parseDeepbridAddResponse({
+    data: {
+      upload_id: 42,
+      title: 'Tower Prep S01',
+      files: [
+        {
+          filename: 'Tower.Prep.S01E09.720p.mkv',
+          download_url: 'https://usenet.myfast.link/e9',
+          filesize: 2_000,
+        },
+      ],
+    },
+  });
+  assert.equal(result.id, '42');
+  assert.equal(result.title, 'Tower Prep S01');
+  assert.deepEqual(result.files, [
+    {
+      name: 'Tower.Prep.S01E09.720p.mkv',
+      link: 'https://usenet.myfast.link/e9',
+      size: 2_000,
+      sizeHuman: '',
+    },
+  ]);
+});
 
 test('Deepbrid upload selection prefers the requested video over archives', () => {
   const selected = selectDeepbridUploadFile(
@@ -119,7 +149,7 @@ function fakeDeepbridApi(): DeepbridOfficialApi {
       ];
     },
     async addNzbUrl() {
-      return 'upload-1';
+      return { id: 'upload-1', title: 'Tower Prep S01', files: [] };
     },
     async getUploadInfo() {
       return {
@@ -173,4 +203,98 @@ test('Deepbrid service resolves the requested episode from an owned upload', asy
     true
   );
   assert.equal(url, 'https://usenet.myfast.link/e9');
+});
+
+test('Deepbrid service uses playable files returned directly by NZB add', async () => {
+  let infoCalls = 0;
+  const client = fakeDeepbridApi();
+  client.listUploads = async () => [];
+  client.addNzbUrl = async () => ({
+    id: 'non-library-job-id',
+    title: 'Tower Prep S01',
+    files: [
+      {
+        name: 'Tower.Prep.S01E01.720p.mkv',
+        link: 'https://usenet.myfast.link/e1',
+        size: 1,
+        sizeHuman: '1 GB',
+      },
+      {
+        name: 'Tower.Prep.S01E09.720p.mkv',
+        link: 'https://usenet.myfast.link/e9',
+        size: 2,
+        sizeHuman: '2 GB',
+      },
+    ],
+  });
+  client.getUploadInfo = async () => {
+    infoCalls++;
+    throw new Error('must not poll when add already returned files');
+  };
+
+  const service = new DeepbridService({ token: 'direct-add' }, client);
+  const url = await service.resolve(
+    {
+      type: 'usenet',
+      hash: 'external-hash-direct',
+      nzb: 'https://indexer.example/tower-prep-direct.nzb',
+      metadata: { titles: ['Tower Prep'], season: 1, episode: 9, airDates: [] },
+    },
+    'Tower Prep S01',
+    true
+  );
+  assert.equal(url, 'https://usenet.myfast.link/e9');
+  assert.equal(infoCalls, 0);
+});
+
+test('Deepbrid service recovers the canonical upload id after a missing-id response', async () => {
+  let listCalls = 0;
+  const client = fakeDeepbridApi();
+  client.listUploads = async () => {
+    listCalls++;
+    return [
+      {
+        id: 'canonical-upload-id',
+        title: 'Tower Prep S01',
+        source: 'url',
+        sourceUrl: 'https://indexer.example/tower-prep-recover.nzb',
+      },
+    ];
+  };
+  client.addNzbUrl = async () => ({
+    id: 'non-library-job-id',
+    title: 'Tower Prep S01',
+    files: [],
+  });
+  client.getUploadInfo = async (id) => {
+    if (id !== 'canonical-upload-id') {
+      throw new DeepbridApiError('Missing id', 200, 'api_1');
+    }
+    return {
+      id,
+      title: 'Tower Prep S01',
+      files: [
+        {
+          name: 'Tower.Prep.S01E09.720p.mkv',
+          link: 'https://usenet.myfast.link/e9',
+          size: 2,
+          sizeHuman: '2 GB',
+        },
+      ],
+    };
+  };
+
+  const service = new DeepbridService({ token: 'recover-id' }, client);
+  const url = await service.resolve(
+    {
+      type: 'usenet',
+      hash: 'external-hash-recover',
+      nzb: 'https://indexer.example/tower-prep-recover.nzb',
+      metadata: { titles: ['Tower Prep'], season: 1, episode: 9, airDates: [] },
+    },
+    'Tower Prep S01',
+    true
+  );
+  assert.equal(url, 'https://usenet.myfast.link/e9');
+  assert.equal(listCalls, 1);
 });

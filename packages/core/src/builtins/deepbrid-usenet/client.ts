@@ -28,9 +28,15 @@ const ResultSchema = z.looseObject({
 const FileSchema = z.looseObject({
   name: z.string().optional(),
   filename: z.string().optional(),
+  short_name: z.string().optional(),
+  subject: z.string().optional(),
   link: z.url().optional(),
   url: z.url().optional(),
+  download_url: z.string().optional(),
+  downloadUrl: z.string().optional(),
+  download: z.string().optional(),
   size: z.coerce.number().nonnegative().catch(0),
+  filesize: z.coerce.number().nonnegative().catch(0),
   size_human: z.coerce.string().optional(),
   sizeHuman: z.coerce.string().optional(),
 });
@@ -64,6 +70,12 @@ export interface DeepbridFinderContent {
 
 export interface DeepbridUploadInfo {
   id: string;
+  title: string;
+  files: DeepbridFinderFile[];
+}
+
+export interface DeepbridAddResult {
+  id?: string;
   title: string;
   files: DeepbridFinderFile[];
 }
@@ -173,6 +185,83 @@ function apiMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
+function responseObjects(
+  value: Record<string, unknown>
+): Record<string, unknown>[] {
+  const objects = [value];
+  for (const key of ['data', 'result', 'download', 'item', 'upload']) {
+    const nested = value[key];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      objects.push(nested as Record<string, unknown>);
+    }
+  }
+  return objects;
+}
+
+function parseDeepbridFiles(value: Record<string, unknown>) {
+  const values = responseObjects(value)
+    .map((candidate) => candidate.files)
+    .find(Array.isArray);
+  if (!values) return [];
+  return values.flatMap((entry) => {
+    const parsed = FileSchema.safeParse(entry);
+    if (!parsed.success) return [];
+    const file = parsed.data;
+    const name =
+      file.name || file.filename || file.short_name || file.subject || '';
+    const link =
+      file.download_url ||
+      file.downloadUrl ||
+      file.url ||
+      file.link ||
+      file.download ||
+      '';
+    if (!name || !link) return [];
+    try {
+      const absoluteLink = link.startsWith('/')
+        ? new URL(link, 'https://www.deepbrid.com').toString()
+        : link;
+      return [
+        {
+          name,
+          link: validateDeepbridDownloadUrl(absoluteLink).toString(),
+          size: file.filesize || file.size,
+          sizeHuman: file.size_human || file.sizeHuman || '',
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function responseValue(
+  value: Record<string, unknown>,
+  keys: string[]
+): unknown {
+  for (const candidate of responseObjects(value)) {
+    for (const key of keys) {
+      if (candidate[key] !== undefined && candidate[key] !== null) {
+        return candidate[key];
+      }
+    }
+  }
+  return undefined;
+}
+
+export function parseDeepbridAddResponse(
+  json: Record<string, unknown>
+): DeepbridAddResult {
+  const id = responseValue(json, ['id', 'upload_id', 'uploadId']);
+  const title = responseValue(json, ['title', 'name', 'filename']);
+  return {
+    id:
+      typeof id === 'string' || typeof id === 'number' ? String(id) : undefined,
+    title: typeof title === 'string' ? title : '',
+    files: parseDeepbridFiles(json),
+  };
+}
+
 /**
  * Client for Deepbrid's documented account and Usenet upload API.
  *
@@ -246,13 +335,17 @@ export class DeepbridOfficialClient {
 
       const retryAfter = retryAfterMs(response);
       if (
-        (response.status === 429 ||
-          response.status === 502 ||
-          response.status === 503) &&
-        attempt < 2
+        response.status === 429 &&
+        attempt === 0 &&
+        retryAfter !== undefined &&
+        retryAfter <= 5_000
       ) {
+        await abortableDelay(retryAfter, options.signal);
+        continue;
+      }
+      if ((response.status === 502 || response.status === 503) && attempt < 2) {
         await abortableDelay(
-          Math.min(5_000, retryAfter ?? 500 * 2 ** attempt),
+          Math.min(5_000, 500 * 2 ** attempt),
           options.signal
         );
         continue;
@@ -343,7 +436,7 @@ export class DeepbridOfficialClient {
   async addNzbUrl(
     nzbUrl: string,
     options: DeepbridRequestOptions = {}
-  ): Promise<string> {
+  ): Promise<DeepbridAddResult> {
     const parsed = new URL(nzbUrl);
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
       throw new DeepbridApiError(
@@ -357,15 +450,7 @@ export class DeepbridOfficialClient {
       method: 'POST',
       body: new URLSearchParams({ nzb_url: parsed.toString() }),
     });
-    const id = json.id ?? json.upload_id ?? json.uploadId;
-    if (typeof id !== 'string' && typeof id !== 'number') {
-      throw new DeepbridApiError(
-        'Deepbrid NZB upload returned no upload id.',
-        502,
-        'missing-upload-id'
-      );
-    }
-    return String(id);
+    return parseDeepbridAddResponse(json);
   }
 
   async getUploadInfo(
@@ -376,27 +461,7 @@ export class DeepbridOfficialClient {
       `/usenet/uploads/info?id=${encodeURIComponent(id)}`,
       options
     );
-    const values = Array.isArray(json.files) ? json.files : [];
-    const files = values.flatMap((value) => {
-      const parsed = FileSchema.safeParse(value);
-      if (!parsed.success) return [];
-      const file = parsed.data;
-      const name = file.name || file.filename || '';
-      const link = file.link || file.url || '';
-      if (!name || !link) return [];
-      try {
-        return [
-          {
-            name,
-            link: validateDeepbridDownloadUrl(link).toString(),
-            size: file.size,
-            sizeHuman: file.size_human || file.sizeHuman || '',
-          },
-        ];
-      } catch {
-        return [];
-      }
-    });
+    const files = parseDeepbridFiles(json);
     return {
       id,
       title: typeof json.title === 'string' ? json.title : '',

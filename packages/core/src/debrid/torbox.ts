@@ -374,7 +374,10 @@ export class TorboxDebridService
       const allUniqueHashes = [...new Set(hashesToCheck)];
 
       try {
-        const availabilityLimit = pLimit(2);
+        // TorBox enforces a relatively tight per-user request window. One
+        // availability request at a time still checks every 100-hash batch at
+        // full endpoint speed, while avoiding self-inflicted 429 bursts.
+        const availabilityLimit = pLimit(1);
         const responses = await Promise.all(
           chunkTorboxNzbHashes(allUniqueHashes).map((hashes) =>
             availabilityLimit(async () => {

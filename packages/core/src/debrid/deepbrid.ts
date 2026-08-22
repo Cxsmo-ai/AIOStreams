@@ -9,6 +9,7 @@ import {
 import { constants } from '../utils/index.js';
 import {
   DeepbridApiError,
+  DeepbridAddResult,
   DeepbridOfficialClient,
   DeepbridUpload,
   DeepbridUploadInfo,
@@ -37,12 +38,14 @@ export interface DeepbridOfficialApi {
   addNzbUrl(
     nzbUrl: string,
     options?: { signal?: AbortSignal }
-  ): Promise<string>;
+  ): Promise<DeepbridAddResult>;
   getUploadInfo(
     id: string,
     options?: { signal?: AbortSignal }
   ): Promise<DeepbridUploadInfo>;
 }
+
+type DeepbridUsenetPlaybackInfo = Extract<PlaybackInfo, { type: 'usenet' }>;
 
 function normalizedFilename(value: string): string {
   return value
@@ -268,6 +271,70 @@ export class DeepbridService implements UsenetDebridService {
     );
   }
 
+  private selectResolvedFile(
+    info: DeepbridUploadInfo | DeepbridAddResult,
+    playbackInfo: DeepbridUsenetPlaybackInfo,
+    filename: string
+  ): string | undefined {
+    if (!info.files.length) return undefined;
+    const target = selectDeepbridUploadFile(
+      info.files,
+      filename,
+      playbackInfo.metadata
+    );
+    if (target?.link) return target.link;
+    if (playbackInfo.metadata?.episode !== undefined) {
+      throw new DebridError(
+        'Deepbrid resolved the NZB but did not contain the requested episode file',
+        {
+          statusCode: 404,
+          statusText: 'Not Found',
+          code: 'NO_MATCHING_FILE',
+          headers: {},
+          body: null,
+          type: 'api_error',
+        }
+      );
+    }
+    return undefined;
+  }
+
+  private async recoverUploadId(
+    playbackInfo: DeepbridUsenetPlaybackInfo,
+    filename: string,
+    signal?: AbortSignal
+  ): Promise<string | undefined> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal?.aborted) return undefined;
+      try {
+        const uploads = await this.getUploads(true);
+        const normalizedName = normalizedRelease(filename);
+        const upload =
+          (playbackInfo.nzb
+            ? uploads.find((item) => item.sourceUrl === playbackInfo.nzb)
+            : undefined) ??
+          (playbackInfo.hash
+            ? uploads.find((item) => item.hash === playbackInfo.hash)
+            : undefined) ??
+          uploads.find(
+            (item) =>
+              normalizedName.length > 3 &&
+              normalizedRelease(item.title) === normalizedName
+          );
+        if (upload) return upload.id;
+      } catch (error) {
+        if (
+          error instanceof DeepbridApiError &&
+          [401, 403, 429].includes(error.status ?? 0)
+        ) {
+          throw error;
+        }
+      }
+      if (attempt < 2) await abortableDelay(250 * (attempt + 1), signal);
+    }
+    return undefined;
+  }
+
   async resolve(
     playbackInfo: PlaybackInfo,
     filename: string,
@@ -303,17 +370,40 @@ export class DeepbridService implements UsenetDebridService {
     let uploadId =
       playbackInfo.serviceItemId ||
       (cached && cached.expiresAt > Date.now() ? cached.id : undefined);
+    let added: DeepbridAddResult | undefined;
     try {
       if (!uploadId && playbackInfo.nzb) {
-        uploadId = await this.client.addNzbUrl(playbackInfo.nzb, { signal });
-        uploadCache.set(cacheKey, {
-          id: uploadId,
-          expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS,
-        });
+        added = await this.client.addNzbUrl(playbackInfo.nzb, { signal });
+        const directLink = this.selectResolvedFile(
+          added,
+          playbackInfo,
+          filename
+        );
+        if (directLink) return directLink;
+        uploadId = added.id;
+        if (uploadId) {
+          uploadCache.set(cacheKey, {
+            id: uploadId,
+            expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS,
+          });
+        }
         uploadListCache.delete(this.credentialKey);
       }
     } catch (error) {
       throw toDebridError('Deepbrid failed to add NZB', error);
+    }
+    if (!uploadId && playbackInfo.nzb) {
+      try {
+        uploadId = await this.recoverUploadId(playbackInfo, filename, signal);
+        if (uploadId) {
+          uploadCache.set(cacheKey, {
+            id: uploadId,
+            expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS,
+          });
+        }
+      } catch (error) {
+        throw toDebridError('Deepbrid could not locate the NZB upload', error);
+      }
     }
     if (!uploadId) return undefined;
 
@@ -322,30 +412,30 @@ export class DeepbridService implements UsenetDebridService {
       if (signal?.aborted) return undefined;
       try {
         const info = await this.client.getUploadInfo(uploadId, { signal });
-        if (info.files.length) {
-          const target = selectDeepbridUploadFile(
-            info.files,
-            filename,
-            playbackInfo.metadata
-          );
-          if (target?.link) return target.link;
-          if (playbackInfo.metadata?.episode !== undefined) {
-            throw new DebridError(
-              'Deepbrid resolved the NZB but did not contain the requested episode file',
-              {
-                statusCode: 404,
-                statusText: 'Not Found',
-                code: 'NO_MATCHING_FILE',
-                headers: {},
-                body: null,
-                type: 'api_error',
-              }
-            );
-          }
-        }
+        const link = this.selectResolvedFile(info, playbackInfo, filename);
+        if (link) return link;
       } catch (error) {
         if (error instanceof DebridError) throw error;
         lastError = error;
+        if (
+          playbackInfo.nzb &&
+          error instanceof DeepbridApiError &&
+          /missing\s+id/i.test(error.message)
+        ) {
+          const recoveredId = await this.recoverUploadId(
+            playbackInfo,
+            filename,
+            signal
+          );
+          if (recoveredId && recoveredId !== uploadId) {
+            uploadId = recoveredId;
+            uploadCache.set(cacheKey, {
+              id: uploadId,
+              expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS,
+            });
+            continue;
+          }
+        }
         if (
           error instanceof DeepbridApiError &&
           [401, 403, 404, 429].includes(error.status ?? 0)
