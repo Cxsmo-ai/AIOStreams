@@ -268,7 +268,22 @@ export class DeepbridService implements UsenetDebridService {
     const precached = await Promise.all(
       candidates.map((nzb) => limit(() => this.preCacheExternalNzb(nzb)))
     );
-    return [...ownedResults, ...precached.filter((item): item is DebridDownload => Boolean(item))];
+    const verified = precached.filter(
+      (item): item is DebridDownload => Boolean(item)
+    );
+    const verifiedHashes = new Set(
+      verified.map((item) => item.hash).filter((hash): hash is string => Boolean(hash))
+    );
+
+    // Pre-cache is best-effort. A provider may rate-limit an NZB fetch or a
+    // release may still be processing when the bounded verification window
+    // expires. Keep those candidates as ordinary on-demand Deepbrid results so
+    // one failed external indexer cannot make the whole scrape look empty.
+    const pending = candidates
+      .filter((nzb) => !nzb.hash || !verifiedHashes.has(nzb.hash))
+      .map((nzb) => resultForOwned(nzb));
+
+    return [...ownedResults, ...verified, ...pending];
   }
 
   private async preCacheExternalNzb(nzb: {

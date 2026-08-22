@@ -807,7 +807,7 @@ const SERVICE_DETAILS: Record<
         id: 'preCache',
         name: 'Pre-cache external NZBs',
         description:
-          'Upload and fully verify external indexer NZBs before showing them. Only verified playable files receive the DB lightning-bolt badge; failed or still-queued posts stay hidden. Limited to a safe number per scrape to protect account storage.',
+          'Best-effort upload and verification for external indexer NZBs. Verified playable files receive the DB lightning-bolt badge; releases that are rate-limited or still processing remain available as normal on-demand DB sources. Limited to a safe number per scrape to protect account storage.',
         type: 'boolean',
         required: false,
         default: false,

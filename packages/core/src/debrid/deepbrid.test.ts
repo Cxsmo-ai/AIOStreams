@@ -229,6 +229,54 @@ test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   assert.equal(result.files?.[0]?.name, 'External.Release.S01E04.1080p.mkv');
 });
 
+test('Deepbrid pre-cache keeps failed candidates as on-demand fallbacks', async () => {
+  const client = fakeDeepbridApi();
+  client.listUploads = async () => [];
+  client.addNzbUrl = async (url) => {
+    if (url.includes('rate-limited')) {
+      throw new DeepbridApiError('NZB fetch failed', 429);
+    }
+    return { id: 'verified-upload', title: 'Verified release', files: [] };
+  };
+  client.getUploadInfo = async () => ({
+    id: 'verified-upload',
+    title: 'Verified release',
+    files: [
+      {
+        name: 'Verified.Release.S01E04.1080p.mkv',
+        link: 'https://usenet.myfast.link/verified',
+        size: 1_000_000_000,
+        sizeHuman: '1 GB',
+      },
+    ],
+  });
+
+  const service = new DeepbridService(
+    { token: 'pre-cache-partial', preCache: true, preCacheLimit: 2 },
+    client
+  );
+  const results = await service.checkNzbs([
+    {
+      name: 'Verified release',
+      hash: 'verified-hash',
+      nzb: 'https://indexer.example/verified.nzb',
+    },
+    {
+      name: 'Rate limited release',
+      hash: 'rate-limited-hash',
+      nzb: 'https://indexer.example/rate-limited.nzb',
+    },
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ['cached', 'queued']
+  );
+  assert.equal(results[0]?.library, true);
+  assert.equal(results[1]?.library, false);
+  assert.equal(results[1]?.id, 'rate-limited-hash');
+});
+
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {
   const service = new DeepbridService({ token: 'test' }, fakeDeepbridApi());
   const url = await service.resolve(
