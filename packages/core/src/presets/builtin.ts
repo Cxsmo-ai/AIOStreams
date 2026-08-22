@@ -17,6 +17,7 @@ import { Preset } from './preset.js';
 import { releaseKeyKind } from '../release-blocklist/keys.js';
 import { stremthruSpecialCases } from './stremthru.js';
 import { getTorboxRouteConfig } from '../debrid/torbox-config.js';
+import { filterBuiltinServiceIds } from './builtin-services.js';
 
 export class BuiltinStreamParser extends StreamParser {
   protected override getReleaseKey(stream: Stream): string | undefined {
@@ -282,17 +283,20 @@ export class BuiltinAddonPreset extends Preset {
   }
 
   protected static getBaseConfig(userData: UserData, services: ServiceId[]) {
+    const supportedServices = filterBuiltinServiceIds(services);
     // Deepbrid is the preferred external-NZB resolver when enabled. Keep all
     // other configured services (TorBox, native AIOStreams NNTP, Stremio NNTP,
     // and indexer-backed services) intact; this only determines priority.
-    const orderedServices = services.includes(constants.DEEPBRID_SERVICE)
+    const orderedServices = supportedServices.includes(
+      constants.DEEPBRID_SERVICE
+    )
       ? [
           constants.DEEPBRID_SERVICE,
-          ...services.filter(
+          ...supportedServices.filter(
             (service) => service !== constants.DEEPBRID_SERVICE
           ),
         ]
-      : services;
+      : supportedServices;
     return {
       tmdbReadAccessToken: userData.tmdbAccessToken,
       tmdbApiKey: userData.tmdbApiKey,
