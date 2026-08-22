@@ -450,6 +450,20 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
     errorStreams.push(...proxied.errorStreams);
 
     [...processedTorrents.errors, ...processedNzbs.errors].forEach((error) => {
+      // A transient provider rate limit must not turn a successful multi-
+      // provider scrape into a visible failure card. Valid streams remain
+      // untouched; the diagnostic is retained when nothing succeeded.
+      if (
+        resultStreams.length > 0 &&
+        error.error instanceof DebridError &&
+        error.error.code === 'TOO_MANY_REQUESTS'
+      ) {
+        this.logger.warn(
+          { serviceId: error.serviceId },
+          'Suppressing transient debrid rate-limit error because usable streams were returned'
+        );
+        return;
+      }
       let errMsg = error.error.message;
       if (error instanceof DebridError) {
         switch (error.code) {

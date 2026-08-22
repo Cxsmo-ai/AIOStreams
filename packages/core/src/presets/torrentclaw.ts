@@ -318,8 +318,6 @@ async function discoverTorrentClawIds(
     titleMatch,
     yearTolerance,
     searchLimit,
-    season ?? '',
-    episode ?? '',
     torrentClawAuthScope(apiKey),
   ].join(':');
   const cached = remapCache.get(cacheKey);
@@ -342,12 +340,10 @@ async function discoverTorrentClawIds(
     searchUrl.searchParams.set('limit', String(searchLimit));
     searchUrl.searchParams.set('type', type === 'series' ? 'show' : 'movie');
     searchUrl.searchParams.set('sort', 'relevance');
-    if (type === 'series' && season !== undefined) {
-      searchUrl.searchParams.set('season', String(season));
-    }
-    if (type === 'series' && episode !== undefined) {
-      searchUrl.searchParams.set('episode', String(episode));
-    }
+    // Remapping is a title/identity lookup. Reusing it across episodes avoids
+    // repeating the same public search and triggering provider rate limits.
+    // The requested season and episode remain part of replacementId below.
+    if (expectedYear) searchUrl.searchParams.set('year', String(expectedYear));
     const searchPayload = await fetchJson(searchUrl.toString(), {
       'X-Search-Source': 'aiostreams',
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
@@ -384,7 +380,7 @@ async function discoverTorrentClawIds(
               ? 10
               : 0;
         return {
-          id: item?.imdbId,
+          id: item?.imdbId ?? item?.imdb_id ?? item?.imdbIdValue ?? item?.id,
           score: (matchesTitle ? 100 : 0) + yearScore,
           yearDelta,
         };
