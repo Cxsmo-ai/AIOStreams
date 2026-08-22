@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildUnarrSearchParams,
+  collectUnarrSearchResults,
   connectUnarr,
+  parseUnarrSearchResponse,
   unarrQuotaMetadata,
   validateUnarrApiUrl,
 } from './addon.js';
@@ -17,6 +19,22 @@ import {
   issueConfigProxyGrant,
   verifyConfigProxyGrant,
 } from '../../utils/index.js';
+
+const unarrResult = (
+  nzbId: string,
+  overrides: Record<string, unknown> = {}
+) => ({
+  title: `Release ${nzbId}`,
+  nzbId,
+  category: '',
+  size: 1_000,
+  publishedAt: '',
+  grabs: 0,
+  group: '',
+  poster: '',
+  attributes: {},
+  ...overrides,
+});
 
 class TestUnarrParser extends UnarrIndexerStreamParser {
   extras(stream: Stream, parsed: ParsedStream) {
@@ -75,6 +93,206 @@ test('uses the parsed IMDb ID when metadata has no external ID', () => {
     buildUnarrSearchParams(parsedEpisode, { titles: ['The Mentalist'] }, 10)
       .imdbId,
     'tt1196946'
+  );
+});
+
+test('normalizes nullable text and primitive Unarr attributes', () => {
+  const parsed = parseUnarrSearchResponse({
+    results: [
+      {
+        title: 'A release',
+        nzbId: 'nzb-1',
+        category: null,
+        publishedAt: null,
+        group: null,
+        poster: null,
+        attributes: {
+          codec: 'HEVC',
+          files: 42,
+          passworded: false,
+          ignored: null,
+        },
+        futureField: { safely: 'ignored' },
+      },
+    ],
+  });
+
+  assert.deepEqual(parsed.results[0], {
+    title: 'A release',
+    nzbId: 'nzb-1',
+    category: '',
+    size: 0,
+    publishedAt: '',
+    grabs: 0,
+    group: '',
+    poster: '',
+    attributes: {
+      codec: 'HEVC',
+      files: '42',
+      passworded: 'false',
+    },
+  });
+  assert.equal(parsed.rawResultCount, 1);
+});
+
+test('keeps valid Unarr results when another result is malformed', () => {
+  const invalidIndexes: number[] = [];
+  const parsed = parseUnarrSearchResponse(
+    {
+      results: [
+        { title: 'Missing its NZB id' },
+        { title: 'Valid release', nzbId: 'valid', size: 1234 },
+      ],
+      total: 2,
+      offset: 0,
+    },
+    ({ index }) => invalidIndexes.push(index)
+  );
+
+  assert.deepEqual(invalidIndexes, [0]);
+  assert.equal(parsed.rawResultCount, 2);
+  assert.deepEqual(
+    parsed.results.map((result) => result.nzbId),
+    ['valid']
+  );
+});
+
+test('collects overlapping Unarr pages without duplicates and preserves rank', async () => {
+  const calls: Array<{ offset: number; limit: number }> = [];
+  const pages = [
+    {
+      results: [unarrResult('a'), unarrResult('b')],
+      total: 4,
+      offset: 0,
+    },
+    {
+      results: [unarrResult('b'), unarrResult('c')],
+      total: 4,
+      offset: 2,
+    },
+  ];
+
+  const results = await collectUnarrSearchResults(3, async (offset, limit) => {
+    calls.push({ offset, limit });
+    return pages[calls.length - 1];
+  });
+
+  assert.deepEqual(
+    results.map((result) => result.nzbId),
+    ['a', 'b', 'c']
+  );
+  assert.deepEqual(calls, [
+    { offset: 0, limit: 3 },
+    { offset: 2, limit: 1 },
+  ]);
+});
+
+test('continues past unusable Unarr results to fill the configured maximum', async () => {
+  const offsets: number[] = [];
+  const results = await collectUnarrSearchResults(
+    2,
+    async (offset) => {
+      offsets.push(offset);
+      return offset === 0
+        ? {
+            results: [
+              unarrResult('too-large', { size: 10_000 }),
+              unarrResult('usable-a'),
+            ],
+            total: 4,
+            offset: 0,
+          }
+        : {
+            results: [unarrResult('usable-b'), unarrResult('usable-c')],
+            total: 4,
+            offset: 2,
+          };
+    },
+    { isUsable: (result) => result.size <= 5_000 }
+  );
+
+  assert.deepEqual(offsets, [0, 2]);
+  assert.deepEqual(
+    results.map((result) => result.nzbId),
+    ['usable-a', 'usable-b']
+  );
+});
+
+test('can fill a one-result target from a later Unarr page', async () => {
+  const offsets: number[] = [];
+  const results = await collectUnarrSearchResults(
+    1,
+    async (offset) => {
+      offsets.push(offset);
+      return offset === 0
+        ? {
+            results: [unarrResult('unusable', { size: 10_000 })],
+            total: 2,
+            offset: 0,
+          }
+        : {
+            results: [unarrResult('usable')],
+            total: 2,
+            offset: 1,
+          };
+    },
+    { isUsable: (result) => result.size <= 5_000 }
+  );
+
+  assert.deepEqual(offsets, [0, 1]);
+  assert.deepEqual(
+    results.map((result) => result.nzbId),
+    ['usable']
+  );
+});
+
+test('returns earlier Unarr pages when a later page fails', async () => {
+  const partialFailures: Array<{ page: number; offset: number }> = [];
+  const results = await collectUnarrSearchResults(
+    3,
+    async (offset) => {
+      if (offset > 0) throw new Error('temporary upstream failure');
+      return {
+        results: [unarrResult('a'), unarrResult('b')],
+        total: 4,
+        offset: 0,
+      };
+    },
+    {
+      onPartialFailure: (_error, context) => partialFailures.push(context),
+    }
+  );
+
+  assert.deepEqual(
+    results.map((result) => result.nzbId),
+    ['a', 'b']
+  );
+  assert.deepEqual(partialFailures, [{ page: 2, offset: 2 }]);
+});
+
+test('throws when the first Unarr search page fails', async () => {
+  await assert.rejects(
+    collectUnarrSearchResults(3, async () => {
+      throw new Error('initial failure');
+    }),
+    /initial failure/
+  );
+});
+
+test('stops if Unarr repeats an identical page while ignoring offsets', async () => {
+  let calls = 0;
+  const results = await collectUnarrSearchResults(5, async () => {
+    calls += 1;
+    return {
+      results: [unarrResult('a'), unarrResult('b')],
+      total: 100,
+    };
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(
+    results.map((result) => result.nzbId),
+    ['a', 'b']
   );
 });
 

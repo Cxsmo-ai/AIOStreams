@@ -31,26 +31,153 @@ import type { BuiltinServiceId } from '../../utils/index.js';
 
 const logger = createLogger('unarr-indexer');
 
+const UnarrResultAttributesSchema = z
+  .record(
+    z.string().max(100),
+    z.union([z.string().max(500), z.number().finite(), z.boolean(), z.null()])
+  )
+  .optional()
+  .default({})
+  .transform((attributes) =>
+    Object.fromEntries(
+      Object.entries(attributes)
+        .filter(
+          (entry): entry is [string, string | number | boolean] =>
+            entry[1] !== null
+        )
+        .map(([key, value]) => [key, String(value)])
+    )
+  );
+
+const UnarrOptionalTextSchema = z
+  .string()
+  .nullish()
+  .transform((value) => value ?? '');
+
 const UnarrNzbSearchResultSchema = z.object({
   title: z.string().min(1).max(500),
   nzbId: z.string().min(1),
-  category: z.string().optional().default(''),
+  category: UnarrOptionalTextSchema,
   size: z.number().int().nonnegative().optional().default(0),
-  publishedAt: z.string().optional().default(''),
+  publishedAt: UnarrOptionalTextSchema,
   grabs: z.number().int().nonnegative().optional().default(0),
-  group: z.string().optional().default(''),
-  poster: z.string().optional().default(''),
-  attributes: z
-    .record(z.string().max(100), z.string().max(500))
-    .optional()
-    .default({}),
+  group: UnarrOptionalTextSchema,
+  poster: UnarrOptionalTextSchema,
+  attributes: UnarrResultAttributesSchema,
 });
 
-const UnarrNzbSearchResponseSchema = z.object({
-  results: z.array(UnarrNzbSearchResultSchema),
-  total: z.number().int().nonnegative().optional().default(0),
-  offset: z.number().int().nonnegative().optional().default(0),
+const UnarrNzbSearchEnvelopeSchema = z.object({
+  results: z.array(z.unknown()),
+  total: z.number().int().nonnegative().optional(),
+  offset: z.number().int().nonnegative().optional(),
 });
+
+export type UnarrNzbSearchResult = z.infer<typeof UnarrNzbSearchResultSchema>;
+export interface UnarrNzbSearchResponse {
+  results: UnarrNzbSearchResult[];
+  total?: number;
+  offset?: number;
+  rawResultCount?: number;
+}
+
+export function parseUnarrSearchResponse(
+  value: unknown,
+  onInvalidResult?: (context: { index: number; error: z.ZodError }) => void
+): UnarrNzbSearchResponse {
+  const envelope = UnarrNzbSearchEnvelopeSchema.parse(value);
+  const results: UnarrNzbSearchResult[] = [];
+  envelope.results.forEach((value, index) => {
+    const parsed = UnarrNzbSearchResultSchema.safeParse(value);
+    if (parsed.success) results.push(parsed.data);
+    else onInvalidResult?.({ index, error: parsed.error });
+  });
+  return {
+    results,
+    total: envelope.total,
+    offset: envelope.offset,
+    rawResultCount: envelope.results.length,
+  };
+}
+
+const UNARR_MAX_SEARCH_PAGES = 10;
+
+interface CollectUnarrSearchOptions {
+  isUsable?: (result: UnarrNzbSearchResult) => boolean;
+  maxPages?: number;
+  onPartialFailure?: (
+    error: unknown,
+    context: { page: number; offset: number }
+  ) => void;
+}
+
+/**
+ * Collect a bounded number of uniquely ranked NZBs from an API that may
+ * enforce a smaller page size than requested. The first occurrence of an
+ * nzbId wins so overlapping pages cannot disturb upstream ranking.
+ */
+export async function collectUnarrSearchResults(
+  maxResults: number,
+  fetchPage: (offset: number, limit: number) => Promise<UnarrNzbSearchResponse>,
+  options: CollectUnarrSearchOptions = {}
+): Promise<UnarrNzbSearchResult[]> {
+  const target = Math.max(0, Math.floor(maxResults));
+  if (target === 0) return [];
+
+  const maxPages = Math.max(
+    1,
+    Math.min(
+      UNARR_MAX_SEARCH_PAGES,
+      Math.floor(options.maxPages ?? UNARR_MAX_SEARCH_PAGES)
+    )
+  );
+  const seenIds = new Set<string>();
+  const seenPageSignatures = new Set<string>();
+  const collected: UnarrNzbSearchResult[] = [];
+  let offset = 0;
+
+  for (let page = 0; page < maxPages && collected.length < target; page++) {
+    const limit = target - collected.length;
+    let response: UnarrNzbSearchResponse;
+    try {
+      response = await fetchPage(offset, limit);
+    } catch (error) {
+      if (page === 0) throw error;
+      options.onPartialFailure?.(error, { page: page + 1, offset });
+      break;
+    }
+
+    const pageResults = response.results;
+    const rawResultCount = response.rawResultCount ?? pageResults.length;
+    if (rawResultCount === 0) break;
+
+    if (pageResults.length > 0) {
+      const signature = JSON.stringify(
+        pageResults.map((result) => result.nzbId)
+      );
+      if (seenPageSignatures.has(signature)) break;
+      seenPageSignatures.add(signature);
+    }
+
+    for (const result of pageResults) {
+      if (seenIds.has(result.nzbId)) continue;
+      seenIds.add(result.nzbId);
+      if (options.isUsable && !options.isUsable(result)) continue;
+      collected.push(result);
+      if (collected.length >= target) break;
+    }
+
+    const responseOffset = response.offset ?? offset;
+    const nextOffset = Math.max(
+      offset + rawResultCount,
+      responseOffset + rawResultCount
+    );
+    if (nextOffset <= offset) break;
+    if (response.total !== undefined && nextOffset >= response.total) break;
+    offset = nextOffset;
+  }
+
+  return collected;
+}
 
 const UnarrUsenetUsageSchema = z.object({
   usedBytes: z.number().nonnegative().optional().default(0),
@@ -109,6 +236,7 @@ export interface UnarrSearchParams {
   season?: number;
   episode?: number;
   limit: number;
+  offset?: number;
 }
 
 export function unarrQuotaMetadata(
@@ -342,21 +470,42 @@ export class UnarrIndexerAddon extends BaseDebridAddon<UnarrIndexerAddonConfig> 
       throw new Error('TorrentClaw Unarr monthly NZB quota is exhausted');
     }
 
-    const params = buildUnarrSearchParams(
+    const baseParams = buildUnarrSearchParams(
       parsedId,
       metadata,
       this.userData.maxResults
     );
-    const search = UnarrNzbSearchResponseSchema.parse(
-      await this.requestJson('/api/internal/agent/nzb-search', {
-        method: 'POST',
-        body: params,
-      })
+    const results = await collectUnarrSearchResults(
+      this.userData.maxResults,
+      async (offset, limit) =>
+        parseUnarrSearchResponse(
+          await this.requestJson('/api/internal/agent/nzb-search', {
+            method: 'POST',
+            body: {
+              ...baseParams,
+              limit,
+              ...(offset > 0 ? { offset } : {}),
+            },
+          }),
+          ({ index, error }) =>
+            this.logger.warn(
+              { index, error: error.issues[0]?.message ?? 'invalid result' },
+              'Skipping an invalid Unarr search result'
+            )
+        ),
+      {
+        isUsable: (result) => result.size > 0 && result.size <= remainingBytes,
+        onPartialFailure: (error, context) =>
+          this.logger.warn(
+            {
+              page: context.page,
+              offset: context.offset,
+              error: error instanceof Error ? error.message : 'unknown error',
+            },
+            'A later Unarr search page failed; returning earlier results'
+          ),
+      }
     );
-
-    const results = search.results
-      .filter((result) => result.size > 0 && result.size <= remainingBytes)
-      .slice(0, this.userData.maxResults);
     if (!results.length) return [];
 
     const proxy = createProxy({
@@ -397,7 +546,7 @@ export class UnarrIndexerAddon extends BaseDebridAddon<UnarrIndexerAddonConfig> 
       );
       const nzb: NZB = {
         type: 'usenet',
-        confirmed: Boolean(params.imdbId || params.tvdbId),
+        confirmed: Boolean(baseParams.imdbId || baseParams.tvdbId),
         title: result.title,
         hash: hashNzbUrl(`unarr:${stableId}`),
         nzb: proxiedUrls[index],
