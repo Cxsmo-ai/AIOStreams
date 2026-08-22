@@ -230,6 +230,10 @@ export async function resolveGlobalDeepbridNzbs(
       const url = generatePlaybackUrl(auth, metadataId, fileInfo, filename);
       resolvedStreams.push({
         ...original,
+        // External indexer results are never account-library media. A
+        // matching Deepbrid upload is still cached and reusable, but it must
+        // not change the source's ownership presentation to "Your Media".
+        library: false,
         id: `${original.id}-deepbrid`,
         type: 'debrid',
         url,

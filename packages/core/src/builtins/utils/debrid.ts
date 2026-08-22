@@ -782,9 +782,8 @@ async function processNZBsForDebridService(
           // account. Keep its cached status, but do not relabel it as the
           // user's media unless the source itself is a library/Finder item.
           library:
-            nzb.library === true ||
-            (nzbCheckResult?.library === true &&
-              (!nzb.indexer || nzb.indexer === service.id)),
+            (!nzb.indexer || nzb.indexer === service.id) &&
+            (nzb.library === true || nzbCheckResult?.library === true),
         },
       });
     }
