@@ -59,6 +59,63 @@ function parseCatalogItems(items: CatalogItem[]): ParsedCatalogItem[] {
   });
 }
 
+/**
+ * Remove duplicate rows returned by a service library endpoint.
+ *
+ * Some providers return the same account item more than once (and some
+ * return a new id for an identical upload).  Do not dedupe by title alone:
+ * the same movie/show can legitimately have multiple releases.  The
+ * fallback therefore includes the size when it is available, and uses the
+ * complete normalized release name when it is not.
+ */
+export function deduplicateLibraryItems(items: CatalogItem[]): CatalogItem[] {
+  const seen = new Map<string, CatalogItem>();
+
+  const quality = (item: CatalogItem): number =>
+    (item.files?.length ?? 0) * 1_000_000 +
+    (item.library ? 100_000 : 0) +
+    (item.size ?? 0);
+
+  const keyFor = (item: CatalogItem): string[] => {
+    const prefix = `${item.serviceId}:${item.itemType}`;
+    const keys = [`${prefix}:id:${String(item.id)}`];
+
+    if (item.hash) {
+      keys.push(`${prefix}:hash:${item.hash.trim().toLowerCase()}`);
+    }
+
+    const normalizedName = normaliseTitle(item.name ?? '');
+    if (normalizedName) {
+      keys.push(
+        item.size && item.size > 0
+          ? `${prefix}:release:${normalizedName}:size:${item.size}`
+          : `${prefix}:release:${normalizedName}`
+      );
+    }
+    return keys;
+  };
+
+  for (const item of items) {
+    const keys = keyFor(item);
+    const existing = keys
+      .map((key) => seen.get(key))
+      .find((candidate): candidate is CatalogItem => candidate !== undefined);
+
+    if (existing && quality(item) <= quality(existing)) continue;
+
+    // If this is a better duplicate, remove all old aliases before replacing
+    // it so a later row cannot resurrect the inferior record.
+    if (existing) {
+      for (const [key, value] of seen) {
+        if (value === existing) seen.delete(key);
+      }
+    }
+    for (const key of keys) seen.set(key, item);
+  }
+
+  return [...new Set(seen.values())];
+}
+
 export function buildIdPrefixes(
   services: { id: BuiltinServiceId }[]
 ): string[] {
@@ -190,8 +247,9 @@ export async function fetchCatalog(
     });
   }
 
-  // Filter by search query if provided
-  const parsed = parseCatalogItems(items);
+  // Providers can return duplicate library rows. Deduplicate before parsing
+  // and pagination so duplicates cannot consume catalog slots.
+  const parsed = parseCatalogItems(deduplicateLibraryItems(items));
   let results: ParsedCatalogItem[];
   if (search) {
     results = searchItems(parsed, search);

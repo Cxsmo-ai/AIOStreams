@@ -14,7 +14,12 @@ import {
   isTorrentDebridService,
   isUsenetDebridService,
 } from '../../debrid/index.js';
-import { titleMatch, cleanTitle, preprocessTitle } from '../../parser/utils.js';
+import {
+  titleMatch,
+  cleanTitle,
+  preprocessTitle,
+  normaliseTitle,
+} from '../../parser/utils.js';
 import { parseTorrentTitleCached } from '../../parser/title.js';
 import { SearchMetadata } from '../base/debrid.js';
 
@@ -196,12 +201,17 @@ export async function searchTorrents(
   const results = await Promise.all(servicePromises);
   const allTorrents = results.flat();
 
-  // Deduplicate by hash
+  // Deduplicate by hash, service item id, and finally exact release name plus
+  // size.  The id fallback matters for providers that omit torrent hashes.
   const seen = new Set<string>();
   return allTorrents.filter((t) => {
-    if (!t.hash) return true;
-    if (seen.has(t.hash)) return false;
-    seen.add(t.hash);
+    const keys = [
+      t.hash ? `hash:${t.hash.toLowerCase()}` : undefined,
+      t.serviceItemId ? `id:${t.serviceItemId}` : undefined,
+      `release:${normaliseTitle(t.title ?? '')}:size:${t.size ?? 0}`,
+    ].filter((key): key is string => Boolean(key));
+    if (keys.some((key) => seen.has(key))) return false;
+    for (const key of keys) seen.add(key);
     return true;
   });
 }
@@ -250,11 +260,17 @@ export async function searchNzbs(
   const results = await Promise.all(servicePromises);
   const allNzbs = results.flat();
 
-  // Deduplicate by hash
+  // Keep the same identity rules as torrent library matching. In particular,
+  // an NZB row without a hash must still not be emitted twice.
   const seen = new Set<string>();
   return allNzbs.filter((n) => {
-    if (seen.has(n.hash)) return false;
-    seen.add(n.hash);
+    const keys = [
+      n.hash ? `hash:${n.hash.toLowerCase()}` : undefined,
+      n.serviceItemId ? `id:${n.serviceItemId}` : undefined,
+      `release:${normaliseTitle(n.title ?? '')}:size:${n.size ?? 0}`,
+    ].filter((key): key is string => Boolean(key));
+    if (keys.some((key) => seen.has(key))) return false;
+    for (const key of keys) seen.add(key);
     return true;
   });
 }
