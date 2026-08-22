@@ -344,6 +344,10 @@ export type DebridService = TorrentDebridService | UsenetDebridService;
 export type DebridServiceConfig = {
   token: string;
   clientIp?: string;
+  /** Deepbrid-only: resolve external NZBs before emitting them as streams. */
+  preCache?: boolean;
+  /** Safety cap for Deepbrid external pre-cache work per scrape. */
+  preCacheLimit?: number;
 };
 
 export function isTorrentDebridService(

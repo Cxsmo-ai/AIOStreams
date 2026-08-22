@@ -38,6 +38,27 @@ const logger = createLogger('debrid');
 
 type Metadata = TitleMetadata;
 
+/**
+ * Return a real library item id only when the service confirmed ownership.
+ *
+ * Availability checks commonly use a hash as the placeholder id for an
+ * uncached external NZB. Passing that placeholder as `serviceItemId` makes
+ * playback treat the hash as an existing library upload, so services such as
+ * Deepbrid call their upload-info endpoint with an invalid id instead of
+ * submitting the NZB. Queued external results must retain their NZB URL and
+ * resolve through the normal add-on-click path.
+ */
+export function getNzbServiceItemId(
+  nzb: Pick<NZB, 'serviceItemId'>,
+  checkResult: Pick<DebridDownload, 'id' | 'library'> | undefined
+): string | undefined {
+  if (nzb.serviceItemId) return nzb.serviceItemId;
+  if (checkResult?.library !== true || checkResult.id === undefined) {
+    return undefined;
+  }
+  return String(checkResult.id);
+}
+
 export function validateInfoHash(
   infoHash: string | undefined
 ): string | undefined {
@@ -584,7 +605,11 @@ async function processNZBsForDebridService(
   const debridService = getDebridService(
     service.id,
     service.credential,
-    clientIp
+    clientIp,
+    {
+      preCache: service.preCache,
+      preCacheLimit: service.preCacheLimit,
+    }
   );
   if (!isUsenetDebridService(debridService)) {
     logger.warn(
@@ -743,10 +768,7 @@ async function processNZBsForDebridService(
     if (file) {
       results.push({
         ...nzb,
-        serviceItemId:
-          nzbCheckResult?.id !== undefined
-            ? String(nzbCheckResult.id)
-            : nzb.serviceItemId,
+        serviceItemId: getNzbServiceItemId(nzb, nzbCheckResult),
         title: nzb.title ?? nzbCheckResult?.name,
         size: nzbCheckResult?.size || nzb.size,
         indexer: nzb.library ? undefined : nzb.indexer,

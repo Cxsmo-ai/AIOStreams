@@ -508,6 +508,22 @@ function buildDebridServices(
             typeof credential === 'string'
               ? credential
               : JSON.stringify(credential),
+          preCache:
+            service.id === constants.DEEPBRID_SERVICE &&
+            service.credentials?.preCache === 'true',
+          preCacheLimit:
+            service.id === constants.DEEPBRID_SERVICE
+              ? Math.min(
+                  100,
+                  Math.max(
+                    1,
+                    Number.parseInt(
+                      service.credentials?.preCacheLimit ?? '',
+                      10
+                    ) || 24
+                  )
+                )
+              : undefined,
         });
       }
     } catch (error) {

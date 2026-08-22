@@ -6,7 +6,7 @@ import {
   PlaybackInfo,
   convertStatusCodeToError,
 } from './base.js';
-import { constants } from '../utils/index.js';
+import { constants, createLogger } from '../utils/index.js';
 import {
   DeepbridApiError,
   DeepbridAddResult,
@@ -16,6 +16,9 @@ import {
   isDeepbridVideoName,
 } from '../builtins/deepbrid-usenet/client.js';
 import { createHash } from 'node:crypto';
+import pLimit from 'p-limit';
+
+const logger = createLogger('debrid:deepbrid');
 
 const uploadCache = new Map<string, { id: string; expiresAt: number }>();
 const UPLOAD_CACHE_TTL_MS = 10 * 60_000;
@@ -26,6 +29,9 @@ const uploadListCache = new Map<
 >();
 const uploadListInFlight = new Map<string, Promise<DeepbridUpload[]>>();
 const MIN_DEEPBRID_PLAYABLE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_DEEPBRID_PRECACHE_LIMIT = 24;
+const DEEPBRID_PRECACHE_ATTEMPTS = 8;
+const DEEPBRID_PRECACHE_INTERVAL_MS = 1_000;
 
 export interface DeepbridResolvedFile {
   name: string;
@@ -142,6 +148,8 @@ export class DeepbridService implements UsenetDebridService {
   readonly serviceName = constants.DEEPBRID_SERVICE;
   readonly capabilities = { torrents: false, usenet: true } as const;
   private readonly credentialKey: string;
+  private readonly preCache: boolean;
+  private readonly preCacheLimit: number;
 
   constructor(
     config: DebridServiceConfig,
@@ -154,6 +162,11 @@ export class DeepbridService implements UsenetDebridService {
       .update(config.token)
       .digest('hex')
       .slice(0, 24);
+    this.preCache = config.preCache === true;
+    this.preCacheLimit = Math.min(
+      100,
+      Math.max(1, config.preCacheLimit ?? DEFAULT_DEEPBRID_PRECACHE_LIMIT)
+    );
   }
 
   async validateAccount(): Promise<void> {
@@ -216,21 +229,92 @@ export class DeepbridService implements UsenetDebridService {
       if (title.length > 3 && !byTitle.has(title)) byTitle.set(title, upload);
     }
 
-    return nzbs.map((nzb) => {
+    const findOwned = (nzb: { name?: string; hash?: string; nzb?: string }) => {
       const normalizedName = normalizedRelease(nzb.name ?? '');
-      const owned =
+      return (
         (nzb.nzb ? bySourceUrl.get(nzb.nzb) : undefined) ??
         (nzb.hash ? byHash.get(nzb.hash) : undefined) ??
-        (normalizedName.length > 3 ? byTitle.get(normalizedName) : undefined);
-      return {
-        id: owned?.id ?? nzb.hash ?? nzb.name ?? 'unknown',
-        name: nzb.name ?? owned?.title,
-        hash: nzb.hash,
-        addedAt: owned?.addedAt,
-        status: owned ? 'cached' : 'queued',
-        library: Boolean(owned),
-      };
+        (normalizedName.length > 3 ? byTitle.get(normalizedName) : undefined)
+      );
+    };
+
+    const resultForOwned = (
+      nzb: { name?: string; hash?: string; nzb?: string },
+      owned?: DeepbridUpload
+    ): DebridDownload => ({
+      id: owned?.id ?? nzb.hash ?? nzb.name ?? 'unknown',
+      name: nzb.name ?? owned?.title,
+      hash: nzb.hash,
+      addedAt: owned?.addedAt,
+      status: owned ? 'cached' : 'queued',
+      library: Boolean(owned),
     });
+
+    if (!this.preCache) {
+      return nzbs.map((nzb) => resultForOwned(nzb, findOwned(nzb)));
+    }
+
+    // Pre-cache mode is deliberately opt-in. Only verified, playable uploads
+    // are emitted, and the bounded queue prevents a broad indexer scrape from
+    // filling the account with hundreds of unplayed NZBs.
+    const ownedResults = nzbs
+      .map((nzb) => ({ nzb, owned: findOwned(nzb) }))
+      .filter(({ owned }) => Boolean(owned))
+      .map(({ nzb, owned }) => resultForOwned(nzb, owned));
+    const candidates = nzbs
+      .filter((nzb) => Boolean(nzb.nzb) && !findOwned(nzb))
+      .slice(0, this.preCacheLimit);
+    const limit = pLimit(3);
+    const precached = await Promise.all(
+      candidates.map((nzb) => limit(() => this.preCacheExternalNzb(nzb)))
+    );
+    return [...ownedResults, ...precached.filter((item): item is DebridDownload => Boolean(item))];
+  }
+
+  private async preCacheExternalNzb(nzb: {
+    name?: string;
+    hash?: string;
+    nzb?: string;
+  }): Promise<DebridDownload | undefined> {
+    if (!nzb.nzb) return undefined;
+    try {
+      const added = await this.client.addNzbUrl(nzb.nzb);
+      if (!added.id) return undefined;
+
+      for (let attempt = 0; attempt < DEEPBRID_PRECACHE_ATTEMPTS; attempt++) {
+        const info = await this.client.getUploadInfo(added.id);
+        const playable = info.files.filter(
+          (file) =>
+            isDeepbridVideoName(file.name) &&
+            (!file.size || file.size >= MIN_DEEPBRID_PLAYABLE_BYTES)
+        );
+        if (playable.length > 0) {
+          return {
+            id: added.id,
+            name: nzb.name ?? info.title ?? added.title,
+            hash: nzb.hash,
+            status: 'cached',
+            library: true,
+            size: playable.reduce((sum, file) => sum + (file.size || 0), 0),
+            files: info.files.map((file, index) => ({
+              index,
+              name: file.name,
+              size: file.size || 0,
+              link: file.link,
+            })),
+          };
+        }
+        if (attempt < DEEPBRID_PRECACHE_ATTEMPTS - 1) {
+          await abortableDelay(DEEPBRID_PRECACHE_INTERVAL_MS);
+        }
+      }
+    } catch (error) {
+      logger.debug(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Deepbrid external NZB pre-cache failed'
+      );
+    }
+    return undefined;
   }
 
   async listNzbs(id?: string): Promise<DebridDownload[]> {

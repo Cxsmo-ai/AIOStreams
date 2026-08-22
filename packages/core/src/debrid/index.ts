@@ -43,11 +43,13 @@ import { isolateDebridService } from './service-failure-isolation.js';
 export function getDebridService(
   serviceName: ServiceId,
   token: string,
-  clientIp?: string
+  clientIp?: string,
+  options?: Pick<DebridServiceConfig, 'preCache' | 'preCacheLimit'>
 ): DebridService {
   const config: DebridServiceConfig = {
     token,
     clientIp,
+    ...options,
   };
 
   const pollInterval = resolveServiceTime(

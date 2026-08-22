@@ -168,6 +168,8 @@ export const BuiltinDebridServices = z.array(
   z.object({
     id: z.enum(constants.BUILTIN_SUPPORTED_SERVICES),
     credential: z.string(),
+    preCache: z.boolean().optional(),
+    preCacheLimit: z.number().int().positive().max(100).optional(),
   })
 );
 

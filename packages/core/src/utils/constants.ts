@@ -803,6 +803,15 @@ const SERVICE_DETAILS: Record<
         type: 'password',
         required: true,
       },
+      {
+        id: 'preCache',
+        name: 'Pre-cache external NZBs',
+        description:
+          'Upload and fully verify external indexer NZBs before showing them. Only verified playable files receive the DB lightning-bolt badge; failed or still-queued posts stay hidden. Limited to a safe number per scrape to protect account storage.',
+        type: 'boolean',
+        required: false,
+        default: false,
+      },
     ],
   },
   [TORRENTCLAW_SERVICE]: {

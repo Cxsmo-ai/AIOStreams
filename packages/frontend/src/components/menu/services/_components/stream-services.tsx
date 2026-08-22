@@ -647,9 +647,17 @@ function ServiceModal({
           <TemplateOption
             key={opt.id}
             option={{ ...opt, required: false }}
-            value={opt.forced || opt.default || localValues[opt.id]}
+            value={
+              opt.type === 'boolean'
+                ? String(opt.forced ?? localValues[opt.id] ?? opt.default) ===
+                  'true'
+                : opt.forced || opt.default || localValues[opt.id]
+            }
             onChange={(v) =>
-              setLocalValues((prev) => ({ ...prev, [opt.id]: v || undefined }))
+              setLocalValues((prev) => ({
+                ...prev,
+                [opt.id]: opt.type === 'boolean' ? String(v) : v || undefined,
+              }))
             }
           />
         ))}

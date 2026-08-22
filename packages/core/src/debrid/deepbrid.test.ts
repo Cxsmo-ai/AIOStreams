@@ -190,6 +190,45 @@ test('Deepbrid service recognizes an already-owned external NZB', async () => {
   assert.equal(result.hash, 'external-hash');
 });
 
+test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
+  const client = fakeDeepbridApi();
+  client.listUploads = async () => [];
+  client.addNzbUrl = async () => ({
+    id: 'pre-cached-upload',
+    title: 'External release',
+    files: [],
+  });
+  client.getUploadInfo = async () => ({
+    id: 'pre-cached-upload',
+    title: 'External release',
+    files: [
+      {
+        name: 'External.Release.S01E04.1080p.mkv',
+        link: 'https://usenet.myfast.link/pre-cached',
+        size: 1_000_000_000,
+        sizeHuman: '1 GB',
+      },
+    ],
+  });
+
+  const service = new DeepbridService(
+    { token: 'pre-cache', preCache: true, preCacheLimit: 1 },
+    client
+  );
+  const [result] = await service.checkNzbs([
+    {
+      name: 'External release',
+      hash: 'external-pre-cache-hash',
+      nzb: 'https://indexer.example/external-pre-cache.nzb',
+    },
+  ]);
+
+  assert.equal(result.id, 'pre-cached-upload');
+  assert.equal(result.status, 'cached');
+  assert.equal(result.library, true);
+  assert.equal(result.files?.[0]?.name, 'External.Release.S01E04.1080p.mkv');
+});
+
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {
   const service = new DeepbridService({ token: 'test' }, fakeDeepbridApi());
   const url = await service.resolve(
