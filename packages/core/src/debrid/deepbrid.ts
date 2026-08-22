@@ -194,7 +194,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       const ready = /^(completed|complete|finished|downloaded|cached|seeding)$/i.test(
         torrent.status.trim()
       ) || (torrent.progress ?? 0) >= 100;
-      if (!torrent.hash || !ready || files.length === 0) return [];
+      if (!ready || files.length === 0) return [];
       return [{
         id: torrent.id,
         hash: torrent.hash,
@@ -213,7 +213,11 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     _checkOwned = true
   ): Promise<DebridDownload[]> {
     const library = await this.listMagnets();
-    const byHash = new Map(library.map((item) => [item.hash!.toLowerCase(), item]));
+    const byHash = new Map(
+      library
+        .filter((item) => item.hash)
+        .map((item) => [item.hash!.toLowerCase(), item])
+    );
     return magnets.flatMap((hash) => {
       const item = byHash.get(hash.toLowerCase());
       return item ? [{ ...item, hash }] : [];
@@ -537,7 +541,9 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
           ? await this.client.listTorrents({ signal })
           : [];
       const torrent = torrents.find(
-        (item) => item?.hash?.toLowerCase() === playbackInfo.hash.toLowerCase()
+        (item) =>
+          item?.id === playbackInfo.serviceItemId ||
+          item?.hash?.toLowerCase() === playbackInfo.hash.toLowerCase()
       );
       if (!torrent) return undefined;
       const requested = playbackInfo.fileIndex ?? playbackInfo.index;

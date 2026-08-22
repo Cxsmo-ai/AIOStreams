@@ -484,14 +484,16 @@ export class DeepbridOfficialClient {
     options: DeepbridRequestOptions = {}
   ): Promise<DeepbridTorrent[]> {
     const json = await this.requestJson('/torrents/info', options);
-    const values = Array.isArray(json.items)
-      ? json.items
+    const values: [string | undefined, unknown][] = Array.isArray(json.items)
+      ? json.items.map((value) => [undefined, value])
       : Array.isArray(json.torrents)
-        ? json.torrents
+        ? json.torrents.map((value) => [undefined, value])
         : Array.isArray(json.data)
-          ? json.data
-          : [];
-    return values.flatMap((value) => this.parseTorrent(value));
+          ? json.data.map((value) => [undefined, value])
+          : Object.entries(json).map(([id, value]) => [id, value]);
+    return values.flatMap(([fallbackId, value]) =>
+      this.parseTorrent(value, fallbackId)
+    );
   }
 
   async getTorrentInfo(
@@ -508,13 +510,16 @@ export class DeepbridOfficialClient {
         : json.data && !Array.isArray(json.data) && typeof json.data === 'object'
           ? json.data
           : json;
-    return this.parseTorrent(value)[0];
+    return this.parseTorrent(value, id)[0];
   }
 
-  private parseTorrent(value: unknown): DeepbridTorrent[] {
+  private parseTorrent(
+    value: unknown,
+    fallbackId?: string
+  ): DeepbridTorrent[] {
     if (!value || typeof value !== 'object') return [];
     const item = value as Record<string, unknown>;
-    const id = item.id ?? item.torrent_id ?? item.torrentId;
+    const id = item.id ?? item.torrent_id ?? item.torrentId ?? fallbackId;
     if (typeof id !== 'string' && typeof id !== 'number') return [];
     const title =
       (typeof item.title === 'string' && item.title) ||
@@ -528,6 +533,21 @@ export class DeepbridOfficialClient {
     const status = typeof rawStatus === 'string' ? rawStatus : String(rawStatus);
     const progress = Number(item.progress ?? item.percentage ?? 0);
     const size = Number(item.size ?? item.total_size ?? 0);
+    const links = Array.isArray(item.links)
+      ? item.links.flatMap((link) => {
+          if (typeof link !== 'string' || !link) return [];
+          let name = title || `torrent-${id}`;
+          try {
+            const parsed = new URL(link);
+            const basename = decodeURIComponent(
+              parsed.pathname.split('/').filter(Boolean).pop() || ''
+            );
+            if (basename) name = basename;
+          } catch {}
+          return [{ name, link, size: 0, sizeHuman: '' }];
+        })
+      : [];
+    const parsedFiles = parseDeepbridFiles(item);
     return [{
       id: String(id),
       hash,
@@ -535,7 +555,7 @@ export class DeepbridOfficialClient {
       status,
       progress: Number.isFinite(progress) ? progress : undefined,
       size: Number.isFinite(size) && size > 0 ? size : undefined,
-      files: parseDeepbridFiles(item),
+      files: parsedFiles.length ? parsedFiles : links,
     }];
   }
 }
