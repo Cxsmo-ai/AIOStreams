@@ -216,26 +216,30 @@ test('Deepbrid service resolves the requested episode from an owned upload', asy
 
 test('Deepbrid service uses playable files returned directly by NZB add', async () => {
   let infoCalls = 0;
+  let addCalls = 0;
   const client = fakeDeepbridApi();
   client.listUploads = async () => [];
-  client.addNzbUrl = async () => ({
-    id: 'non-library-job-id',
-    title: 'Tower Prep S01',
-    files: [
-      {
-        name: 'Tower.Prep.S01E01.720p.mkv',
-        link: 'https://usenet.myfast.link/e1',
-        size: 1,
-        sizeHuman: '1 GB',
-      },
-      {
-        name: 'Tower.Prep.S01E09.720p.mkv',
-        link: 'https://usenet.myfast.link/e9',
-        size: 2,
-        sizeHuman: '2 GB',
-      },
-    ],
-  });
+  client.addNzbUrl = async () => {
+    addCalls++;
+    return {
+      id: 'non-library-job-id',
+      title: 'Tower Prep S01',
+      files: [
+        {
+          name: 'Tower.Prep.S01E01.720p.mkv',
+          link: `https://usenet.myfast.link/e1-${addCalls}`,
+          size: 1,
+          sizeHuman: '1 GB',
+        },
+        {
+          name: 'Tower.Prep.S01E09.720p.mkv',
+          link: `https://usenet.myfast.link/e9-${addCalls}`,
+          size: 2,
+          sizeHuman: '2 GB',
+        },
+      ],
+    };
+  };
   client.getUploadInfo = async () => {
     infoCalls++;
     throw new Error('must not poll when add already returned files');
@@ -256,7 +260,8 @@ test('Deepbrid service uses playable files returned directly by NZB add', async 
     'Tower Prep S01',
     true
   );
-  assert.equal(url, 'https://usenet.myfast.link/e9');
+  assert.equal(url, 'https://usenet.myfast.link/e9-2');
+  assert.equal(addCalls, 2);
   assert.equal(infoCalls, 0);
 });
 

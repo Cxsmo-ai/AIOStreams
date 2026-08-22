@@ -276,13 +276,12 @@ export class DeepbridService implements UsenetDebridService {
     );
   }
 
-  private async selectResolvedFile(
+  private resolvedCandidates(
     info: DeepbridUploadInfo | DeepbridAddResult,
     playbackInfo: DeepbridUsenetPlaybackInfo,
-    filename: string,
-    signal?: AbortSignal
-  ): Promise<string | undefined> {
-    if (!info.files.length) return undefined;
+    filename: string
+  ): DeepbridFinderFile[] {
+    if (!info.files.length) return [];
     const target = selectDeepbridUploadFile(
       info.files,
       filename,
@@ -301,12 +300,12 @@ export class DeepbridService implements UsenetDebridService {
         }
       );
     }
-    if (!target) return undefined;
+    if (!target) return [];
 
     // A single NZB can expose duplicate video members. Try the preferred file
     // first, then only same-media alternatives; never substitute another
     // episode from a season pack.
-    const candidates = [
+    return [
       target,
       ...info.files.filter(
         (file) =>
@@ -315,12 +314,39 @@ export class DeepbridService implements UsenetDebridService {
             undefined
       ),
     ];
+  }
+
+  private async selectResolvedFile(
+    info: DeepbridUploadInfo | DeepbridAddResult,
+    playbackInfo: DeepbridUsenetPlaybackInfo,
+    filename: string,
+    refresh: () => Promise<DeepbridUploadInfo | DeepbridAddResult>,
+    signal?: AbortSignal
+  ): Promise<string | undefined> {
+    const candidates = this.resolvedCandidates(info, playbackInfo, filename);
+    if (!candidates.length) return undefined;
     for (const candidate of candidates) {
       const playable = await this.probeVideo(candidate, this.apiKey, {
         timeoutMs: 8_000,
         signal,
       });
-      if (playable) return candidate.link;
+      if (!playable) continue;
+
+      // Deepbrid's NZB links are one-time capabilities. The range probe above
+      // intentionally consumes the checked URL, so refresh the same upload and
+      // return a pristine capability to the player.
+      const refreshed = await refresh();
+      const freshCandidates = this.resolvedCandidates(
+        refreshed,
+        playbackInfo,
+        filename
+      );
+      const exact = freshCandidates.find(
+        (file) =>
+          normalizedFilename(file.name) === normalizedFilename(candidate.name)
+      );
+      const fresh = exact ?? freshCandidates[0];
+      if (fresh?.link) return fresh.link;
     }
 
     throw new DebridError(
@@ -415,6 +441,7 @@ export class DeepbridService implements UsenetDebridService {
           added,
           playbackInfo,
           filename,
+          () => this.client.addNzbUrl(playbackInfo.nzb!, { signal }),
           signal
         );
         if (directLink) return directLink;
@@ -451,10 +478,12 @@ export class DeepbridService implements UsenetDebridService {
       if (signal?.aborted) return undefined;
       try {
         const info = await this.client.getUploadInfo(uploadId, { signal });
+        const currentUploadId = uploadId;
         const link = await this.selectResolvedFile(
           info,
           playbackInfo,
           filename,
+          () => this.client.getUploadInfo(currentUploadId, { signal }),
           signal
         );
         if (link) return link;
