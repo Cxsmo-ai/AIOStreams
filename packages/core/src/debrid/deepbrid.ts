@@ -210,6 +210,57 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     });
   }
 
+  /**
+   * Resolve one catalog item back to the authenticated Deepbrid account.
+   * Library metadata requests use this method before creating a playback
+   * stream; never synthesize an item from the catalog id alone.
+   */
+  async getMagnet(magnetId: string): Promise<DebridDownload> {
+    const torrent = this.client.getTorrentInfo
+      ? await this.client.getTorrentInfo(magnetId)
+      : (await this.client.listTorrents?.())?.find(
+          (item) => item.id === magnetId
+        );
+    if (!torrent) {
+      throw new DebridError('Deepbrid torrent is not in the account library', {
+        statusCode: 404,
+        statusText: 'Not Found',
+        code: 'NOT_FOUND',
+        headers: {},
+        body: null,
+        type: 'api_error',
+      });
+    }
+
+    const files = torrent.files.filter((file) =>
+      isLikelyDeepbridVideoName(file.name)
+    );
+    const ready =
+      /^(completed|complete|finished|downloaded|cached|seeding)$/i.test(
+        torrent.status.trim()
+      ) || (torrent.progress ?? 0) >= 100;
+    if (!ready || files.length === 0) {
+      throw new DebridError('Deepbrid torrent is not ready for playback', {
+        statusCode: 409,
+        statusText: 'Conflict',
+        code: 'NO_MATCHING_FILE',
+        headers: {},
+        body: null,
+        type: 'api_error',
+      });
+    }
+
+    return {
+      id: torrent.id,
+      hash: torrent.hash,
+      name: torrent.title,
+      size: torrent.size,
+      status: 'cached',
+      library: true,
+      files: torrent.files.map((file, index) => ({ ...file, index })),
+    };
+  }
+
   async checkMagnets(
     magnets: string[],
     _sid?: string,

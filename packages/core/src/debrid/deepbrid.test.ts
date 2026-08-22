@@ -219,6 +219,31 @@ test('Deepbrid torrent library is read-only and matches only account torrents', 
   await assert.rejects(() => service.addMagnet('magnet:?xt=urn:btih:not-owned'));
 });
 
+test('Deepbrid library catalog items can be opened through authenticated torrent info', async () => {
+  const client = fakeDeepbridApi();
+  client.getTorrentInfo = async (id) => ({
+    id,
+    title: 'Titanic.1997.2160p.UHD.Blu-ray.Remux.HEVC',
+    status: 'completed',
+    progress: 100,
+    files: [
+      {
+        name: 'Titanic.1997.2160p.UHD.Blu-ray.Remux.HEVC',
+        link: 'https://www.deepbrid.com/mytorrents?torrent=1&file=abc',
+        size: 20_000_000_000,
+        sizeHuman: '20 GB',
+      },
+    ],
+  });
+
+  const service = new DeepbridService({ token: 'torrent-library-open' }, client);
+  const result = await service.getMagnet('torrent-1');
+
+  assert.equal(result.id, 'torrent-1');
+  assert.equal(result.library, true);
+  assert.equal(result.files?.length, 1);
+});
+
 test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   const client = fakeDeepbridApi();
   client.listUploads = async () => [];
