@@ -244,6 +244,50 @@ test('Deepbrid library catalog items can be opened through authenticated torrent
   assert.equal(result.files?.length, 1);
 });
 
+test('Deepbrid library playback resolves the exact requested multi-file link', async () => {
+  const client = fakeDeepbridApi();
+  client.getTorrentInfo = async (id) => ({
+    id,
+    title: 'DTS-MusicDemo_BDRemux',
+    status: 'completed',
+    progress: 100,
+    files: [
+      {
+        name: 'DTS-MusicDemo_BDRemux',
+        link: 'https://www.deepbrid.com/mytorrents?torrent=1&file=first',
+        size: 2_000_000_000,
+        sizeHuman: '2 GB',
+      },
+      {
+        name: 'DTS-MusicDemo_BDRemux',
+        link: 'https://www.deepbrid.com/mytorrents?torrent=1&file=second',
+        size: 3_000_000_000,
+        sizeHuman: '3 GB',
+      },
+    ],
+  });
+
+  const service = new DeepbridService({ token: 'multi-file-playback' }, client);
+  const link = await service.resolve(
+    {
+      type: 'torrent',
+      hash: 'unused',
+      serviceItemId: 'torrent-1',
+      fileIndex: 1,
+      cacheAndPlay: false,
+      autoRemoveDownloads: false,
+      sources: [],
+    },
+    'DTS-MusicDemo_BDRemux',
+    false
+  );
+
+  assert.equal(
+    link,
+    'https://www.deepbrid.com/mytorrents?torrent=1&file=second'
+  );
+});
+
 test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   const client = fakeDeepbridApi();
   client.listUploads = async () => [];

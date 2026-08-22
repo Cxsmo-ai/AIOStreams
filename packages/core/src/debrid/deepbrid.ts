@@ -601,10 +601,15 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       );
       if (!torrent) return undefined;
       const requested = playbackInfo.fileIndex ?? playbackInfo.index;
+      // A catalog stream carries the provider's array index. If that index is
+      // present, honor it strictly: falling through to the first video would
+      // make multi-file torrents (season packs, music demos, extras) play the
+      // wrong member while appearing to resolve successfully.
       const file =
-        (requested !== undefined ? torrent.files[requested] : undefined) ??
-        torrent.files.find((item) => item.name === filename) ??
-        torrent.files.find((item) => isLikelyDeepbridVideoName(item.name));
+        requested !== undefined
+          ? torrent.files[requested]
+          : torrent.files.find((item) => item.name === filename) ??
+            torrent.files.find((item) => isLikelyDeepbridVideoName(item.name));
       return file?.link;
     }
     if (playbackInfo.type !== 'usenet') {
