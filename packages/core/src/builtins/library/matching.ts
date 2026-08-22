@@ -3,6 +3,7 @@ import {
   BuiltinServiceId,
   createLogger,
   getTimeTakenSincePoint,
+  constants,
 } from '../../utils/index.js';
 import {
   NZB,
@@ -222,6 +223,7 @@ export async function searchNzbs(
         service.credential,
         clientIp
       );
+      if (service.id === constants.DEEPBRID_SERVICE) return [];
       if (!isUsenetDebridService(debridService) || !debridService.listNzbs)
         return [];
       const items = await debridService.listNzbs();

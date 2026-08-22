@@ -143,7 +143,10 @@ export async function fetchCatalog(
     isTorrentDebridService(debridService);
   const includeNzbs =
     (!sources || sources.length === 0 || sources.includes('nzb')) &&
-    isUsenetDebridService(debridService);
+    isUsenetDebridService(debridService) &&
+    // Deepbrid Usenet Finder/external NZB results are playback sources, not
+    // Library items. Deepbrid contributes only manually added torrents here.
+    serviceId !== constants.DEEPBRID_SERVICE;
 
   const [magnets, nzbs] = await Promise.allSettled([
     includeTorrents ? debridService.listMagnets() : Promise.resolve([]),
