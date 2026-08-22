@@ -1168,11 +1168,25 @@ function validateService(
   if (service.enabled) {
     for (const credential of serviceMeta.credentials) {
       try {
+        // Service credentials are persisted as strings (see ServiceSchema),
+        // including values rendered by the generic boolean credential control.
+        // Validate serialized boolean credentials as booleans without changing
+        // their on-disk/API representation. Preset options remain strict.
+        const rawValue = service.credentials?.[credential.id];
+        const valueForValidation =
+          credential.type === 'boolean' &&
+          typeof rawValue === 'string' &&
+          /^(true|false)$/i.test(rawValue)
+            ? rawValue.toLowerCase() === 'true'
+            : rawValue;
         service.credentials[credential.id] = validateOption(
           credential,
-          service.credentials?.[credential.id],
+          valueForValidation,
           decryptValues
         );
+        if (credential.type === 'boolean' && valueForValidation !== undefined) {
+          service.credentials[credential.id] = String(valueForValidation);
+        }
       } catch (error) {
         throw new Error(
           `The value for credential '${credential.name}' in service '${serviceMeta.name}' is invalid: ${error}`
