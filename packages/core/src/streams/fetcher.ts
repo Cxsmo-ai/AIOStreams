@@ -678,9 +678,23 @@ class StreamFetcher {
     for (let i = 0; i < allStatisticStreams.length; i++) {
       allStatisticStreams[i] = statStreamsWithTime[i].stat;
     }
+    // A transient provider 429 is diagnostic noise once the overall scrape
+    // already has usable results. Hide only rate-limit cards globally so a
+    // single TorBox failure cannot make a healthy multi-provider scrape look
+    // broken; preserve all streams and keep every non-rate-limit error.
+    const visibleErrors =
+      allStreams.length > 0
+        ? allErrors.filter(
+            (error) =>
+              !/429|rate.?limit|too many requests/i.test(
+                `${error.title}\n${error.description}`
+              )
+          )
+        : allErrors;
+
     return {
       streams: allStreams,
-      errors: allErrors,
+      errors: visibleErrors,
       statistics: allStatisticStreams,
       dispositions,
     };
