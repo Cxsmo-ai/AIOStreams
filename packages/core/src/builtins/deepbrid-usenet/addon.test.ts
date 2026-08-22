@@ -14,6 +14,7 @@ import {
   isDeepbridStorageHost,
   isTrustedDeepbridDownloadHost,
   isDeepbridVideoName,
+  isLikelyDeepbridVideoName,
   validateDeepbridDownloadUrl,
 } from './client.js';
 import {
@@ -117,6 +118,11 @@ test('recognizes archive and video names', () => {
   assert.equal(isDeepbridArchiveName('release.mkv'), false);
   assert.equal(isDeepbridVideoName('release.MKV'), true);
   assert.equal(isDeepbridVideoName('release.nfo'), false);
+  assert.equal(
+    isLikelyDeepbridVideoName('Titanic.1997.2160p.UHD.Blu-ray.Remux.HEVC'),
+    true
+  );
+  assert.equal(isLikelyDeepbridVideoName('Titanic.1997.iso'), false);
 });
 
 test('selects the requested episode when an expanded season has many files', () => {

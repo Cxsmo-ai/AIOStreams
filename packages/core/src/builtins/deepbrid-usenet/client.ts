@@ -542,7 +542,10 @@ export class DeepbridOfficialClient {
             const basename = decodeURIComponent(
               parsed.pathname.split('/').filter(Boolean).pop() || ''
             );
-            if (basename) name = basename;
+            // Deepbrid's documented torrent links use /mytorrents with the
+            // actual file identity in the account response's filename. Do
+            // not replace a useful release title with that route name.
+            if (basename && isDeepbridVideoName(basename)) name = basename;
           } catch {}
           return [{ name, link, size: 0, sizeHuman: '' }];
         })
@@ -737,4 +740,17 @@ export function isDeepbridArchiveName(name: string): boolean {
 
 export function isDeepbridVideoName(name: string): boolean {
   return /\.(?:mkv|mp4|m4v|avi|mov|webm|ts|m2ts|wmv|flv|mpg|mpeg)$/i.test(name);
+}
+
+/**
+ * Deepbrid's torrent endpoint may omit a file extension from `filename`.
+ * Quality/container tokens are enough to identify normal video releases,
+ * while keeping generic archives and unrelated account files out of Library.
+ */
+export function isLikelyDeepbridVideoName(name: string): boolean {
+  if (isDeepbridVideoName(name)) return true;
+  if (/\.(?:iso|zip|rar|7z|nzb|pdf|srt|nfo|txt)$/i.test(name)) return false;
+  return /(?:\b(?:2160p|1080p|720p|576p|4k|uhd)\b|blu[-_. ]?ray|web[-_. ]?dl|web[-_. ]?rip|hdtv|remux|x264|x265|h\.?264|hevc|avc|hdr|dolby|atmos)/i.test(
+    name
+  );
 }

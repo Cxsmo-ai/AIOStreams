@@ -16,6 +16,7 @@ import {
   DeepbridUploadInfo,
   DeepbridTorrent,
   isDeepbridVideoName,
+  isLikelyDeepbridVideoName,
 } from '../builtins/deepbrid-usenet/client.js';
 import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
@@ -190,7 +191,9 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       ? await this.client.listTorrents()
       : [];
     return torrents.flatMap((torrent) => {
-      const files = torrent.files.filter((file) => isDeepbridVideoName(file.name));
+      const files = torrent.files.filter((file) =>
+        isLikelyDeepbridVideoName(file.name)
+      );
       const ready = /^(completed|complete|finished|downloaded|cached|seeding)$/i.test(
         torrent.status.trim()
       ) || (torrent.progress ?? 0) >= 100;
@@ -550,7 +553,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       const file =
         (requested !== undefined ? torrent.files[requested] : undefined) ??
         torrent.files.find((item) => item.name === filename) ??
-        torrent.files.find((item) => isDeepbridVideoName(item.name));
+        torrent.files.find((item) => isLikelyDeepbridVideoName(item.name));
       return file?.link;
     }
     if (playbackInfo.type !== 'usenet') {
