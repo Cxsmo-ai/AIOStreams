@@ -9,14 +9,23 @@ import {
   UserData,
 } from '../db/index.js';
 import { StreamParser } from '../parser/index.js';
+import FileParser from '../parser/file.js';
 import { config as appConfig } from '../config/index.js';
 import {
   constants,
+  convertLangCodeToName,
   createLogger,
+  getSimpleTextHash,
   makeRequest,
+  mapLanguageCode,
   ServiceId,
 } from '../utils/index.js';
-import { baseOptions, Preset, StreamResponseHookOptions } from './preset.js';
+import {
+  baseOptions,
+  CacheKeyRequestOptions,
+  Preset,
+  StreamResponseHookOptions,
+} from './preset.js';
 import {
   filterTorrentClawPlaybackActions,
   getTorrentClawCachedStatus,
@@ -24,6 +33,16 @@ import {
   streamText,
   type TorrentClawPlaybackOptions,
 } from './torrentclaw-cache.js';
+import {
+  buildTorrentClawHeaders,
+  enrichTorrentClawStreams,
+  getTorrentClawMetadata,
+  getTorrentClawServiceConfig,
+  isTrustedTorrentClawUrl,
+  isUnsafeTorrentClawStream,
+  torrentClawAuthScope,
+  torrentClawThreatLevel,
+} from './torrentclaw-api.js';
 
 type TorrentClawFormattingOptions = {
   useAioFormatter?: boolean;
@@ -31,6 +50,12 @@ type TorrentClawFormattingOptions = {
   showScore?: boolean;
   showTorBoxIndicator?: boolean;
   showTrueSpec?: boolean;
+  showSafety?: boolean;
+  showSource?: boolean;
+};
+
+type TorrentClawSafetyOptions = {
+  hideUnsafe?: boolean;
 };
 
 type TorrentClawRemappingOptions = {
@@ -47,6 +72,7 @@ type TorrentClawPresetOptions = {
   playback?: TorrentClawPlaybackOptions;
   remapping?: TorrentClawRemappingOptions;
   formatting?: TorrentClawFormattingOptions;
+  safety?: TorrentClawSafetyOptions;
 };
 
 type RemapCacheEntry = {
@@ -278,7 +304,8 @@ async function discoverTorrentClawIds(
   requestedId: string,
   remapping: TorrentClawRemappingOptions,
   season?: number,
-  episode?: number
+  episode?: number,
+  apiKey?: string
 ): Promise<string[] | null> {
   if (!/^tt\d+$/i.test(requestedId)) return null;
 
@@ -293,6 +320,7 @@ async function discoverTorrentClawIds(
     searchLimit,
     season ?? '',
     episode ?? '',
+    torrentClawAuthScope(apiKey),
   ].join(':');
   const cached = remapCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) return cached.value;
@@ -322,6 +350,7 @@ async function discoverTorrentClawIds(
     }
     const searchPayload = await fetchJson(searchUrl.toString(), {
       'X-Search-Source': 'aiostreams',
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     });
     const candidates = Array.isArray(searchPayload?.results)
       ? searchPayload.results
@@ -410,6 +439,20 @@ export class TorrentClawStreamParser extends StreamParser {
       .filter(Boolean);
   }
 
+  private metadata(stream: Stream) {
+    return getTorrentClawMetadata(stream);
+  }
+
+  private language(value: unknown): string | undefined {
+    const text = String(value || '').trim();
+    if (!text) return undefined;
+    const locale = text.toLowerCase().replace('_', '-');
+    if (locale === 'es-419') return 'Spanish (Latin America)';
+    if (locale === 'es-es') return 'Spanish';
+    if (locale === 'pt-br') return 'Portuguese (Brazil)';
+    return convertLangCodeToName(mapLanguageCode(text)) || text;
+  }
+
   protected override getService(
     stream: Stream,
     currentParsedStream: ParsedStream
@@ -465,33 +508,136 @@ export class TorrentClawStreamParser extends StreamParser {
     };
   }
 
-  protected override getIndexer(): string {
-    return 'TorrentClaw';
+  protected override getIndexer(stream: Stream): string {
+    const source = String(this.metadata(stream)?.source || '').trim();
+    if (!source) return 'TorrentClaw';
+    const displaySource = source
+      .split(':')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join(' / ');
+    return displaySource ? `TorrentClaw · ${displaySource}` : 'TorrentClaw';
   }
 
   protected override getResolution(stream: Stream): string | undefined {
-    return stream.name?.match(/\b(2160p|1080p|720p|576p|480p|360p)\b/i)?.[1];
+    const metadata = this.metadata(stream);
+    const height = Number(metadata?.videoInfo?.height);
+    if (Number.isFinite(height) && height > 0) {
+      if (height >= 1800) return '2160p';
+      if (height >= 1260) return '1440p';
+      if (height >= 900) return '1080p';
+      if (height >= 650) return '720p';
+      if (height >= 520) return '576p';
+      if (height >= 420) return '480p';
+      if (height >= 300) return '360p';
+    }
+    return [metadata?.quality, metadata?.rawTitle, stream.name]
+      .filter(Boolean)
+      .join(' ')
+      .match(/\b(2160p|1440p|1080p|720p|576p|480p|360p|240p|144p)\b/i)?.[1];
+  }
+
+  protected override getSeeders(
+    stream: Stream,
+    currentParsedStream: ParsedStream
+  ): number | undefined {
+    const structured = Number(this.metadata(stream)?.seeders);
+    return Number.isFinite(structured) && structured >= 0
+      ? structured
+      : super.getSeeders(stream, currentParsedStream);
   }
 
   protected override getReleaseGroup(stream: Stream): string | undefined {
-    return this.getLines(stream)
-      .find((line) => /🏷️?/.test(line))
-      ?.replace(/^.*?🏷️?\s*/u, '')
-      .trim();
+    return (
+      String(this.metadata(stream)?.releaseGroup || '').trim() ||
+      this.getLines(stream)
+        .find((line) => /🏷️?/.test(line))
+        ?.replace(/^.*?🏷️?\s*/u, '')
+        .trim()
+    );
   }
 
   protected override getParsedFileMergeOverrides(
     stream: Stream,
     _currentParsedStream: ParsedStream
   ): Partial<ParsedFile> {
+    const metadata = this.metadata(stream);
+    const technicalText = [
+      metadata?.rawTitle,
+      metadata?.quality,
+      metadata?.codec,
+      metadata?.audioCodec,
+      metadata?.hdrType,
+      metadata?.videoInfo?.codec,
+      metadata?.videoInfo?.hdr,
+      ...this.getLines(stream),
+      ...(metadata?.audioTracks || []).flatMap((track) =>
+        [track.codec, track.channels].filter(Boolean)
+      ),
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const technical = technicalText ? FileParser.parse(technicalText) : null;
     const flags = this.getLines(stream)
       .join(' ')
       .match(/[\u{1F1E6}-\u{1F1FF}]{2}/gu);
-    const languages = flags
-      ?.map((flag) => this.convertFlagToLanguage(flag))
+    const languages = [
+      ...(flags
+        ?.map((flag) => this.convertFlagToLanguage(flag))
+        .filter((language): language is string => Boolean(language)) || []),
+      ...(metadata?.languages || [])
+        .map((language) => this.language(language))
+        .filter((language): language is string => Boolean(language)),
+      ...(metadata?.audioTracks || [])
+        .map((track) => this.language(track.lang))
+        .filter((language): language is string => Boolean(language)),
+    ];
+    const subtitles = [
+      ...(metadata?.subtitleLanguages || []),
+      ...(metadata?.subtitleTracks || []).map((track) => track.lang),
+    ]
+      .map((language) => this.language(language))
       .filter((language): language is string => Boolean(language));
+    const channelCount = Number(metadata?.audioChannels);
+    const structuredChannel = Number.isFinite(channelCount)
+      ? channelCount >= 8
+        ? '7.1'
+        : channelCount >= 7
+          ? '6.1'
+          : channelCount >= 6
+            ? '5.1'
+            : channelCount >= 2
+              ? '2.0'
+              : undefined
+      : undefined;
 
-    return languages?.length ? { languages: [...new Set(languages)] } : {};
+    return {
+      ...(technical?.resolution ? { resolution: technical.resolution } : {}),
+      ...(technical?.quality ? { quality: technical.quality } : {}),
+      ...(technical?.encode ? { encode: technical.encode } : {}),
+      ...(technical?.visualTags?.length
+        ? { visualTags: technical.visualTags }
+        : {}),
+      ...(technical?.audioTags?.length
+        ? { audioTags: technical.audioTags }
+        : {}),
+      ...(technical?.audioChannels?.length || structuredChannel
+        ? {
+            audioChannels: [
+              ...(technical?.audioChannels || []),
+              ...(structuredChannel ? [structuredChannel] : []),
+            ].filter((value, index, all) => all.indexOf(value) === index),
+          }
+        : {}),
+      ...(languages.length ? { languages: [...new Set(languages)] } : {}),
+      ...(subtitles.length ? { subtitles: [...new Set(subtitles)] } : {}),
+      ...(metadata?.isProper ? { proper: true } : {}),
+      ...(metadata?.isRepack ? { repack: true } : {}),
+      ...(metadata?.isRemastered ? { editions: ['Remastered'] } : {}),
+      ...(metadata?.releaseGroup
+        ? { releaseGroup: metadata.releaseGroup }
+        : {}),
+    };
   }
 
   protected override getExtras(
@@ -501,6 +647,10 @@ export class TorrentClawStreamParser extends StreamParser {
     const lines = this.getLines(stream);
     const score = lines.find((line) => /\b\d{1,3}\/100\b/.test(line));
     const trueSpec = lines.find((line) => /\btruespec\b/i.test(line));
+    const metadata = this.metadata(stream);
+    const threat = torrentClawThreatLevel(stream);
+    const source = String(metadata?.source || '').trim() || undefined;
+    const scanStatus = String(metadata?.scanStatus || '').trim() || undefined;
     const isAction = !stream.url && Boolean(stream.externalUrl);
     const suffix: string[] = [];
 
@@ -512,15 +662,45 @@ export class TorrentClawStreamParser extends StreamParser {
       );
     }
     if (this.options.showTrueSpec !== false && trueSpec) suffix.push(trueSpec);
+    if (this.options.showSafety !== false && threat) {
+      suffix.push(
+        ['clean', 'safe', 'none'].includes(threat)
+          ? '🛡️ TorrentClaw Clean'
+          : threat === 'unknown'
+            ? '🛡️ Safety Unknown'
+            : `⚠️ TorrentClaw ${threat}`
+      );
+    }
+    if (this.options.showSource !== false && source) {
+      suffix.push(`🌐 ${source.replace(/:/g, ' / ')}`);
+    }
 
     return {
       ...(super.getExtras(stream, currentParsedStream) || {}),
       torrentClaw: {
-        score: score?.match(/\b(\d{1,3})\/100\b/)?.[1]
-          ? Number(score.match(/\b(\d{1,3})\/100\b/)?.[1])
-          : undefined,
+        score:
+          metadata?.qualityScore !== null &&
+          metadata?.qualityScore !== undefined &&
+          Number.isFinite(Number(metadata.qualityScore))
+            ? Number(metadata?.qualityScore)
+            : score?.match(/\b(\d{1,3})\/100\b/)?.[1]
+              ? Number(score.match(/\b(\d{1,3})\/100\b/)?.[1])
+              : undefined,
         torBox: /\bTB\b/.test(score || ''),
-        trueSpec: Boolean(trueSpec),
+        trueSpec: Boolean(trueSpec || scanStatus === 'success'),
+        scanStatus,
+        source,
+        sourceType: metadata?.sourceType || undefined,
+        threatLevel: threat,
+        safe:
+          threat && threat !== 'unknown'
+            ? ['clean', 'safe', 'none'].includes(threat)
+            : undefined,
+        leechers:
+          Number.isFinite(Number(metadata?.leechers)) &&
+          Number(metadata?.leechers) >= 0
+            ? Number(metadata?.leechers)
+            : undefined,
       },
       formattingPassthrough: isAction,
       formattingSuffix: suffix,
@@ -533,6 +713,20 @@ export class TorrentClawPreset extends Preset {
     return TorrentClawStreamParser;
   }
 
+  static override getCacheKey(options: CacheKeyRequestOptions): string {
+    const bearer = options.headers?.Authorization?.replace(/^Bearer\s+/i, '');
+    return `torrentclaw:${getSimpleTextHash(
+      JSON.stringify({
+        resource: options.resource,
+        type: options.type,
+        id: options.id,
+        extras: options.extras || '',
+        endpoint: options.options.url || this.DEFAULT_URL,
+        auth: torrentClawAuthScope(bearer),
+      })
+    )}`;
+  }
+
   static override get METADATA(): PresetMetadata {
     const supportedServices: ServiceId[] = [
       constants.REALDEBRID_SERVICE,
@@ -540,7 +734,11 @@ export class TorrentClawPreset extends Preset {
       constants.TORBOX_SERVICE,
       constants.PREMIUMIZE_SERVICE,
     ];
-    const supportedResources = [constants.STREAM_RESOURCE, constants.CATALOG_RESOURCE, constants.META_RESOURCE];
+    const supportedResources = [
+      constants.STREAM_RESOURCE,
+      constants.CATALOG_RESOURCE,
+      constants.META_RESOURCE,
+    ];
     const options: Option[] = [
       ...baseOptions(
         'TorrentClaw',
@@ -682,6 +880,24 @@ export class TorrentClawPreset extends Preset {
         ],
       },
       {
+        id: 'safety',
+        name: 'Safety Metadata',
+        description:
+          'Preserve TorrentClaw threat information without removing valid sources by default.',
+        type: 'subsection',
+        subsectionIntent: 'pill',
+        subOptions: [
+          {
+            id: 'hideUnsafe',
+            name: 'Hide Explicitly Unsafe Results',
+            description:
+              'Hide only results TorrentClaw explicitly marks unsafe. Unknown and unscanned results remain visible.',
+            type: 'boolean',
+            default: false,
+          },
+        ],
+      },
+      {
         id: 'formatting',
         name: 'Formatting Compatibility',
         description:
@@ -724,6 +940,22 @@ export class TorrentClawPreset extends Preset {
             id: 'showTrueSpec',
             name: 'TrueSpec Indicator',
             description: 'Preserve the TrueSpec Verified indicator.',
+            type: 'boolean',
+            default: true,
+          },
+          {
+            id: 'showSafety',
+            name: 'Safety Indicator',
+            description:
+              'Show TorrentClaw’s verified safety or warning status when available.',
+            type: 'boolean',
+            default: true,
+          },
+          {
+            id: 'showSource',
+            name: 'Original Indexer',
+            description:
+              'Show the upstream source TorrentClaw used and preserve it for analytics.',
             type: 'boolean',
             default: true,
           },
@@ -805,9 +1037,22 @@ export class TorrentClawPreset extends Preset {
     const options = (addon.preset.options || {}) as TorrentClawPresetOptions;
     const playback = options.playback || {};
     const remapping = options.remapping || {};
-    const original = filterTorrentClawPlaybackActions(streams, playback).filter(
-      (stream) => stream.type !== constants.STREMIO_USENET_STREAM_TYPE
-    );
+    const apiKey = addon.headers?.Authorization?.replace(/^Bearer\s+/i, '');
+    const enrichedStreams = await enrichTorrentClawStreams({
+      streams,
+      type,
+      id,
+      apiKey,
+      timeout: Math.min(3_500, Math.max(1_500, addon.timeout)),
+      maxWait: options.safety?.hideUnsafe === true ? undefined : 1_000,
+    });
+    const original = filterTorrentClawPlaybackActions(enrichedStreams, playback)
+      .filter((stream) => stream.type !== constants.STREMIO_USENET_STREAM_TYPE)
+      .filter(
+        (stream) =>
+          options.safety?.hideUnsafe !== true ||
+          !isUnsafeTorrentClawStream(stream)
+      );
 
     if (remapping.enabled === false || !/^tt\d+/i.test(id)) {
       return enrichSeasonPackSizes(original, type, options.formatting || {});
@@ -826,15 +1071,29 @@ export class TorrentClawPreset extends Preset {
         requestedId,
         remapping,
         Number.isFinite(season) ? season : undefined,
-        Number.isFinite(episode) ? episode : undefined
+        Number.isFinite(episode) ? episode : undefined,
+        apiKey
       );
       const additions: Stream[][] = [];
       for (const alternativeId of (alternatives || []).slice(0, 3)) {
         const replacementParts = [...parts];
         replacementParts[0] = alternativeId;
+        const replacementId = replacementParts.join(':');
+        const enrichedRetry = await enrichTorrentClawStreams({
+          streams: await fetchStreams(replacementId),
+          type,
+          id: replacementId,
+          apiKey,
+          timeout: Math.min(3_500, Math.max(1_500, addon.timeout)),
+          maxWait: options.safety?.hideUnsafe === true ? undefined : 1_000,
+        });
         const retry = filterTorrentClawPlaybackActions(
-          await fetchStreams(replacementParts.join(':')),
+          enrichedRetry,
           playback
+        ).filter(
+          (stream) =>
+            options.safety?.hideUnsafe !== true ||
+            !isUnsafeTorrentClawStream(stream)
         );
         if (!hasPlayableStream(retry)) continue;
         logger.info(
@@ -865,12 +1124,15 @@ export class TorrentClawPreset extends Preset {
   }
 
   private static generateAddon(
-    _userData: UserData,
+    userData: UserData,
     options: Record<string, any>
   ): Addon {
+    const service = getTorrentClawServiceConfig(userData);
+    const manifestUrl = this.generateManifestUrl(options);
+    const trusted = isTrustedTorrentClawUrl(manifestUrl);
     return {
       name: options.name || this.METADATA.NAME,
-      manifestUrl: this.generateManifestUrl(options),
+      manifestUrl,
       enabled: true,
       mediaTypes: options.mediaTypes || [],
       resources: options.resources || this.METADATA.SUPPORTED_RESOURCES,
@@ -883,7 +1145,11 @@ export class TorrentClawPreset extends Preset {
       formatPassthrough: options.formatting?.useAioFormatter === false,
       resultPassthrough: options.resultPassthrough ?? false,
       pinPosition: options.pinPosition || undefined,
-      headers: { 'User-Agent': this.METADATA.USER_AGENT },
+      headers: buildTorrentClawHeaders({
+        manifestUrl,
+        userAgent: this.METADATA.USER_AGENT,
+        apiKey: trusted ? service?.apiKey : undefined,
+      }),
     };
   }
 

@@ -9,6 +9,7 @@ import {
   ServiceId,
 } from '../utils/index.js';
 import { validateUnarrApiUrl } from '../builtins/unarr-indexer/addon.js';
+import { getTorrentClawServiceConfig } from './torrentclaw-api.js';
 
 const SUPPORTED_SERVICES = [
   constants.TORBOX_SERVICE,
@@ -16,7 +17,9 @@ const SUPPORTED_SERVICES = [
   constants.ALTMOUNT_SERVICE,
   constants.STREMIO_NNTP_SERVICE,
   constants.STREMTHRU_NEWZ_SERVICE,
-  constants.AIOSTREAMS_SERVICE,  constants.DEEPBRID_SERVICE,] as ServiceId[];
+  constants.AIOSTREAMS_SERVICE,
+  constants.DEEPBRID_SERVICE,
+] as ServiceId[];
 
 type UnarrFormattingOptions = {
   useAioFormatter?: boolean;
@@ -150,12 +153,12 @@ export class UnarrIndexerPreset extends BuiltinAddonPreset {
         default: 'TorrentClaw Unarr (Index Only)',
       },
       {
-        id: 'unarrAuth',
-        name: 'Connect Unarr',
+        id: 'torrentClawServiceNotice',
+        name: 'TorrentClaw Service',
         description:
-          'Connect with a single-use `unarr-authkey-…` or validate an existing `tc_…` API key. Your Unarr email/password is never entered into AIOStreams.',
-        type: 'unarr-auth',
-        required: true,
+          'Authentication is shared with the **TorrentClaw** entry under Services. Configure the API key once there; this addon never stores a separate copy in its marketplace options.',
+        type: 'alert',
+        intent: 'info',
       },
       {
         id: 'enforceUnarrQuota',
@@ -341,14 +344,12 @@ export class UnarrIndexerPreset extends BuiltinAddonPreset {
       );
     }
 
-    const auth = options.unarrAuth as
-      | { apiUrl?: string; apiKey?: string }
-      | undefined;
-    const apiKey = auth?.apiKey || options.apiKey;
-    const apiUrl = auth?.apiUrl || options.apiUrl || 'https://unarr.app';
+    const torrentClawService = getTorrentClawServiceConfig(userData);
+    const apiKey = torrentClawService?.apiKey;
+    const apiUrl = torrentClawService?.unarrUrl || 'https://unarr.app';
     if (!apiKey?.startsWith('tc_')) {
       throw new Error(
-        `${this.METADATA.NAME} requires a connected Unarr account. Use Connect Unarr before saving.`
+        `${this.METADATA.NAME} requires a TorrentClaw service API key beginning with tc_. Configure TorrentClaw under Services before saving.`
       );
     }
 
@@ -375,11 +376,7 @@ export class UnarrIndexerPreset extends BuiltinAddonPreset {
 
     const persistedOptions = {
       ...options,
-      unarrAuth: {
-        ...(auth || {}),
-        apiUrl: validatedApiUrl,
-        apiKey,
-      },
+      unarrAuth: undefined,
       apiKey: undefined,
       apiUrl: undefined,
       proxyAuth: undefined,

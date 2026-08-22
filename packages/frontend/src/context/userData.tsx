@@ -14,6 +14,54 @@ import { useStatus } from './status';
 const USER_DATA_KEY = 'aiostreams-user-data';
 
 export function applyMigrations(config: any): UserData {
+  // Keep TorrentClaw credentials in the global service, never in marketplace
+  // preset/catalog options. This also upgrades existing Unarr configurations.
+  if (Array.isArray(config?.presets)) {
+    let legacyApiKey: string | undefined;
+    let legacyUnarrUrl: string | undefined;
+    config.presets = config.presets.map((preset: any) => {
+      if (preset?.type !== 'unarr-indexer' || !preset.options) return preset;
+      const auth = preset.options.unarrAuth;
+      legacyApiKey =
+        legacyApiKey ||
+        (typeof auth?.apiKey === 'string' ? auth.apiKey : undefined) ||
+        (typeof preset.options.apiKey === 'string'
+          ? preset.options.apiKey
+          : undefined);
+      legacyUnarrUrl =
+        legacyUnarrUrl ||
+        (typeof auth?.apiUrl === 'string' ? auth.apiUrl : undefined) ||
+        (typeof preset.options.apiUrl === 'string'
+          ? preset.options.apiUrl
+          : undefined);
+      const options = { ...preset.options };
+      delete options.unarrAuth;
+      delete options.apiKey;
+      delete options.apiUrl;
+      return { ...preset, options };
+    });
+    if (legacyApiKey) {
+      config.services = Array.isArray(config.services) ? config.services : [];
+      const existing = config.services.find(
+        (service: any) => service?.id === 'torrentclaw'
+      );
+      if (existing) {
+        existing.enabled = existing.enabled ?? true;
+        existing.credentials = existing.credentials || {};
+        existing.credentials.apiKey ||= legacyApiKey;
+        existing.credentials.unarrUrl ||= legacyUnarrUrl || 'https://unarr.app';
+      } else {
+        config.services.push({
+          id: 'torrentclaw',
+          enabled: true,
+          credentials: {
+            apiKey: legacyApiKey,
+            unarrUrl: legacyUnarrUrl || 'https://unarr.app',
+          },
+        });
+      }
+    }
+  }
   if (
     config &&
     config.addonPassword !== undefined &&

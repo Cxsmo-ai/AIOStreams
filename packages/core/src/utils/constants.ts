@@ -329,6 +329,7 @@ const STREMTHRU_NEWZ_SERVICE = 'stremthru_newz';
 const AIOSTREAMS_SERVICE = 'aiostreams';
 const TORRIN_SERVICE = 'torrin';
 export const DEEPBRID_SERVICE = 'deepbrid' as const;
+export const TORRENTCLAW_SERVICE = 'torrentclaw' as const;
 
 const SERVICES = [
   REALDEBRID_SERVICE,
@@ -350,6 +351,7 @@ const SERVICES = [
   AIOSTREAMS_SERVICE,
   TORRIN_SERVICE,
   DEEPBRID_SERVICE,
+  TORRENTCLAW_SERVICE,
 ] as const;
 
 export const BUILTIN_SUPPORTED_SERVICES = [
@@ -790,7 +792,8 @@ const SERVICE_DETAILS: Record<
     name: 'Deepbrid',
     shortName: 'DB',
     knownNames: ['Deepbrid', 'DB'],
-    signUpText: "Don't have an account? [Sign up here](https://www.deepbrid.com/)",
+    signUpText:
+      "Don't have an account? [Sign up here](https://www.deepbrid.com/)",
     credentials: [
       {
         id: 'apiKey',
@@ -799,6 +802,33 @@ const SERVICE_DETAILS: Record<
           'Your Deepbrid API key. Obtain it from [here](https://www.deepbrid.com/devices)',
         type: 'password',
         required: true,
+      },
+    ],
+  },
+  [TORRENTCLAW_SERVICE]: {
+    id: TORRENTCLAW_SERVICE,
+    name: 'TorrentClaw',
+    shortName: 'TC',
+    knownNames: ['TorrentClaw', 'TC'],
+    signUpText:
+      'Optional authenticated access for TorrentClaw streams, catalogs, metadata, and Unarr index-only searches. [Manage your account](https://torrentclaw.com/).',
+    credentials: [
+      {
+        id: 'apiKey',
+        name: 'API Key',
+        description:
+          'Your TorrentClaw API key. It is stored once here and reused by every TorrentClaw integration.',
+        type: 'password',
+        required: true,
+      },
+      {
+        id: 'unarrUrl',
+        name: 'Unarr API URL',
+        description:
+          'Optional Unarr endpoint used by TorrentClaw Unarr (Index Only). Leave the default unless your account uses another official endpoint.',
+        type: 'url',
+        required: false,
+        default: 'https://unarr.app',
       },
     ],
   },
