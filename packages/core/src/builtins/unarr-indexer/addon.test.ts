@@ -37,6 +37,12 @@ const unarrResult = (
 });
 
 class TestUnarrParser extends UnarrIndexerStreamParser {
+  service(stream: Stream | string) {
+    return this.getService(
+      typeof stream === 'string' ? ({ name: stream } as Stream) : stream,
+      {} as ParsedStream
+    );
+  }
   extras(stream: Stream, parsed: ParsedStream) {
     return this.getExtras(stream, parsed);
   }
@@ -50,6 +56,61 @@ class TestUnarrParser extends UnarrIndexerStreamParser {
     return this.getIndexer();
   }
 }
+
+test('uses the actual Usenet resolver in TorrentClaw stream badges', () => {
+  const parser = new TestUnarrParser({
+    name: 'TorrentClaw Usenet',
+    instanceId: 'unarr-service-test',
+    preset: { id: 'test', type: 'unarr-indexer', options: {} },
+  } as Addon);
+
+  for (const [id, shortName] of [
+    ['torbox', 'TB'],
+    ['deepbrid', 'DB'],
+    ['aiostreams', 'AIO'],
+  ] as const) {
+    assert.deepEqual(
+      parser.service({
+        name: `[${shortName} ⚡] TorrentClaw Usenet`,
+        aioResolver: { id, cached: true },
+      } as Stream),
+      { id, cached: true }
+    );
+  }
+});
+
+test('uses the leading resolver badge for older built-in stream responses', () => {
+  const parser = new TestUnarrParser({
+    name: 'TorrentClaw Usenet',
+    instanceId: 'unarr-legacy-service-test',
+    preset: { id: 'test', type: 'unarr-indexer', options: {} },
+  } as Addon);
+
+  assert.deepEqual(parser.service('[TB ⚡] TorrentClaw Usenet'), {
+    id: 'torbox',
+    cached: true,
+  });
+  assert.deepEqual(parser.service('[AIO ⚡] TorrentClaw Usenet'), {
+    id: 'aiostreams',
+    cached: true,
+  });
+});
+
+test('preserves TorBox uncached state for Cache and Play behavior', () => {
+  const parser = new TestUnarrParser({
+    name: 'TorrentClaw Usenet',
+    instanceId: 'unarr-cache-play-test',
+    preset: { id: 'test', type: 'unarr-indexer', options: {} },
+  } as Addon);
+
+  assert.deepEqual(
+    parser.service({
+      name: '[TB ⏳] TorrentClaw Usenet',
+      aioResolver: { id: 'torbox', cached: false },
+    } as Stream),
+    { id: 'torbox', cached: false }
+  );
+});
 
 const parsedEpisode: ParsedId = {
   type: 'imdbId',

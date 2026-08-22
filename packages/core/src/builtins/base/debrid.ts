@@ -931,6 +931,15 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
     } ${torrentOrNzb.group ? `\n🏷️ ${torrentOrNzb.group}` : ''}`;
 
     return {
+      // Preserve the exact resolver and cache state structurally. The outer
+      // AIOStreams parser must not infer TC merely because this stream's addon
+      // name contains "TorrentClaw".
+      aioResolver: torrentOrNzb.service
+        ? {
+            id: torrentOrNzb.service.id,
+            cached: torrentOrNzb.service.cached,
+          }
+        : undefined,
       url:
         torrentOrNzb.service && torrentOrNzb.service.id != 'stremio_nntp'
           ? generatePlaybackUrl(

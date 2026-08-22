@@ -141,9 +141,30 @@ export class BuiltinStreamParser extends StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
-    const service = this.parseServiceData(
-      stream.name?.replace('Easynews', '') || ''
-    );
+    const resolver = (stream as Record<string, unknown>).aioResolver;
+    const structuredService =
+      resolver && typeof resolver === 'object'
+        ? (resolver as { id?: unknown; cached?: unknown })
+        : undefined;
+    const structuredId = structuredService?.id;
+    const hasValidStructuredService =
+      typeof structuredId === 'string' &&
+      (constants.BUILTIN_SUPPORTED_SERVICES as readonly string[]).includes(
+        structuredId
+      ) &&
+      typeof structuredService?.cached === 'boolean';
+    const name = stream.name?.replace('Easynews', '') || '';
+    // Native built-ins put the resolver and its cache state in the leading
+    // bracket (for example, "[TB ⚡]"). Parse that authoritative token alone
+    // so an addon name such as "TorrentClaw Usenet" cannot overwrite TB/DB/AIO
+    // with the integration-only TorrentClaw service later in the same string.
+    const explicitServiceBadge = name.match(/\[[^\]\r\n]+\]/)?.[0];
+    const service = hasValidStructuredService
+      ? {
+          id: structuredId as ServiceId,
+          cached: structuredService!.cached as boolean,
+        }
+      : this.parseServiceData(explicitServiceBadge ?? name);
     if (
       service &&
       (service.id === constants.NZBDAV_SERVICE ||
