@@ -1,16 +1,16 @@
 <p align="center">
     <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/gh/selfhst/icons/png/aiostreams-light.png">
-          <img alt="AIOStreams Logo" src="https://cdn.jsdelivr.net/gh/selfhst/icons/png/aiostreams.png" width=256 height=256>
+        <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/gh/selfhst/icons/png/aiostreams-light.png">
+        <img alt="AIOStreams Logo" src="https://cdn.jsdelivr.net/gh/selfhst/icons/png/aiostreams.png" width="256" height="256">
     </picture>
 </p>
 
-<h1 align="center">AIOStreams</h1>
+<h1 align="center">AIOStreams — Cxsmo Custom Fork</h1>
 
 <p align="center">
-  <strong>One addon to rule them all.</strong>
+  <strong>AIOStreams with deeper TorrentClaw, Deepbrid, TorBox, Usenet, catalog, metadata, subtitle, and resolver integration.</strong>
   <br />
-  AIOStreams consolidates multiple Stremio addons and debrid/usenet services - including its own suite of built-in addons - into a single, highly customisable super-addon.
+  Built on <a href="https://github.com/Viren070/AIOStreams">Viren070/AIOStreams</a> and extended in <a href="https://github.com/Cxsmo-ai/AIOStreams">Cxsmo-ai/AIOStreams</a>.
 </p>
 
 <p align="center">
@@ -21,27 +21,50 @@
         <img src="https://img.shields.io/github/v/release/Cxsmo-ai/AIOStreams?style=for-the-badge&logo=github" alt="Latest Release">
     </a>
     <a href="https://github.com/Cxsmo-ai/AIOStreams/stargazers">
-        <img src="https://img.shields.io/github/stars/Cxsmo-ai/AIOStreams?style=for-the-badge&logo=github " alt="GitHub Stars">
-    </a>
-    <a href="https://github.com/sponsors/Viren070">
-        <img src="https://img.shields.io/github/sponsors/viren070?style=for-the-badge&logo=githubsponsors" alt="GitHub Sponsors">
+        <img src="https://img.shields.io/github/stars/Cxsmo-ai/AIOStreams?style=for-the-badge&logo=github" alt="GitHub Stars">
     </a>
     <a href="https://github.com/Cxsmo-ai/AIOStreams/pkgs/container/aiostreams">
         <img src="https://img.shields.io/badge/GHCR-multi--arch-2496ED?style=for-the-badge&logo=github" alt="GHCR multi-architecture image">
     </a>
-    <a href="https://discord.viren070.me">
-        <img src="https://img.shields.io/discord/1225024298490662974?style=for-the-badge&logo=discord&color=7289DA" alt="Discord Server">
-    </a>
-
 </p>
+
+> [!IMPORTANT]
+> This repository is a **custom community fork**, not the official upstream AIOStreams repository. The original AIOStreams project and core architecture are maintained by [Viren070](https://github.com/Viren070). This fork adds and maintains its own integrations, behavior, performance work, and service-specific features on top of that foundation.
+
+## 📦 GHCR Images
+
+Official container images for **this fork** are published through GitHub Container Registry:
+
+- **Package page:** [github.com/Cxsmo-ai/AIOStreams/pkgs/container/aiostreams](https://github.com/Cxsmo-ai/AIOStreams/pkgs/container/aiostreams)
+- **Registry image:** `ghcr.io/cxsmo-ai/aiostreams`
+
+```bash
+docker pull ghcr.io/cxsmo-ai/aiostreams:latest
+```
+
+```bash
+podman pull ghcr.io/cxsmo-ai/aiostreams:latest
+```
+
+> [!NOTE]
+> Use the **Cxsmo-ai GHCR image** if you want the custom TorrentClaw, Deepbrid, TorBox, Usenet, catalog, metadata, subtitle, and resolver changes documented in this README.
 
 ---
 
-## ✨ What is AIOStreams?
+## ✨ What Makes This Fork Different?
 
-AIOStreams was created to give users ultimate control over their Stremio experience. Instead of juggling multiple addons with different configurations and limitations, AIOStreams acts as a central hub. It fetches results from all your configured sources, then deduplicates, filters, sorts, and formats them according to _your_ rules before presenting them in a single, clean list.
+The goal of this fork is not to replace the AIOStreams core experience. It extends it into a deeper multi-source streaming and Usenet stack where **TorrentClaw, Deepbrid, TorBox, native AIOStreams Usenet, external indexers, metadata, catalogs, and subtitles can work together instead of acting like isolated addons**.
 
-Whether you're a casual user who wants a simple, unified stream list or a power user who wants to fine-tune every aspect of your results, AIOStreams has you covered.
+The fork focuses heavily on:
+
+- preserving **every valid source** after filtering and deduplication rather than imposing arbitrary caps;
+- resolver-aware routing across **TB**, **DB**, and **AIO** playback paths;
+- native and external **Usenet/NZB** workflows;
+- season-pack discovery and exact episode extraction;
+- richer TorrentClaw metadata and catalogs;
+- robust fallback behavior when individual providers fail or rate-limit;
+- safer playback probing, proxying, quotas, retries, and timeouts;
+- larger catalogs, artwork fallbacks, NSFW filtering, and universal subtitle handling.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/ba15f9f6-b8d4-4060-9b1f-00adeb0d1d9b" alt="AIOStreams in action" width="850" />
@@ -49,177 +72,265 @@ Whether you're a casual user who wants a simple, unified stream list or a power 
 
 ---
 
-## 🚀 Key Features
+## 🚀 Custom Fork Features
 
-### 🔌 All Your Addons, One Interface
+### 🦅 TorrentClaw
 
-Add any Stremio addon you already use - Torrentio, Comet, MediaFusion, and many more - alongside AIOStreams' own built-in addons. All results flow through a single, unified pipeline.
+- **Native TorrentClaw torrent and Usenet integration**
+- **Unarr archive support** with NZB quota protection
+- Season-pack discovery with correct episode extraction
+- Improved release parsing, metadata, posters, logos, and backgrounds
+- Larger catalogs with pagination and NSFW filtering
+- Separate **For You** and **What You Guys Should Watch** catalogs
+- Resolver-aware labels: `⚡ TB`, `⚡ DB`, or `⚡ AIO`
+- Valid TorrentClaw results are preserved through filtering and deduplication
 
-- **Addon Marketplace**: Browse and enable 80+ community addons directly from the configuration page. AIOStreams automatically applies your debrid API keys to compatible addons, so you configure your credentials once and they work everywhere.
-- **Custom Addon Support**: Add _any_ Stremio addon by URL. If it works in Stremio, it works here.
-- **Automatic Updates**: Addon manifests are generated dynamically, so you always get the latest addon updates without reconfiguring anything.
-- **Full Stremio Support**: Streams, catalogs, metadata, subtitles, and addon catalogs are all supported.
-- **Addon Categorisation**: Categorise your addons to keep things neat and organised.
+### 🔎 Deepbrid Usenet
+
+- Built-in **Deepbrid Usenet Finder** addon
+- Shared service authentication — no separate addon API key required
+- External NZB/indexer resolving
+- Optional pre-cache mode with on-demand fallback
+- Failed or rate-limited pre-cache requests do not hide otherwise valid sources
+- Season-pack searching and episode extraction
+- Archive handling, playback probing, and secure range proxying
+- Duplicate external results already found by Deepbrid Finder are suppressed intelligently
+- Deepbrid-specific formatting and service badges
+
+### ⚡ Usenet & Indexers
+
+- Native **AIOStreams Usenet streaming**
+- **TorBox, Deepbrid, Newshosting, and Easynews NNTP** workflows
+- Improved altHUB, Easynews, Newshosting, Prowlarr, and TorrentClaw resolving
+- External indexers can resolve through **TorBox**, **Deepbrid**, or native **AIOStreams**
+- Native AIOStreams sources remain available alongside TB and DB results
+- Better NZB parsing, season-pack matching, archive extraction, and playback selection
+- Configurable TorBox/Deepbrid priority without removing valid sources
+- NNTP emergency/fallback tiers for more resilient provider routing
+
+### 🧩 Services & Resolver Routing
+
+- Shared service credentials and resolver-aware routing
+- TorBox cache-and-play, native streaming, and transcoding support
+- Deepbrid pre-cache and external-indexer resolving
+- Storage, quota, retry, timeout, and provider-failure safeguards
+- Partial results remain visible when individual providers fail
+- Resolver labels and formatting make the final playback path obvious
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4af785d1-dec3-438b-b62c-5aaf6d3d62c5" alt="Addon Marketplace" width="850"/>
-
-  <img width="850"  alt="image" src="https://github.com/user-attachments/assets/fc85afc5-1367-40e0-9018-40002dd0878f" />
-
+  <img src="https://github.com/user-attachments/assets/fbf40e7d-b303-4bef-a43e-5ce3d26684bb" alt="AIOStreams services configuration" width="1500" />
 </p>
 
-### 🧩 Built-in Addons & Custom Integrations
+### 🎬 Catalogs & Metadata
 
-This fork keeps the current nightly built-ins and adds a focused set of integrations without publishing private instance URLs or per-config credentials:
+- Larger parallel multi-page catalogs with infinite scrolling
+- Trending, popular, genre, network, personalized, and service catalogs
+- Watchlist seasons normalize to the complete show
+- IMDb, TMDB, and Stremio metadata compatibility
+- Poster, background, logo, and metadata fallbacks
+- NSFW filtering across titles, descriptions, genres, images, catalogs, and metadata
 
-- **TorrentClaw**: Native torrent preset with truthful cached/uncached detection, title remapping, season-pack sizes, passthrough metadata, and formatter-compatible suffixes.
-- **TorrentClaw Unarr (Index Only)**: A separate Usenet indexer preset. It searches Unarr for NZBs, then hands playback to the AIOStreams Usenet services you selected. Authentication is stored per configuration and its optional monthly quota ceiling can be disabled.
-- **Newshosting as an Indexer**: A self-contained built-in preset that signs in to Newshosting per configuration, performs native episode-aware search, filtering, and ranking, and securely hands generated NZBs to any supported AIOStreams Usenet service. It does not require a companion bridge or expose the Newshosting login to downstream services.
-- **Addon performance rankings**: Privacy-safe daily aggregates compare availability, surviving results, top-result wins, largest-source wins, errors, and latency without retaining titles, media IDs, stream URLs, IP addresses, or credentials.
-- **NNTP emergency tiers**: Tier 0 is primary; tiers 1 and above are ordered fallbacks for metered block accounts. Legacy `isBackup` configurations map to tier 1.
-- **Latest-nightly foundations**: The rewritten formatter/editor, diagnostics, native episode resolver, repair/caching improvements, stream tracking, configuration profiles, OIDC, and configuration variants remain upstream-native.
+### 💬 Subtitles
 
-> [!NOTE]
-> Built-in addons that search for torrents require a debrid service. Usenet results can be streamed by AIOStreams' own built-in usenet engine, via external tools like [NzbDAV](https://github.com/nzbdav-dev/nzbdav) or [AltMount](https://github.com/javi11/altmount), natively by Stremio itself, or through TorBox (Pro plan) - see the [Usenet guide](https://docs.aiostreams.viren070.me/guides/usenet). All built-in addons support anime and Kitsu/MAL catalogs.
+- Deepbrid OpenSubtitles integration
+- Universal subtitle handling across AIOStreams, TB, DB, TorrentClaw, and external sources
+- Improved subtitle language metadata and formatting
 
-### 🌐 Debrid & Usenet Service Support
+### 🚀 Performance & Reliability
 
-AIOStreams supports all major debrid and Usenet services, including:
+- Parallel provider requests and batched indexer processing
+- Internal timeout margins, retries, rate-limit handling, and fallbacks
+- Improved Deepbrid and Prowlarr response times
+- Accurate unique-stream counts after deduplication
+- HTTP range validation and safer playback handling
+- Valid sources are preserved instead of being artificially limited
+- Privacy-safe provider performance statistics and diagnostics
 
-**Debrid**: Real-Debrid, AllDebrid, Debrid-Link, Premiumize, TorBox, EasyDebrid, PikPak, Offcloud, Seedr, put.io, and more.
+> [!TIP]
+> **Main difference:** this fork turns AIOStreams into a more deeply connected **TorrentClaw + Deepbrid + TorBox + Usenet ecosystem** with service routing, external-indexer resolving, Unarr support, season-pack extraction, resolver-aware formatting, larger filtered catalogs, pre-cache fallbacks, and multi-method source preservation.
 
-**Usenet**: the built-in usenet engine (streams straight from your own NNTP provider), Easynews, NzbDAV, AltMount, Stremio NNTP, StremThru Newz.
+---
 
-Services are configured once in the **Services** tab and automatically applied to every compatible addon in your configuration.
+## 🧱 Core AIOStreams Features Retained
 
-Full guide: [docs.aiostreams.viren070.me/guides/usenet](https://docs.aiostreams.viren070.me/guides/usenet)
+This fork keeps the core AIOStreams experience and UI foundations while extending them with the fork-specific integrations above. The original README screenshots are retained here because these interfaces remain relevant to this fork.
+
+### 🔌 One Interface for Your Addons
+
+- Add community or custom Stremio addons in one place
+- Unified filtering, sorting, formatting, metadata, catalogs, and subtitles
+- Dynamic manifests and configuration profiles
+- Built-in and external debrid/Usenet service support
+- Addon categorization and centralized service configuration
 
 <p align="center">
-    <img width="1500" alt="image" src="https://github.com/user-attachments/assets/fbf40e7d-b303-4bef-a43e-5ce3d26684bb" />
+  <img src="https://github.com/user-attachments/assets/4af785d1-dec3-438b-b62c-5aaf6d3d62c5" alt="Addon Marketplace" width="850" />
+
+  <img src="https://github.com/user-attachments/assets/fc85afc5-1367-40e0-9018-40002dd0878f" alt="AIOStreams addon configuration" width="850" />
 </p>
 
-### 🔬 Advanced Filtering Engine
+### 🔬 Advanced Filtering & Deduplication
 
-Because every addon is routed through AIOStreams, you only configure your filters **once** and they apply universally.
-
-- **Property Filters**: Include, require, or exclude results by resolution (240p–2160p), quality (CAM through BluRay REMUX), encode (AVC, HEVC, AV1...), HDR/Dolby Vision tags, audio format (Atmos, TrueHD, DTS...), audio channels, stream type (debrid, usenet, P2P...), and language.
-- **Size, Bitrate & Seeder Filters**: Set minimum and maximum bounds for file size, bitrate, seeder count, and result age.
-- **Cached/Uncached Control**: Filter by cache status globally or scoped to specific services or addons.
-- **Keyword Filters**: Match or exclude results by simple keyword against the filename.
-- **Regex Filters**: Full regular expression matching against filenames, indexer names, and release groups.
-- **Stream Expression Language (SEL)**: Write dynamic conditional rules using a purpose-built expression language.
-  - _Example_: Only remove 720p results when more than five 1080p results are already present: `count(resolution(streams, '1080p')) > 5 ? resolution(streams, '720p') : false`
-  - Full reference: [docs.aiostreams.viren070.me/reference/stream-expressions](https://docs.aiostreams.viren070.me/reference/stream-expressions)
-- **Accurate Matching**: Uses various metadata sources to precisely verify titles, years, and episode numbers - so you only ever see the right content. Can be applied per-addon or per-content type.
-- **Smart Deduplication**: Detect duplicate streams by filename, infohash, or a "smart detect" hash computed from a configurable set of file attributes (size, resolution, encode, release group, etc.).
+- Resolution, quality, encode, HDR/DV, audio, language, size, bitrate, seeders, age, cache status, and stream-type filtering
+- Keyword and regex filters
+- Stream Expression Language support
+- Content-aware matching
+- Smart deduplication by filename, infohash, size, and other stream properties
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4bab4c2c-a47a-482b-a623-079fc792dc33" alt="Filtering Configuration" width="750"/>
+  <img src="https://github.com/user-attachments/assets/4bab4c2c-a47a-482b-a623-079fc792dc33" alt="Filtering Configuration" width="750" />
 </p>
 
 ### 📊 Powerful Sorting
 
-Build your ideal sort order from a wide range of criteria - resolution, quality, encode, language, audio, visual tags, stream type, cache status, seeders, size, bitrate, service, addon, age, and more. Sorting is:
-
-- **Fully Customisable**: Stack any number of criteria in any order.
-- **Content-Aware**: Define separate sort orders for movies, series, and anime, and separate rules for cached vs. uncached results.
-- **Expression/Regex Scored**: Use Stream Expressions / Regex Patterns to compute a numeric score per stream and sort by that score for maximum precision.
-- **Preferred Lists**: Define ranked lists of preferred values (e.g. prefer `HDR10+` over `HDR` over `SDR`) and have the sorter use those rankings automatically.
-
-Full guide: [docs.aiostreams.viren070.me/guides/scored-sorting](https://docs.aiostreams.viren070.me/guides/scored-sorting)
+- Stack multiple sort criteria in any order
+- Different rules for movies, series, and anime
+- Separate cached/uncached logic
+- Expression/regex scoring and preferred-value lists
 
 <p align="center">
-    <img width="920" alt="image" src="https://github.com/user-attachments/assets/88eb560d-d95d-4964-93ed-7b6b82c861b9" />
+  <img src="https://github.com/user-attachments/assets/88eb560d-d95d-4964-93ed-7b6b82c861b9" alt="AIOStreams sorting configuration" width="920" />
 </p>
 
 ### 🎨 Custom Stream Formatter
 
-Design exactly how stream information appears in Stremio using a powerful templating system.
-
-- **Live Preview**: See exactly what your streams will look like as you build your template.
-- **Built-in Formats**: Start from one of the included presets - some are built in, others are inspired by popular addons and community contributions.
-- **Full Customisation**: The template system gives you access to every parsed stream attribute. See the [Custom Formatter reference](https://docs.aiostreams.viren070.me/reference/custom-formatter) for the full variable and function list.
+- Live preview
+- Built-in and community-inspired formats
+- Formatter access to parsed stream attributes
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/44ba6860-6778-4f0f-a192-e3f28df6b893" alt="Custom Formatter" width="900"/>
+  <img src="https://github.com/user-attachments/assets/44ba6860-6778-4f0f-a192-e3f28df6b893" alt="Custom Stream Formatter" width="900" />
 </p>
 
 ### 🗃️ Unified Catalog Management
 
-Take control of your Stremio home page from one place.
+- Rename, reorder, disable, shuffle, and merge catalogs
+- Enhanced poster support
+- Unified catalog control from one configuration
 
-- **Rename**: Rename any catalog's title or type to whatever you want.
-- **Reorder & Disable**: Drag catalogs into your preferred order or hide the ones you don't use.
-- **Shuffle**: Discover new content by shuffling the results of any catalog. You can persist the shuffle for a set period.
-- **Enhanced Posters**: Automatically upgrade catalog posters with high-quality artwork from supported poster services (e.g. [RPDB](https://rpdb.net/)) - even for addons that don't natively support it.
-- **Merged Catalogs**: Combine results from multiple catalogs into one unified catalog.
-
-<p align="center"> 
-    <img width="900"  alt="image" src="https://github.com/user-attachments/assets/24d2ea64-f742-48f0-8552-bb8a62f61a75" />
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/24d2ea64-f742-48f0-8552-bb8a62f61a75" alt="Unified Catalog Management" width="900" />
 </p>
 
 ### 🛡️ Proxy Support
 
-- **Built-in Proxy**: AIOStreams includes its own proxy for forwarding streams.
-- **External Proxy**: Integrate with [MediaFlow Proxy](https://github.com/mhdzumair/mediaflow-proxy) or [StremThru](https://github.com/MunifTanjim/stremthru) by providing your instance URL and credentials.
-- **Bypass IP Restrictions**: Essential for debrid services that restrict simultaneous connections from different IP addresses.
-- **NZB Proxying**: The built-in proxy can also forward NZB download requests for the Newznab built-in addon.
-- **Outgoing Request Proxy**: Route AIOStreams' own requests to upstream addons through an HTTP/SOCKS5 proxy - useful when your server's IP is blocked by an upstream service.
+- Built-in stream proxy
+- MediaFlow Proxy and StremThru compatibility
+- NZB proxying
+- Outgoing HTTP/SOCKS5 request proxy support
 
 ---
 
 ## 🚀 Getting Started
 
-1. **Choose how to run it**
-   - **Public Instance**: Use a [community-hosted instance](https://docs.aiostreams.viren070.me/getting-started/public-instances) - free, no setup required.
-   - **Self-Host**: Run it yourself with Docker for full control and no limits.
-   - **Managed Hosting**: Use a managed AIOStreams instance via **[ElfHosted](https://store.elfhosted.com/product/aiostreams/?utm_source=github&utm_medium=readme&utm_campaign=aiostreams-readme)** (ElfHosted are a project sponsor).
+1. **Deploy this fork**
+   - Self-host from this repository or pull the fork image from **`ghcr.io/cxsmo-ai/aiostreams:latest`**.
+   - GHCR package page: [Cxsmo-ai/AIOStreams / aiostreams](https://github.com/Cxsmo-ai/AIOStreams/pkgs/container/aiostreams)
 
-2. **Configure your addon**
-   - Open the `/stremio/configure` page of your instance in a browser.
-   - Add your debrid or Usenet credentials, install addons from the marketplace, and set up your filters, sorting, and formatting.
+2. **Open the configuration page**
+   - Go to `/stremio/configure` on your instance.
 
-3. **Create your user**
-   - On the **Save & Install** page, enter a password to protect your configuration
+3. **Configure services and addons**
+   - Add the debrid and/or Usenet services you use.
+   - Enable built-in or external addons and configure filtering, sorting, catalogs, subtitles, and formatting.
 
-4. **Install the addon**
-   - Use the Installation Options provided to install the addon to whatever app you are using.
+4. **Save and install**
+   - Create or protect your configuration, then use the provided installation options for your Stremio-compatible client.
 
-For full setup and configuration instructions, see the **[documentation](https://docs.aiostreams.viren070.me)**.
-
----
-
-## ❤️ Support the Project
-
-AIOStreams is a passion project developed and maintained for free. If you find it useful, please consider:
-
-- ⭐ **[Star the repository](https://github.com/Cxsmo-ai/AIOStreams)** on GitHub.
-- ⭐ **[Star the addon](https://stremio-addons.net/addons/aiostreams)** in the Stremio Community Catalog.
-- 🤝 **Contribute**: Report issues, suggest features, or submit pull requests.
-- ☕ **Donate**:
-  - **[Ko-fi](https://ko-fi.com/viren070)**
-  - **[GitHub Sponsors](https://github.com/sponsors/Viren070)**
+> [!NOTE]
+> Upstream documentation remains useful for core AIOStreams behavior: [docs.aiostreams.viren070.me](https://docs.aiostreams.viren070.me). Fork-specific behavior may differ where this repository extends or overrides upstream integrations.
 
 ---
 
-<h2 align="center">⭐ Star History</h2>
+<a id="deepbrid-support"></a>
+
+## 🎁 Support This Fork — Deepbrid Referral
+
+This fork is free and open-source. If you already plan to **sign up for Deepbrid or renew/purchase a Deepbrid plan**, using the referral link below is a simple way to support continued development of the custom TorrentClaw, Deepbrid, Usenet, resolver, catalog, subtitle, and performance work in this repository.
+
+### 👉 [Sign Up / Continue to Deepbrid](https://www.deepbrid.com/aff/go/pickymarker4906) 👈
+
+> [!IMPORTANT]
+> **Affiliate disclosure:** the Deepbrid link above is an affiliate/referral link. If your purchase qualifies, the maintainer of this fork may receive a referral commission. Using it does not change the purpose or licensing of this open-source project.
+
+### How to make sure the referral is recognized
+
+1. Open an Incognito/Private window or clear old Deepbrid referral cookies if needed.
+2. Click the referral link immediately before signing in or creating your account.
+3. Complete your Deepbrid purchase in the same browsing session when possible.
+
+### Sharing this project on Reddit or forums
+
+If a community filters raw affiliate URLs, link people to this README section instead:
+
+```text
+https://github.com/Cxsmo-ai/AIOStreams#deepbrid-support
+```
+
+That lets readers see the disclosure and referral instructions before choosing whether to use the link.
+
+---
+
+## ❤️ Support This Fork
+
+If you want to support **this custom fork** and its continued development:
+
+- ⭐ **[Star Cxsmo-ai/AIOStreams](https://github.com/Cxsmo-ai/AIOStreams)**
+- 📦 **[Use the Cxsmo-ai GHCR image](https://github.com/Cxsmo-ai/AIOStreams/pkgs/container/aiostreams)**
+- 👑 **[Support me on Throne](https://throne.com/cxsmo)**
+- 🎁 **[Use the Deepbrid referral link](https://www.deepbrid.com/aff/go/pickymarker4906)** if you already plan to purchase or renew Deepbrid
+- 🤝 Open issues or contribute improvements directly to this repository
+
+> [!NOTE]
+> All support links above are for **this custom fork / Cxsmo**. This README does not include donation, sponsor, or fundraising links for the upstream project. Upstream AIOStreams is credited below strictly for attribution to the original codebase and architecture.
+
+---
+
+<h2 align="center">⭐ Fork Star History</h2>
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=Cxsmo-ai/AIOStreams&type=Date" href="https://www.star-history.com/#Cxsmo-ai/AIOStreams&Date" alt="Star History" width="750"/>
+  <img src="https://api.star-history.com/svg?repos=Cxsmo-ai/AIOStreams&type=Date" alt="Cxsmo-ai/AIOStreams Star History" width="750" />
 </p>
+
+---
+
+## 🙏 Credits & Attribution
+
+### Upstream foundation
+
+This fork is derived from **[Viren070/AIOStreams](https://github.com/Viren070/AIOStreams)** and therefore retains attribution to that project and its contributors. The upstream codebase provides the original AIOStreams architecture, configuration system, aggregation pipeline, filtering/sorting/formatting framework, service abstractions, catalog system, proxy features, UI foundations, and other core components this fork extends.
+
+This attribution is provided to clearly identify the origin of the codebase. **Cxsmo-ai/AIOStreams is a separate custom fork with its own integrations, behavior, packaging, releases, and support links.**
+
+### Custom fork work
+
+**[Cxsmo-ai/AIOStreams](https://github.com/Cxsmo-ai/AIOStreams)** maintains the fork-specific integration and behavior described above, including the deeper TorrentClaw, Deepbrid, TorBox, Usenet/indexer, resolver-routing, catalog, metadata, subtitle, performance, quota, proxy, and source-preservation work.
+
+### Services, addons & ecosystem projects
+
+This fork interoperates with or builds integration logic around services and projects including **TorrentClaw, Deepbrid, TorBox, Newshosting, Easynews, altHUB, Prowlarr, Unarr, Stremio, IMDb, TMDB, OpenSubtitles, NzbDAV, AltMount, MediaFlow Proxy, and StremThru**. Their names and trademarks belong to their respective owners. Inclusion here does not imply endorsement, sponsorship, or affiliation unless explicitly stated by the respective project/service.
+
+### Upstream/open-source acknowledgements retained
+
+Special thanks to the projects credited by upstream AIOStreams and to the wider open-source ecosystem it builds on:
+
+- [5rahim/seanime](https://github.com/5rahim/seanime) — UI components and issue-template inspiration/adaptation credited by upstream
+- [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav)
+- [javi11/altmount](https://github.com/javi11/altmount)
+- [Sanket9225/UsenetStreamer](https://github.com/Sanket9225/UsenetStreamer/) — inspiration for NzbDAV/AltMount integration credited by upstream
+- [sleeyax/stremio-easynews-addon](https://github.com/sleeyax/stremio-easynews-addon) — initial-structure inspiration credited by upstream
+- [diced/zipline](https://github.com/diced/zipline) — formatter-system inspiration/adaptation credited by upstream
+- [silentmatt/expr-eval](https://github.com/silentmatt/expr-eval) — powers the Stream Expression Language
+- Every addon, indexer, provider, library, contributor, tester, and upstream maintainer whose work makes the AIOStreams ecosystem possible
+
+If a credit or attribution is missing, please open an issue so it can be corrected.
 
 ---
 
 ## ⚠️ Disclaimer
 
-AIOStreams is a tool for aggregating and managing data from other Stremio addons. It does not host, store, or distribute any content. The developer does not endorse or promote access to copyrighted content. Users are solely responsible for complying with all applicable laws and the terms of service of any addons or services they use with AIOStreams.
+This project is an aggregation, configuration, and interoperability tool. It does **not** host, store, or distribute media content itself. Users are responsible for complying with applicable laws and with the terms of the services, indexers, addons, providers, and content sources they configure.
 
-## 🙏 Credits
+This community fork is **not affiliated with or endorsed by Stremio, Deepbrid, TorBox, TorrentClaw, IMDb, TMDB, OpenSubtitles, or other third-party services mentioned in this README**, unless explicitly stated otherwise.
 
-This project wouldn't be possible without the foundational work of many others in the community, especially those who develop the addons that AIOStreams integrates. Special thanks to the developers of all integrated addons, the creators of [mhdzumair/mediaflow-proxy](https://github.com/mhdzumair/mediaflow-proxy) and [MunifTanjim/stremthru](https://github.com/MunifTanjim/stremthru), and the open-source projects that inspired parts of AIOStreams' design:
-
-- UI components and issue templates adapted with permission from [5rahim/seanime](https://github.com/5rahim/seanime)
-- [NzbDAV](https://github.com/nzbdav-dev/nzbdav) & [AltMount](https://github.com/javi11/altmount) integration inspired by [Sanket9225/UsenetStreamer](https://github.com/Sanket9225/UsenetStreamer/)
-- [sleeyax/stremio-easynews-addon](https://github.com/sleeyax/stremio-easynews-addon) for the project's initial structure
-- Custom formatter system inspired by and adapted from [diced/zipline](https://github.com/diced/zipline)
-- Stream Expression Language powered by [silentmatt/expr-eval](https://github.com/silentmatt/expr-eval)
+Use third-party credentials, services, and subscriptions only in ways permitted by their respective terms and policies.
