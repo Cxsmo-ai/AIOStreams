@@ -99,8 +99,7 @@ The fork focuses heavily on:
 
 ### ⚡ Usenet & Indexers
 
-- Native **AIOStreams Usenet streaming**
-- **TorBox, Deepbrid, Newshosting, and Easynews NNTP** workflows
+- Better **TorBox, Deepbrid, Newshosting, and Easynews NNTP** workflows
 - Improved altHUB, Easynews, Newshosting, Prowlarr, and TorrentClaw resolving
 - External indexers can resolve through **TorBox**, **Deepbrid**, or native **AIOStreams**
 - Native AIOStreams sources remain available alongside TB and DB results
