@@ -117,18 +117,29 @@ The fork focuses heavily on:
 - Partial results remain visible when individual providers fail
 - Resolver labels and formatting make the final playback path obvious
 
+#### ⚡ TorBox Service Menu
+
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/fbf40e7d-b303-4bef-a43e-5ce3d26684bb" alt="AIOStreams services configuration" width="1500" />
+  <img src="https://media.discordapp.net/attachments/1499673391429320764/1541188108509249556/tobox_service.jpeg?ex=6a8caec6&is=6a8b5d46&hm=fd6e300c9a314a279938658c0d6a8fe096be71dfcde42e4b16c368361ae094e9&=&format=webp&width=2048&height=1302" alt="Cxsmo AIOStreams TorBox service menu" width="1500" />
+</p>
+
+#### 🌐 Services Tab
+
+<p align="center">
+  <img src="https://media.discordapp.net/attachments/1499673391429320764/1541188107729371196/services.jpeg?ex=6a8caec6&is=6a8b5d46&hm=197a0bc6b0be210760bf70cf6c242e0b662cf4b3f0efd751b8037eaf97d59b91&=&format=webp&width=2048&height=1302" alt="Cxsmo AIOStreams Services tab" width="1500" />
 </p>
 
 ### 🎬 Catalogs & Metadata
 
-- Larger parallel multi-page catalogs with infinite scrolling
-- Trending, popular, genre, network, personalized, and service catalogs
-- Watchlist seasons normalize to the complete show
-- IMDb, TMDB, and Stremio metadata compatibility
-- Poster, background, logo, and metadata fallbacks
-- NSFW filtering across titles, descriptions, genres, images, catalogs, and metadata
+- Expanded TorrentClaw catalogs with **larger pagination and infinite scrolling**
+- Separate **TorrentClaw · For You** and **What You Guys Should Watch** catalogs
+- Platform-specific **Top Streaming** catalogs
+- Watchlist season entries normalize back to the **complete show** instead of appearing as separate season items
+- Improved TorrentClaw metadata mapping for titles, years, seasons, episodes, and IDs
+- Better poster, background, logo, description, and metadata fallbacks
+- Improved compatibility across **IMDb, TMDB, Cinemeta, and Stremio metadata**
+- NSFW filtering applied across catalog titles, descriptions, genres, artwork, and metadata
+- Catalog pagination preserves valid entries instead of dropping results between pages
 
 ### 💬 Subtitles
 
@@ -164,7 +175,7 @@ This fork keeps the core AIOStreams experience and UI foundations while extendin
 - Addon categorization and centralized service configuration
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4af785d1-dec3-438b-b62c-5aaf6d3d62c5" alt="Addon Marketplace" width="850" />
+  <img src="https://media.discordapp.net/attachments/1499673391429320764/1541188108127707136/addons.jpeg?ex=6a8caec6&is=6a8b5d46&hm=84baa09a0e2f347006b883e3c941dde63219cddc81eabd2f73f8e021d132e445&=&format=webp&width=2048&height=1215" alt="Cxsmo AIOStreams Addons tab" width="850" />
 
   <img src="https://github.com/user-attachments/assets/fc85afc5-1367-40e0-9018-40002dd0878f" alt="AIOStreams addon configuration" width="850" />
 </p>
