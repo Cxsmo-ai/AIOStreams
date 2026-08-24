@@ -20,6 +20,7 @@ import {
   NZBWithSelectedFile,
   hashNzbUrl,
   getTorboxRouteConfig,
+  getDeepbridPreCacheOptions,
 } from '../debrid/index.js';
 import { processTorrents, processNZBs } from '../builtins/utils/debrid.js';
 import { StreamContext } from '../streams/context.js';
@@ -506,28 +507,17 @@ function buildDebridServices(
     try {
       const credential = getServiceCredential(service);
       if (credential) {
+        const deepbridOptions =
+          service.id === constants.DEEPBRID_SERVICE
+            ? getDeepbridPreCacheOptions(service.credentials)
+            : {};
         debridServices.push({
           id: service.id as BuiltinServiceId,
           credential:
             typeof credential === 'string'
               ? credential
               : JSON.stringify(credential),
-          preCache:
-            service.id === constants.DEEPBRID_SERVICE &&
-            service.credentials?.preCache === 'true',
-          preCacheLimit:
-            service.id === constants.DEEPBRID_SERVICE
-              ? Math.min(
-                  100,
-                  Math.max(
-                    1,
-                    Number.parseInt(
-                      service.credentials?.preCacheLimit ?? '',
-                      10
-                    ) || 24
-                  )
-                )
-              : undefined,
+          ...deepbridOptions,
         });
       }
     } catch (error) {

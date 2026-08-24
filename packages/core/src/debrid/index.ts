@@ -10,6 +10,7 @@ export * from './nzbdav.js';
 export * from './altmount.js';
 export * from './aiostreams.js';
 export * from './deepbrid.js';
+export * from './deepbrid-config.js';
 export * from './service-failure-isolation.js';
 
 import {

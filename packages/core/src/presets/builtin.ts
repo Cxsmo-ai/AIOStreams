@@ -17,6 +17,7 @@ import { Preset } from './preset.js';
 import { releaseKeyKind } from '../release-blocklist/keys.js';
 import { stremthruSpecialCases } from './stremthru.js';
 import { getTorboxRouteConfig } from '../debrid/torbox-config.js';
+import { getDeepbridPreCacheOptions } from '../debrid/deepbrid-config.js';
 import { filterBuiltinServiceIds } from './builtin-services.js';
 
 export class BuiltinStreamParser extends StreamParser {
@@ -312,10 +313,18 @@ export class BuiltinAddonPreset extends Preset {
       torbox: getTorboxRouteConfig(userData),
       // Preserve the global Services order. The deduplicator uses this order
       // to choose between equivalent TorBox and Deepbrid Usenet resolutions.
-      services: supportedServices.map((service) => ({
-        id: service,
-        credential: this.getServiceCredential(service, userData),
-      })),
+      services: supportedServices.map((service) => {
+        const savedService = userData.services?.find(
+          (candidate) => candidate.id === service
+        );
+        return {
+          id: service,
+          credential: this.getServiceCredential(service, userData),
+          ...(service === constants.DEEPBRID_SERVICE
+            ? getDeepbridPreCacheOptions(savedService?.credentials)
+            : {}),
+        };
+      }),
       cacheAndPlay: userData.cacheAndPlay,
       autoRemoveDownloads: userData.autoRemoveDownloads,
       checkOwned: userData.checkOwned ?? true,

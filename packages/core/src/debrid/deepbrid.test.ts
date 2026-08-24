@@ -184,8 +184,16 @@ function fakeDeepbridApi(): DeepbridOfficialApi {
   };
 }
 
-test('Deepbrid service recognizes an already-owned external NZB', async () => {
-  const service = new DeepbridService({ token: 'test' }, fakeDeepbridApi());
+test('Deepbrid service recognizes and verifies an already-owned external NZB', async () => {
+  let probeCalls = 0;
+  const service = new DeepbridService(
+    { token: 'owned-check-test-token' },
+    fakeDeepbridApi(),
+    async () => {
+      probeCalls++;
+      return true;
+    }
+  );
   const [result] = await service.checkNzbs([
     {
       name: 'Tower Prep S01',
@@ -197,6 +205,54 @@ test('Deepbrid service recognizes an already-owned external NZB', async () => {
   assert.equal(result.status, 'cached');
   assert.equal(result.library, true);
   assert.equal(result.hash, 'external-hash');
+  assert.equal(probeCalls, 2);
+});
+
+test('Deepbrid without pre-cache omits bad owned uploads but keeps uncached NZBs on demand', async () => {
+  const client = fakeDeepbridApi();
+  client.listUploads = async () => [
+    {
+      id: 'bad-existing-upload',
+      title: 'Bad existing upload',
+      source: 'url',
+      sourceUrl: 'https://indexer.example/bad-existing.nzb',
+    },
+  ];
+  client.getUploadInfo = async () => ({
+    id: 'bad-existing-upload',
+    title: 'Bad existing upload',
+    files: [
+      {
+        name: 'Bad.Existing.Upload.1080p.mkv',
+        link: 'https://usenet.myfast.link/generated-error',
+        size: 4_000_000_000,
+        sizeHuman: '4 GB',
+      },
+    ],
+  });
+  const service = new DeepbridService(
+    { token: 'owned-negative-test-token' },
+    client,
+    async () => false
+  );
+
+  const results = await service.checkNzbs([
+    {
+      name: 'Bad existing upload',
+      hash: 'bad-existing-hash',
+      nzb: 'https://indexer.example/bad-existing.nzb',
+    },
+    {
+      name: 'Uncached release',
+      hash: 'uncached-on-demand-hash',
+      nzb: 'https://indexer.example/uncached-on-demand.nzb',
+    },
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => ({ hash: result.hash, status: result.status })),
+    [{ hash: 'uncached-on-demand-hash', status: 'queued' }]
+  );
 });
 
 test('Deepbrid torrent library is read-only and matches only account torrents', async () => {

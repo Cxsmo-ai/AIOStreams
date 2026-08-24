@@ -516,22 +516,30 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       library: Boolean(owned),
     });
 
-    if (!this.preCache) {
-      return nzbs.map((nzb) => resultForOwned(nzb, findOwned(nzb)));
-    }
-
-    // Pre-cache mode is deliberately opt-in. Only verified, playable uploads
-    // are emitted, and the bounded queue prevents a broad indexer scrape from
-    // filling the account with hundreds of unplayed NZBs.
+    // A DB lightning bolt is always a playback guarantee. Verify uploads that
+    // Deepbrid already owns even when pre-cache is disabled; older installed
+    // addon configs may not carry the newer pre-cache flag, and API metadata
+    // alone can point at a generated error video. The toggle controls only
+    // whether new external NZBs are submitted to the account.
     const ownedCandidates = nzbs
       .map((nzb) => ({ nzb, owned: findOwned(nzb) }))
       .filter(
         (item): item is { nzb: (typeof nzbs)[number]; owned: DeepbridUpload } =>
           Boolean(item.owned)
       );
-    const candidates = nzbs
-      .filter((nzb) => Boolean(nzb.nzb) && !findOwned(nzb))
-      .slice(0, this.preCacheLimit);
+    const candidates = this.preCache
+      ? nzbs
+          .filter((nzb) => Boolean(nzb.nzb) && !findOwned(nzb))
+          .slice(0, this.preCacheLimit)
+      : [];
+    // Without pre-cache, uncached results remain on-demand DB sources. They
+    // intentionally keep queued status (hourglass), never a false lightning
+    // bolt, and resolve through the normal add-on-click path.
+    const queued = this.preCache
+      ? []
+      : nzbs
+          .filter((nzb) => !findOwned(nzb))
+          .map((nzb) => resultForOwned(nzb));
     const verified: DebridDownload[] = [];
     const work = [
       ...ownedCandidates.map((item) => ({ type: 'owned' as const, ...item })),
@@ -576,7 +584,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     // a promise to try uploading after the click. Keep failed/rate-limited
     // candidates available through their native AIO and TorBox siblings, but
     // do not advertise an unverified Deepbrid playback URL.
-    return verified;
+    return [...verified, ...queued];
   }
 
   private async preCacheExternalNzb(
