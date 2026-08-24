@@ -315,7 +315,8 @@ test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
 
   const service = new DeepbridService(
     { token: 'pre-cache', preCache: true, preCacheLimit: 1 },
-    client
+    client,
+    async () => true
   );
   const [result] = await service.checkNzbs([
     {
@@ -356,7 +357,8 @@ test('Deepbrid pre-cache omits failed candidates while retaining verified ones',
 
   const service = new DeepbridService(
     { token: 'pre-cache-partial', preCache: true, preCacheLimit: 2 },
-    client
+    client,
+    async () => true
   );
   const results = await service.checkNzbs([
     {
@@ -378,6 +380,7 @@ test('Deepbrid pre-cache omits failed candidates while retaining verified ones',
 
 test('Deepbrid pre-cache verifies owned uploads and omits generated error videos', async () => {
   const client = fakeDeepbridApi();
+  let probeCalls = 0;
   client.listUploads = async () => [
     {
       id: 'bad-owned-upload',
@@ -393,15 +396,21 @@ test('Deepbrid pre-cache verifies owned uploads and omits generated error videos
       {
         name: 'The.Hawk.S01E06.1080p.mkv',
         link: 'https://usenet.myfast.link/generated-error',
-        size: 19_276,
-        sizeHuman: '19 KB',
+        // Deepbrid metadata can advertise the release size while the actual
+        // ranged link serves a tiny generated error video.
+        size: 5_476_083_302,
+        sizeHuman: '5.1 GB',
       },
     ],
   });
 
   const service = new DeepbridService(
     { token: 'verify-bad-owned', preCache: true, preCacheLimit: 1 },
-    client
+    client,
+    async () => {
+      probeCalls++;
+      return false;
+    }
   );
   const results = await service.checkNzbs([
     {
@@ -412,6 +421,7 @@ test('Deepbrid pre-cache verifies owned uploads and omits generated error videos
   ]);
 
   assert.deepEqual(results, []);
+  assert.equal(probeCalls, 1);
 });
 
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {
