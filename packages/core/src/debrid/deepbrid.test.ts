@@ -290,12 +290,16 @@ test('Deepbrid library playback resolves the exact requested multi-file link', a
 
 test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   const client = fakeDeepbridApi();
+  let receivedSignal = false;
   client.listUploads = async () => [];
-  client.addNzbUrl = async () => ({
-    id: 'pre-cached-upload',
-    title: 'External release',
-    files: [],
-  });
+  client.addNzbUrl = async (_url, options) => {
+    receivedSignal = options?.signal instanceof AbortSignal;
+    return {
+      id: 'pre-cached-upload',
+      title: 'External release',
+      files: [],
+    };
+  };
   client.getUploadInfo = async () => ({
     id: 'pre-cached-upload',
     title: 'External release',
@@ -325,6 +329,7 @@ test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   assert.equal(result.status, 'cached');
   assert.equal(result.library, true);
   assert.equal(result.files?.[0]?.name, 'External.Release.S01E04.1080p.mkv');
+  assert.equal(receivedSignal, true);
 });
 
 test('Deepbrid pre-cache omits failed candidates while retaining verified ones', async () => {

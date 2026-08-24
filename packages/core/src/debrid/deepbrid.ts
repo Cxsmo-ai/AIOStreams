@@ -19,7 +19,6 @@ import {
   isLikelyDeepbridVideoName,
 } from '../builtins/deepbrid-usenet/client.js';
 import { createHash } from 'node:crypto';
-import pLimit from 'p-limit';
 
 const logger = createLogger('debrid:deepbrid');
 
@@ -35,6 +34,9 @@ const MIN_DEEPBRID_PLAYABLE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_DEEPBRID_PRECACHE_LIMIT = 24;
 const DEEPBRID_PRECACHE_ATTEMPTS = 8;
 const DEEPBRID_PRECACHE_INTERVAL_MS = 1_000;
+const DEEPBRID_PRECACHE_TOTAL_BUDGET_MS = 10_000;
+const DEEPBRID_UPLOAD_LOOKUP_BUDGET_MS = 2_500;
+const DEEPBRID_PRECACHE_CONCURRENCY = 3;
 
 export interface DeepbridResolvedFile {
   name: string;
@@ -123,7 +125,11 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted)
     return Promise.reject(signal.reason ?? new Error('aborted'));
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
+    const onComplete = () => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    const timer = setTimeout(onComplete, ms);
     const onAbort = () => {
       clearTimeout(timer);
       reject(signal?.reason ?? new Error('aborted'));
@@ -330,9 +336,16 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
   async checkNzbs(
     nzbs: { name?: string; hash?: string; nzb?: string }[]
   ): Promise<DebridDownload[]> {
+    const preCacheDeadline = Date.now() + DEEPBRID_PRECACHE_TOTAL_BUDGET_MS;
     let uploads: DeepbridUpload[] = [];
     try {
-      uploads = await this.getUploads();
+      // Account discovery improves cached reuse but is not allowed to hold an
+      // external-indexer scrape open. The in-flight request continues filling
+      // the shared cache if this caller moves on after the short lookup budget.
+      uploads = await Promise.race([
+        this.getUploads(),
+        abortableDelay(DEEPBRID_UPLOAD_LOOKUP_BUDGET_MS).then(() => []),
+      ]);
     } catch (error) {
       // Cache discovery is optional; a transient failure must not hide sources.
       if (
@@ -391,13 +404,28 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     const candidates = nzbs
       .filter((nzb) => Boolean(nzb.nzb) && !findOwned(nzb))
       .slice(0, this.preCacheLimit);
-    const limit = pLimit(3);
-    const precached = await Promise.all(
-      candidates.map((nzb) => limit(() => this.preCacheExternalNzb(nzb)))
+    const verified: DebridDownload[] = [];
+    let nextCandidate = 0;
+    const workers = Array.from(
+      {
+        length: Math.min(DEEPBRID_PRECACHE_CONCURRENCY, candidates.length),
+      },
+      async () => {
+        while (Date.now() < preCacheDeadline) {
+          const candidateIndex = nextCandidate++;
+          if (candidateIndex >= candidates.length) return;
+          const remainingMs = preCacheDeadline - Date.now();
+          if (remainingMs <= 0) return;
+          const signal = AbortSignal.timeout(remainingMs);
+          const result = await this.preCacheExternalNzb(
+            candidates[candidateIndex],
+            signal
+          );
+          if (result) verified.push(result);
+        }
+      }
     );
-    const verified = precached.filter(
-      (item): item is DebridDownload => Boolean(item)
-    );
+    await Promise.allSettled(workers);
     // In pre-cache mode a DB lightning-bolt entry is a playback guarantee, not
     // a promise to try uploading after the click. Keep failed/rate-limited
     // candidates available through their native AIO and TorBox siblings, but
@@ -405,18 +433,22 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     return [...ownedResults, ...verified];
   }
 
-  private async preCacheExternalNzb(nzb: {
-    name?: string;
-    hash?: string;
-    nzb?: string;
-  }): Promise<DebridDownload | undefined> {
+  private async preCacheExternalNzb(
+    nzb: {
+      name?: string;
+      hash?: string;
+      nzb?: string;
+    },
+    signal?: AbortSignal
+  ): Promise<DebridDownload | undefined> {
     if (!nzb.nzb) return undefined;
     try {
-      const added = await this.client.addNzbUrl(nzb.nzb);
+      const added = await this.client.addNzbUrl(nzb.nzb, { signal });
       if (!added.id) return undefined;
 
       for (let attempt = 0; attempt < DEEPBRID_PRECACHE_ATTEMPTS; attempt++) {
-        const info = await this.client.getUploadInfo(added.id);
+        if (signal?.aborted) return undefined;
+        const info = await this.client.getUploadInfo(added.id, { signal });
         const playable = info.files.filter(
           (file) =>
             isDeepbridVideoName(file.name) &&
@@ -439,7 +471,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
           };
         }
         if (attempt < DEEPBRID_PRECACHE_ATTEMPTS - 1) {
-          await abortableDelay(DEEPBRID_PRECACHE_INTERVAL_MS);
+          await abortableDelay(DEEPBRID_PRECACHE_INTERVAL_MS, signal);
         }
       }
     } catch (error) {
