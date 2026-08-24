@@ -10,6 +10,7 @@ import {
   requireDeepbridApiKey,
 } from './addon.js';
 import {
+  DeepbridRequestSigner,
   isDeepbridArchiveName,
   isDeepbridStorageHost,
   isTrustedDeepbridDownloadHost,
@@ -59,6 +60,39 @@ test('Deepbrid addon requires the global service credential', () => {
     requireDeepbridApiKey({ services: [], apiKey: 'x'.repeat(32) }),
     'x'.repeat(32)
   );
+});
+
+test('signs Finder paths with deterministic timestamp and nonce headers', () => {
+  const signer = new DeepbridRequestSigner({
+    now: () => 1_750_000_000_000,
+    random: () => 'abcdefgh',
+    secret: '0123456789abcdef'.repeat(4),
+  });
+  assert.deepEqual(
+    signer.sign(
+      'GET',
+      '/usenet/finder/search?q=The+Mentalist+S01E04&offset=0&limit=50'
+    ),
+    {
+      'X-DB-Ts': '1750000000',
+      'X-DB-Nonce': 'sxwkn40abcdefgh',
+      'X-DB-Sig':
+        '3684c92634f4e61e2432d0bc9d85a63ebfc52ffacae6aef62351ff65a225a7c3',
+    }
+  );
+});
+
+test('corrects Finder signatures using the server Date header', () => {
+  const signer = new DeepbridRequestSigner({
+    now: () => 1_750_000_000_000,
+    random: () => 'abcdefgh',
+    secret: '0123456789abcdef'.repeat(4),
+  });
+  assert.equal(
+    signer.noteServerDate(new Date(1_750_000_012_000).toUTCString()),
+    true
+  );
+  assert.equal(signer.sign('GET', '/test')['X-DB-Ts'], '1750000012');
 });
 
 const parserAddon: Addon = {

@@ -1,10 +1,7 @@
 import { z } from 'zod';
 import pLimit from 'p-limit';
 import { ParsedId } from '../../utils/id-parser.js';
-import {
-  constants,
-  createLogger,
-} from '../../utils/index.js';
+import { constants, createLogger } from '../../utils/index.js';
 import { IdParser } from '../../utils/id-parser.js';
 import { Stream } from '../../db/index.js';
 import {
@@ -467,6 +464,9 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     const finderResults = searched.flatMap((entry) =>
       entry.status === 'fulfilled' ? entry.value : []
     );
+    if (searched.every((entry) => entry.status === 'rejected')) {
+      throw searched[0].reason;
+    }
     const seen = new Set<string>();
     const ranked = finderResults
       .filter((item) => !seen.has(item.token) && seen.add(item.token))
@@ -504,7 +504,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     // Older generated addon configs defaulted to three workers. Keep those
     // configs fast after an upgrade while retaining the hard safety cap.
     const resolveConcurrency = Math.max(
-      10,
+      1,
       Math.min(10, this.userData.resolveConcurrency)
     );
     const resolved = await resolveDeepbridFiles(candidates, media, {
@@ -628,6 +628,9 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     const finderResults = searched.flatMap((entry) =>
       entry.status === 'fulfilled' ? entry.value : []
     );
+    if (searched.every((entry) => entry.status === 'rejected')) {
+      throw searched[0].reason;
+    }
     const seen = new Set<string>();
     const ranked = finderResults
       .filter((item) => !seen.has(item.token) && seen.add(item.token))
@@ -646,7 +649,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     );
 
     const resolveConcurrency = Math.max(
-      10,
+      1,
       Math.min(10, this.userData.resolveConcurrency)
     );
     const resolved = await resolveDeepbridFiles(candidates, media, {

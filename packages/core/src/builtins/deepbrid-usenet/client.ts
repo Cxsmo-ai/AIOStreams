@@ -1,10 +1,64 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { makeRequest } from '../../utils/index.js';
 
 export const DEEPBRID_API_BASE = 'https://www.deepbrid.com/api/v1';
 export const DEEPBRID_FINDER_USER_AGENT =
-  'Deepbrid/1.0 (ios) DBX/k9Q4mZ2xV7bN1pR8sT3wY6cH0jL5dF';
+  'Deepbrid/1.0 (ios) DBX/AxkHbkTtYiXSijpzcRE5vGe73HK7qqrinpEz';
 export const DEEPBRID_AIOSTREAMS_USER_AGENT = 'AIOStreams Deepbrid integration';
+
+export interface DeepbridSigningDependencies {
+  now?: () => number;
+  random?: () => string;
+  secret?: string;
+}
+
+export class DeepbridRequestSigner {
+  private counter = 0;
+  private serverOffsetMs = 0;
+  private readonly now: () => number;
+  private readonly random: () => string;
+  private readonly secret: string;
+
+  constructor(dependencies: DeepbridSigningDependencies = {}) {
+    this.now = dependencies.now ?? Date.now;
+    this.random =
+      dependencies.random ?? (() => randomBytes(6).toString('hex').slice(0, 8));
+    const secret =
+      dependencies.secret || process.env.DEEPBRID_FINDER_SIGNING_SECRET;
+    if (!secret) {
+      throw new Error(
+        'Deepbrid Finder request signing is not configured on this server.'
+      );
+    }
+    this.secret = secret;
+  }
+
+  sign(method: string, path: string): Record<string, string> {
+    const timestamp = Math.floor((this.now() + this.serverOffsetMs) / 1000);
+    const nonce = `${timestamp.toString(36)}${(this.counter++).toString(
+      36
+    )}${this.random().slice(0, 8)}`;
+    const canonical = `${method.toUpperCase()}\n${path}\n${timestamp}\n${nonce}`;
+    return {
+      'X-DB-Ts': String(timestamp),
+      'X-DB-Nonce': nonce,
+      'X-DB-Sig': createHmac('sha256', this.secret)
+        .update(canonical)
+        .digest('hex'),
+    };
+  }
+
+  noteServerDate(value: string | null): boolean {
+    if (!value) return false;
+    const serverDate = Date.parse(value);
+    if (!Number.isFinite(serverDate)) return false;
+    const offset = serverDate - this.now();
+    if (Math.abs(offset) <= 5_000) return false;
+    this.serverOffsetMs = offset;
+    return true;
+  }
+}
 
 const ResultSchema = z.looseObject({
   token: z.coerce.string().min(1),
@@ -507,16 +561,15 @@ export class DeepbridOfficialClient {
     const value =
       json.torrent && typeof json.torrent === 'object'
         ? json.torrent
-        : json.data && !Array.isArray(json.data) && typeof json.data === 'object'
+        : json.data &&
+            !Array.isArray(json.data) &&
+            typeof json.data === 'object'
           ? json.data
           : json;
     return this.parseTorrent(value, id)[0];
   }
 
-  private parseTorrent(
-    value: unknown,
-    fallbackId?: string
-  ): DeepbridTorrent[] {
+  private parseTorrent(value: unknown, fallbackId?: string): DeepbridTorrent[] {
     if (!value || typeof value !== 'object') return [];
     const item = value as Record<string, unknown>;
     const id = item.id ?? item.torrent_id ?? item.torrentId ?? fallbackId;
@@ -530,7 +583,8 @@ export class DeepbridOfficialClient {
       (v): v is string => typeof v === 'string' && v.length > 0
     );
     const rawStatus = item.status ?? item.state ?? '';
-    const status = typeof rawStatus === 'string' ? rawStatus : String(rawStatus);
+    const status =
+      typeof rawStatus === 'string' ? rawStatus : String(rawStatus);
     const progress = Number(item.progress ?? item.percentage ?? 0);
     const size = Number(item.size ?? item.total_size ?? 0);
     const links = Array.isArray(item.links)
@@ -551,19 +605,23 @@ export class DeepbridOfficialClient {
         })
       : [];
     const parsedFiles = parseDeepbridFiles(item);
-    return [{
-      id: String(id),
-      hash,
-      title,
-      status,
-      progress: Number.isFinite(progress) ? progress : undefined,
-      size: Number.isFinite(size) && size > 0 ? size : undefined,
-      files: parsedFiles.length ? parsedFiles : links,
-    }];
+    return [
+      {
+        id: String(id),
+        hash,
+        title,
+        status,
+        progress: Number.isFinite(progress) ? progress : undefined,
+        size: Number.isFinite(size) && size > 0 ? size : undefined,
+        files: parsedFiles.length ? parsedFiles : links,
+      },
+    ];
   }
 }
 
 export class DeepbridFinderClient {
+  private readonly signer = new DeepbridRequestSigner();
+
   constructor(
     private readonly apiKey: string,
     private readonly timeoutMs = 20_000
@@ -573,6 +631,23 @@ export class DeepbridFinderClient {
   }
 
   private async getJson(
+    path: string,
+    options: DeepbridRequestOptions = {}
+  ): Promise<Record<string, unknown>> {
+    try {
+      return await this.getJsonOnce(path, options);
+    } catch (error) {
+      // A stale local clock is indistinguishable from a forbidden signature.
+      // The first response's Date header has already corrected the signer, so
+      // retry once with a new nonce before surfacing the real error.
+      if (error instanceof DeepbridApiError && error.code === 'api_15') {
+        return this.getJsonOnce(path, options);
+      }
+      throw error;
+    }
+  }
+
+  private async getJsonOnce(
     path: string,
     options: DeepbridRequestOptions = {}
   ): Promise<Record<string, unknown>> {
@@ -591,8 +666,10 @@ export class DeepbridFinderClient {
         Accept: 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
         'User-Agent': DEEPBRID_FINDER_USER_AGENT,
+        ...this.signer.sign('GET', path),
       },
     });
+    this.signer.noteServerDate(response.headers.get('date'));
     const text = await response.text();
     const contentType = response.headers.get('content-type') || '';
     if (looksLikeHtml(contentType, text)) {
