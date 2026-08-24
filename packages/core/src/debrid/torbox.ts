@@ -46,8 +46,16 @@ import {
 
 const logger = createLogger('debrid:torbox');
 const TORBOX_NZB_HASH_CACHE_TTL_SECONDS = 24 * 60 * 60;
-const torboxNzbHashEnrichmentLimit = pLimit(4);
+// Content-hash enrichment is optional: URL hashes are checked immediately and
+// every source is still emitted when this background work is skipped. Keep the
+// lane deliberately small because protected indexers may take 15-30 seconds to
+// generate each NZB; a large queue can otherwise saturate the local NZB proxy
+// long after the originating scrape has completed.
+const torboxNzbHashEnrichmentLimit = pLimit(1);
 const torboxNzbHashEnrichmentInFlight = new Map<string, Promise<void>>();
+const torboxNzbHashEnrichmentRetryAt = new Map<string, number>();
+const TORBOX_NZB_HASH_ENRICHMENT_QUEUE_LIMIT = 8;
+const TORBOX_NZB_HASH_ENRICHMENT_RETRY_MS = 15 * 60_000;
 const torboxNzbContentHashCache = Cache.getInstance<string, string[]>(
   'tb:nzb-content-hashes'
 );
@@ -118,14 +126,32 @@ export function resetTorboxAvailabilityLanesForTests(): void {
   torboxAvailabilityLanes.clear();
 }
 
-function scheduleTorboxNzbHashEnrichment(url: string, title?: string): void {
+export function scheduleTorboxNzbHashEnrichment(
+  url: string,
+  title?: string,
+  fetchHashes: typeof fetchTorboxNzbHashes = fetchTorboxNzbHashes
+): boolean {
   const key = getSimpleTextHash(url);
-  if (torboxNzbHashEnrichmentInFlight.has(key)) return;
-  if (torboxNzbHashEnrichmentLimit.pendingCount >= 500) return;
+  const now = Date.now();
+  if (torboxNzbHashEnrichmentInFlight.has(key)) return false;
+  if ((torboxNzbHashEnrichmentRetryAt.get(key) ?? 0) > now) return false;
+  if (
+    torboxNzbHashEnrichmentInFlight.size >=
+    TORBOX_NZB_HASH_ENRICHMENT_QUEUE_LIMIT
+  ) {
+    return false;
+  }
+
+  // Claim the URL before entering p-limit so parallel addon instances cannot
+  // enqueue the same protected download endpoint more than once.
+  torboxNzbHashEnrichmentRetryAt.set(
+    key,
+    now + TORBOX_NZB_HASH_ENRICHMENT_RETRY_MS
+  );
 
   const task = torboxNzbHashEnrichmentLimit(async () => {
     try {
-      const hashes = await fetchTorboxNzbHashes(url);
+      const hashes = await fetchHashes(url);
       await torboxNzbContentHashCache.set(
         key,
         hashes,
@@ -140,8 +166,26 @@ function scheduleTorboxNzbHashEnrichment(url: string, title?: string): void {
     }
   }).finally(() => {
     torboxNzbHashEnrichmentInFlight.delete(key);
+    if (torboxNzbHashEnrichmentRetryAt.size > 4096) {
+      const cutoff = Date.now();
+      for (const [candidateKey, retryAt] of torboxNzbHashEnrichmentRetryAt) {
+        if (retryAt <= cutoff) {
+          torboxNzbHashEnrichmentRetryAt.delete(candidateKey);
+        }
+      }
+    }
   });
   torboxNzbHashEnrichmentInFlight.set(key, task);
+  return true;
+}
+
+export async function waitForTorboxNzbHashEnrichmentsForTests(): Promise<void> {
+  await Promise.allSettled([...torboxNzbHashEnrichmentInFlight.values()]);
+}
+
+export function resetTorboxNzbHashEnrichmentsForTests(): void {
+  torboxNzbHashEnrichmentRetryAt.clear();
+  torboxNzbHashEnrichmentInFlight.clear();
 }
 
 /**

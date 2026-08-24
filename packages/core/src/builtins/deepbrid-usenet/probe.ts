@@ -6,6 +6,17 @@ import {
   validateDeepbridDownloadUrl,
 } from './client.js';
 
+const MIN_PLAUSIBLE_VIDEO_BYTES = 16 * 1024 * 1024;
+
+export function parseDeepbridContentRangeTotal(
+  value: string
+): number | undefined {
+  const match = value.match(/^bytes\s+0-\d+\/(\d+)$/i);
+  if (!match) return undefined;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) ? total : undefined;
+}
+
 function looksLikeVideoBytes(filename: string, bytes: Uint8Array): boolean {
   const extension = filename.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
   if (!extension || bytes.length < 4) return false;
@@ -97,9 +108,11 @@ export async function probeDeepbridVideo(
       continue;
     }
     const contentRange = response.headers.get('content-range') || '';
+    const totalBytes = parseDeepbridContentRangeTotal(contentRange);
     if (
       response.status !== 206 ||
-      !/^bytes\s+0-\d+\/(?:\d+|\*)$/i.test(contentRange) ||
+      totalBytes === undefined ||
+      totalBytes < MIN_PLAUSIBLE_VIDEO_BYTES ||
       !response.body
     ) {
       await response.body?.cancel().catch(() => {});
