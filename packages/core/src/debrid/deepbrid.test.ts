@@ -376,6 +376,44 @@ test('Deepbrid pre-cache omits failed candidates while retaining verified ones',
   assert.equal(results.length, 1);
 });
 
+test('Deepbrid pre-cache verifies owned uploads and omits generated error videos', async () => {
+  const client = fakeDeepbridApi();
+  client.listUploads = async () => [
+    {
+      id: 'bad-owned-upload',
+      title: 'The Hawk S01E06',
+      source: 'url',
+      sourceUrl: 'https://indexer.example/hawk.nzb',
+    },
+  ];
+  client.getUploadInfo = async () => ({
+    id: 'bad-owned-upload',
+    title: 'The Hawk S01E06',
+    files: [
+      {
+        name: 'The.Hawk.S01E06.1080p.mkv',
+        link: 'https://usenet.myfast.link/generated-error',
+        size: 19_276,
+        sizeHuman: '19 KB',
+      },
+    ],
+  });
+
+  const service = new DeepbridService(
+    { token: 'verify-bad-owned', preCache: true, preCacheLimit: 1 },
+    client
+  );
+  const results = await service.checkNzbs([
+    {
+      name: 'The Hawk S01E06',
+      hash: 'hawk-owned-hash',
+      nzb: 'https://indexer.example/hawk.nzb',
+    },
+  ]);
+
+  assert.deepEqual(results, []);
+});
+
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {
   const service = new DeepbridService({ token: 'test' }, fakeDeepbridApi());
   const url = await service.resolve(
