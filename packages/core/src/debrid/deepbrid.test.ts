@@ -9,7 +9,16 @@ import {
   DeepbridApiError,
   parseDeepbridAddResponse,
 } from '../builtins/deepbrid-usenet/client.js';
+import { decodeDeepbridPlaybackToken } from '../builtins/deepbrid-usenet/playback.js';
 import { DebridError } from './base.js';
+
+function proxiedDeepbridTarget(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  const marker = '/builtins/deepbrid-usenet/play/';
+  const remainder = new URL(url).pathname.split(marker)[1];
+  assert.ok(remainder, 'expected an authenticated Deepbrid playback URL');
+  return decodeDeepbridPlaybackToken(remainder.split('/')[0]).url;
+}
 
 test('parses the direct files returned by Deepbrid NZB add', () => {
   const result = parseDeepbridAddResponse({
@@ -283,7 +292,7 @@ test('Deepbrid library playback resolves the exact requested multi-file link', a
   );
 
   assert.equal(
-    link,
+    proxiedDeepbridTarget(link),
     'https://www.deepbrid.com/mytorrents?torrent=1&file=second'
   );
 });
@@ -494,13 +503,16 @@ test('Deepbrid playback reuses the scrape-verified link instead of a refreshed e
     true
   );
 
-  assert.equal(url, 'https://usenet.myfast.link/verified-media');
+  assert.equal(
+    proxiedDeepbridTarget(url),
+    'https://usenet.myfast.link/verified-media'
+  );
   assert.equal(refreshedInfoCalls, 0);
 });
 
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {
   const service = new DeepbridService(
-    { token: 'test' },
+    { token: 'owned-upload-test-token' },
     fakeDeepbridApi(),
     async () => true
   );
@@ -515,7 +527,7 @@ test('Deepbrid service resolves the requested episode from an owned upload', asy
     'Tower Prep S01',
     true
   );
-  assert.equal(url, 'https://usenet.myfast.link/e9');
+  assert.equal(proxiedDeepbridTarget(url), 'https://usenet.myfast.link/e9');
 });
 
 test('Deepbrid service uses playable files returned directly by NZB add', async () => {
@@ -549,7 +561,10 @@ test('Deepbrid service uses playable files returned directly by NZB add', async 
     throw new Error('must not poll when add already returned files');
   };
 
-  const service = new DeepbridService({ token: 'direct-add' }, client);
+  const service = new DeepbridService(
+    { token: 'direct-add-test-token' },
+    client
+  );
   const url = await service.resolve(
     {
       type: 'usenet',
@@ -560,7 +575,10 @@ test('Deepbrid service uses playable files returned directly by NZB add', async 
     'Tower Prep S01',
     true
   );
-  assert.equal(url, 'https://usenet.myfast.link/e9-1');
+  assert.equal(
+    proxiedDeepbridTarget(url),
+    'https://usenet.myfast.link/e9-1'
+  );
   assert.equal(addCalls, 1);
   assert.equal(infoCalls, 0);
 });
@@ -603,7 +621,7 @@ test('Deepbrid service recovers the canonical upload id after a missing-id respo
   };
 
   const service = new DeepbridService(
-    { token: 'recover-id' },
+    { token: 'recover-id-test-token' },
     client,
     async () => true
   );
@@ -617,7 +635,7 @@ test('Deepbrid service recovers the canonical upload id after a missing-id respo
     'Tower Prep S01',
     true
   );
-  assert.equal(url, 'https://usenet.myfast.link/e9');
+  assert.equal(proxiedDeepbridTarget(url), 'https://usenet.myfast.link/e9');
   assert.equal(listCalls, 1);
 });
 

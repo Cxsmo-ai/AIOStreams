@@ -4,13 +4,8 @@ import { ParsedId } from '../../utils/id-parser.js';
 import {
   constants,
   createLogger,
-  decodeSignedPayload,
-  decryptString,
-  encodeSignedPayload,
-  encryptString,
 } from '../../utils/index.js';
 import { IdParser } from '../../utils/id-parser.js';
-import { config as appConfig } from '../../config/index.js';
 import { Stream } from '../../db/index.js';
 import {
   BaseDebridAddon,
@@ -32,11 +27,16 @@ import {
   DeepbridFinderFile,
   DeepbridFinderResult,
   isDeepbridArchiveName,
-  isTrustedDeepbridDownloadHost,
   isDeepbridVideoName,
   validateDeepbridDownloadUrl,
 } from './client.js';
 import { probeDeepbridVideo } from './probe.js';
+import { createDeepbridPlaybackUrl } from './playback.js';
+export {
+  createDeepbridPlaybackToken,
+  decodeDeepbridPlaybackToken,
+  type DeepbridPlaybackPayload,
+} from './playback.js';
 import {
   hasSuccessfulDeepbridProbe,
   rememberSuccessfulDeepbridProbe,
@@ -67,56 +67,6 @@ export function requireDeepbridApiKey(config: DeepbridUsenetConfig): string {
     );
   }
   return config.apiKey;
-}
-
-const CapabilityEnvelopeSchema = z.object({
-  v: z.literal(1),
-  e: z.string().min(32).max(16_384),
-  exp: z.number().int().positive(),
-});
-const PlaybackPayloadSchema = z.object({
-  apiKey: z.string().min(16).max(512),
-  url: z.url(),
-  filename: z.string().min(1).max(512),
-  size: z.number().nonnegative().optional(),
-});
-export type DeepbridPlaybackPayload = z.infer<typeof PlaybackPayloadSchema>;
-
-export function createDeepbridPlaybackToken(
-  payload: DeepbridPlaybackPayload
-): string {
-  const validated = PlaybackPayloadSchema.parse(payload);
-  const target = validateDeepbridDownloadUrl(validated.url);
-  if (!isTrustedDeepbridDownloadHost(target.hostname)) {
-    throw new Error('Untrusted Deepbrid playback host.');
-  }
-  const encrypted = encryptString(JSON.stringify(validated));
-  if (!encrypted.success || !encrypted.data) {
-    throw new Error('Failed to encrypt Deepbrid playback capability.');
-  }
-  return encodeSignedPayload({
-    v: 1,
-    e: encrypted.data,
-    exp: Math.floor(Date.now() / 1_000) + 12 * 60 * 60,
-  });
-}
-
-export function decodeDeepbridPlaybackToken(
-  token: string
-): DeepbridPlaybackPayload {
-  const envelope = CapabilityEnvelopeSchema.parse(decodeSignedPayload(token));
-  if (envelope.exp < Math.floor(Date.now() / 1_000)) {
-    throw new Error('Deepbrid playback capability expired.');
-  }
-  const decrypted = decryptString(envelope.e);
-  if (!decrypted.success || !decrypted.data)
-    throw new Error('Invalid Deepbrid playback capability.');
-  const payload = PlaybackPayloadSchema.parse(JSON.parse(decrypted.data));
-  const target = validateDeepbridDownloadUrl(payload.url);
-  if (!isTrustedDeepbridDownloadHost(target.hostname)) {
-    throw new Error('Untrusted Deepbrid playback host.');
-  }
-  return payload;
 }
 
 function metadataForSearch(metadata: SearchMetadata): NewshostingMediaMetadata {
@@ -606,17 +556,14 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       'Deepbrid Finder resolution completed'
     );
 
-    const base = appConfig.bootstrap.baseUrl.replace(/\/+$/, '');
     return resolved.map(({ result, file, archiveExpanded }) => {
       const target = validateDeepbridDownloadUrl(file.link);
-      const playbackUrl = `${base}/builtins/deepbrid-usenet/play/${createDeepbridPlaybackToken(
-        {
-          apiKey: this.deepbridApiKey,
-          url: target.toString(),
-          filename: file.name,
-          size: file.size || undefined,
-        }
-      )}/${encodeURIComponent(file.name)}`;
+      const playbackUrl = createDeepbridPlaybackUrl({
+        apiKey: this.deepbridApiKey,
+        url: target.toString(),
+        filename: file.name,
+        size: file.size || undefined,
+      });
       return {
         name: '[DB⚡] Deepbrid Usenet',
         title: result.title,

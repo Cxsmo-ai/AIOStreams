@@ -19,6 +19,7 @@ import {
   isLikelyDeepbridVideoName,
 } from '../builtins/deepbrid-usenet/client.js';
 import { probeDeepbridVideo } from '../builtins/deepbrid-usenet/probe.js';
+import { createDeepbridPlaybackUrl } from '../builtins/deepbrid-usenet/playback.js';
 import { createHash } from 'node:crypto';
 
 const logger = createLogger('debrid:deepbrid');
@@ -198,6 +199,19 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
 
   async validateAccount(): Promise<void> {
     await this.client.getUser();
+  }
+
+  private playbackUrl(
+    link: string,
+    filename: string,
+    size?: number
+  ): string {
+    return createDeepbridPlaybackUrl({
+      apiKey: this.apiKey,
+      url: link,
+      filename,
+      size,
+    });
   }
 
   /**
@@ -766,7 +780,9 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
           ? torrent.files[requested]
           : torrent.files.find((item) => item.name === filename) ??
             torrent.files.find((item) => isLikelyDeepbridVideoName(item.name));
-      return file?.link;
+      return file?.link
+        ? this.playbackUrl(file.link, file.name, file.size)
+        : undefined;
     }
     if (playbackInfo.type !== 'usenet') {
       throw new DebridError('Deepbrid service cannot resolve torrents', {
@@ -805,7 +821,8 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
           playbackInfo,
           filename
         );
-        if (directLink) return directLink;
+        if (directLink)
+          return this.playbackUrl(directLink, filename);
         uploadId = added.id;
         if (uploadId) {
           uploadCache.set(cacheKey, {
@@ -847,7 +864,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
         // and fast after a pre-cache scrape.
         const info = await this.getPlayableUploadInfo(uploadId, signal);
         const link = this.selectResolvedFile(info, playbackInfo, filename);
-        if (link) return link;
+        if (link) return this.playbackUrl(link, filename);
       } catch (error) {
         if (error instanceof DebridError) throw error;
         lastError = error;
