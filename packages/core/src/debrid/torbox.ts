@@ -1225,14 +1225,17 @@ export class TorboxDebridService
       target: playback.target,
       fallbackReason: playback.fallbackReason,
     });
-    if (playback.mode === 'native') {
-      await TorboxDebridService.playbackLinkCache.set(
-        cacheKey,
-        playbackLink,
-        appConfig.builtins.debrid.instantAvailabilityCacheTtl,
-        true
-      );
-    }
+    // Every HTTP Range request reaches the AIOStreams playback route again.
+    // Cache both native and Stream API URLs so seeking/read-ahead reuses the
+    // same resolved target instead of calling TorBox once per range and
+    // tripping a 429. Stream-mode URLs are signed and remain valid for this
+    // deliberately short availability TTL.
+    await TorboxDebridService.playbackLinkCache.set(
+      cacheKey,
+      playbackLink,
+      appConfig.builtins.debrid.instantAvailabilityCacheTtl,
+      true
+    );
 
     if (
       playback.mode === 'stream' &&
