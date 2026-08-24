@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { reconcileAddonStatisticCount } from './fetcher.js';
+import {
+  isTransientRateLimitError,
+  reconcileAddonStatisticCount,
+} from './fetcher.js';
 
 test('reports unique post-dedup streams while retaining the resolved count', () => {
   const result = reconcileAddonStatisticCount(
@@ -29,4 +32,21 @@ test('keeps a simple count when deduplication removes nothing', () => {
   );
 
   assert.match(result.description, /Streams\s+: 4$/);
+});
+
+test('identifies only transient provider rate-limit errors', () => {
+  assert.equal(
+    isTransientRateLimitError({
+      title: '[TB] TorBox',
+      description: 'Request failed with HTTP 429',
+    }),
+    true
+  );
+  assert.equal(
+    isTransientRateLimitError({
+      title: 'Indexer',
+      description: 'No matching releases found',
+    }),
+    false
+  );
 });

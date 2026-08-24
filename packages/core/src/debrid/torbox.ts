@@ -51,6 +51,72 @@ const torboxNzbHashEnrichmentInFlight = new Map<string, Promise<void>>();
 const torboxNzbContentHashCache = Cache.getInstance<string, string[]>(
   'tb:nzb-content-hashes'
 );
+const TORBOX_AVAILABILITY_MIN_INTERVAL_MS = 210;
+const TORBOX_AVAILABILITY_LANE_IDLE_MS = 10 * 60_000;
+type TorboxAvailabilityLane = {
+  limit: ReturnType<typeof pLimit>;
+  lastStartedAt: number;
+  lastUsedAt: number;
+};
+const torboxAvailabilityLanes = new Map<string, TorboxAvailabilityLane>();
+
+function getTorboxAvailabilityLane(credential: string): TorboxAvailabilityLane {
+  const key = getSimpleTextHash(credential);
+  const existing = torboxAvailabilityLanes.get(key);
+  if (existing) {
+    existing.lastUsedAt = Date.now();
+    return existing;
+  }
+  if (torboxAvailabilityLanes.size >= 256) {
+    const cutoff = Date.now() - TORBOX_AVAILABILITY_LANE_IDLE_MS;
+    for (const [candidateKey, lane] of torboxAvailabilityLanes) {
+      if (
+        lane.lastUsedAt < cutoff &&
+        lane.limit.activeCount === 0 &&
+        lane.limit.pendingCount === 0
+      ) {
+        torboxAvailabilityLanes.delete(candidateKey);
+      }
+    }
+  }
+  const lane: TorboxAvailabilityLane = {
+    limit: pLimit(1),
+    lastStartedAt: 0,
+    lastUsedAt: Date.now(),
+  };
+  torboxAvailabilityLanes.set(key, lane);
+  return lane;
+}
+
+/**
+ * Serialize and pace checkcached calls across every TorBox service instance
+ * using the same credential. Per-addon pLimit queues still burst together;
+ * this credential-scoped lane enforces TorBox's documented 300/minute budget
+ * without coupling different users.
+ */
+export async function runTorboxAvailabilityLimited<T>(
+  credential: string,
+  operation: () => Promise<T>,
+  minimumIntervalMs = TORBOX_AVAILABILITY_MIN_INTERVAL_MS
+): Promise<T> {
+  const lane = getTorboxAvailabilityLane(credential);
+  return lane.limit(async () => {
+    const waitMs = Math.max(
+      0,
+      lane.lastStartedAt + Math.max(0, minimumIntervalMs) - Date.now()
+    );
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    lane.lastStartedAt = Date.now();
+    lane.lastUsedAt = lane.lastStartedAt;
+    return operation();
+  });
+}
+
+export function resetTorboxAvailabilityLanesForTests(): void {
+  torboxAvailabilityLanes.clear();
+}
 
 function scheduleTorboxNzbHashEnrichment(url: string, title?: string): void {
   const key = getSimpleTextHash(url);
@@ -374,13 +440,9 @@ export class TorboxDebridService
       const allUniqueHashes = [...new Set(hashesToCheck)];
 
       try {
-        // TorBox enforces a relatively tight per-user request window. One
-        // availability request at a time still checks every 100-hash batch at
-        // full endpoint speed, while avoiding self-inflicted 429 bursts.
-        const availabilityLimit = pLimit(1);
         const responses = await Promise.all(
           chunkTorboxNzbHashes(allUniqueHashes).map((hashes) =>
-            availabilityLimit(async () => {
+            runTorboxAvailabilityLimited(this.config.token, async () => {
               try {
                 return await Promise.race([
                   this.torboxApi.usenet.getUsenetCachedAvailability(

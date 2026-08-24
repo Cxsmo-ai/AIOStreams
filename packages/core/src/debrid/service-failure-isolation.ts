@@ -16,8 +16,8 @@ const credentialProbes = new Map<string, Promise<void>>();
 
 const AUTH_FAILURE_TTL_MS = 5 * 60_000;
 const UPSTREAM_FAILURE_TTL_MS = 60_000;
-const RATE_LIMIT_TTL_MS = 60_000;
-const HEALTHY_CREDENTIAL_TTL_MS = 5 * 60_000;
+const RATE_LIMIT_TTL_MS = 30_000;
+const HEALTHY_CREDENTIAL_TTL_MS = 30 * 60_000;
 
 function fingerprintCredential(credential: string): string {
   return createHash('sha256').update(credential).digest('hex').slice(0, 24);
@@ -171,8 +171,27 @@ async function ensureCredentialHealthy(
     serviceId,
     credential,
     async () => {
-      await probe();
-      healthyCredentials.set(key, Date.now() + HEALTHY_CREDENTIAL_TTL_MS);
+      try {
+        await probe();
+        healthyCredentials.set(key, Date.now() + HEALTHY_CREDENTIAL_TTL_MS);
+      } catch (error) {
+        // A 429 says nothing about whether a credential is valid. Blocking the
+        // real operation causes every concurrently configured indexer to emit
+        // an error card and immediately retry the same health endpoint. Allow
+        // the operation through and briefly suppress redundant probes; the
+        // operation's own response remains authoritative.
+        if (
+          errorStatus(error) === 429 ||
+          errorCode(error) === 'TOO_MANY_REQUESTS' ||
+          /429|rate.?limit|too many requests/i.test(
+            error instanceof Error ? error.message : String(error)
+          )
+        ) {
+          healthyCredentials.set(key, Date.now() + RATE_LIMIT_TTL_MS);
+          return;
+        }
+        throw error;
+      }
     }
   ).finally(() => credentialProbes.delete(key));
   credentialProbes.set(key, probePromise);

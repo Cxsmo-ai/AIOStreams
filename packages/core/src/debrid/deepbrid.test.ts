@@ -327,7 +327,7 @@ test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   assert.equal(result.files?.[0]?.name, 'External.Release.S01E04.1080p.mkv');
 });
 
-test('Deepbrid pre-cache keeps failed candidates as on-demand fallbacks', async () => {
+test('Deepbrid pre-cache omits failed candidates while retaining verified ones', async () => {
   const client = fakeDeepbridApi();
   client.listUploads = async () => [];
   client.addNzbUrl = async (url) => {
@@ -366,13 +366,9 @@ test('Deepbrid pre-cache keeps failed candidates as on-demand fallbacks', async 
     },
   ]);
 
-  assert.deepEqual(
-    results.map((result) => result.status),
-    ['cached', 'queued']
-  );
+  assert.deepEqual(results.map((result) => result.status), ['cached']);
   assert.equal(results[0]?.library, true);
-  assert.equal(results[1]?.library, false);
-  assert.equal(results[1]?.id, 'rate-limited-hash');
+  assert.equal(results.length, 1);
 });
 
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {

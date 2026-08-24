@@ -34,10 +34,17 @@ export class PossibleRecursiveRequestError extends Error {
   }
 }
 export function makeUrlLogSafe(url: string) {
-  // Long opaque path components are masked; credential query/fragment
-  // params and userinfo passwords are stripped by the shared redaction pass.
+  // Query parameter names are useful for diagnostics, but their values may be
+  // provider-specific credentials with short names (for example Newznab `r`)
+  // that a generic apiKey/token matcher cannot recognise. Mask every query and
+  // fragment value before the URL reaches any logger.
+  const querySafe = url
+    .replace(/([?&][^=&#\s]+)=([^&#\s]*)/g, `$1=<redacted>`)
+    .replace(/#.*$/, '#<redacted>');
+  // Long opaque path components are masked; userinfo passwords are stripped
+  // by the shared redaction pass.
   return redactForLog(
-    url
+    querySafe
       .split('/')
       .map((component) => {
         if (component.length > 10 && !component.includes('.')) {

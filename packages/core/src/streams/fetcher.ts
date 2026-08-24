@@ -5,6 +5,7 @@ import {
   getAddonName,
   getTimeTakenSincePoint,
 } from '../utils/index.js';
+
 import { Wrapper } from '../main/wrapper.js';
 import {
   ExitConditionEvaluator,
@@ -20,6 +21,15 @@ import {
   type AnalyticsErrorKind,
   type AnalyticsStatus,
 } from '../analytics/index.js';
+
+export function isTransientRateLimitError(error: {
+  title?: string;
+  description?: string;
+}): boolean {
+  return /429|rate.?limit|too many requests/i.test(
+    `${error.title ?? ''}\n${error.description ?? ''}`
+  );
+}
 
 /**
  * Per-addon outcome tracked through {@link StreamFetcher.fetch} and surfaced
@@ -684,12 +694,7 @@ class StreamFetcher {
     // broken; preserve all streams and keep every non-rate-limit error.
     const visibleErrors =
       allStreams.length > 0
-        ? allErrors.filter(
-            (error) =>
-              !/429|rate.?limit|too many requests/i.test(
-                `${error.title}\n${error.description}`
-              )
-          )
+        ? allErrors.filter((error) => !isTransientRateLimitError(error))
         : allErrors;
 
     return {

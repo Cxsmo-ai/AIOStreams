@@ -20,6 +20,7 @@ import {
   resolveGlobalDeepbridNzbs,
   resolveServiceWrappedStreams,
 } from './serviceWrapper.js';
+import { isTransientRateLimitError } from '../streams/fetcher.js';
 import type { ServiceWrapServiceTiming } from './serviceWrapper.js';
 import { decorateTorboxStreams } from '../debrid/torbox-presentation.js';
 import type { PrecomputeSubTimings } from '../streams/precomputer.js';
@@ -318,7 +319,7 @@ export async function processStreams(
     ctx.userData,
     ctx.addons
   );
-  serviceWrapMs = Date.now() - serviceWrapStart;
+  serviceWrapMs += Date.now() - serviceWrapStart;
   processedStreams = resolvedResults.streams;
   errors.push(...resolvedResults.errors);
   if (resolvedResults.serviceTimings) {
@@ -1024,10 +1025,19 @@ export async function getStreams(
     });
   }
 
+  // Service wrapping happens after the fetcher's own partial-success filter.
+  // Apply the same rule to the complete response so transient TB/DB 429s do
+  // not become clickable error videos when usable streams survived. Preserve
+  // every non-rate-limit error and all errors when no media was returned.
+  const visibleErrors =
+    finalStreams.length > 0
+      ? errors.filter((error) => !isTransientRateLimitError(error))
+      : errors;
+
   logger.debug(
     {
       streams: finalStreams.length,
-      errors: errors.length,
+      errors: visibleErrors.length,
       statistics: statistics.length,
     },
     'stream request complete'
@@ -1035,7 +1045,7 @@ export async function getStreams(
   const response: StreamsResponse = {
     success: true,
     data: { streams: finalStreams, statistics },
-    errors,
+    errors: visibleErrors,
   };
   if (usePipelineCache) {
     await pipelineResultCache.set(pipelineCacheKey, response, pipelineTtl);

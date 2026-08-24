@@ -18,6 +18,17 @@ function authError(): DebridError {
   });
 }
 
+function rateLimitError(): DebridError {
+  return new DebridError('rate limit exceeded', {
+    statusCode: 429,
+    statusText: 'Too Many Requests',
+    code: 'TOO_MANY_REQUESTS',
+    headers: {},
+    body: null,
+    type: 'upstream_error',
+  });
+}
+
 test.beforeEach(() => resetServiceFailureIsolationForTests());
 
 test('confirmed auth failure opens only the matching credential circuit', async () => {
@@ -133,4 +144,53 @@ test('concurrent calls share one credential probe and never start after rejectio
   assert.equal(probeCalls, 1);
   assert.equal(operationCalls, 0);
   assert.ok(results.every((result) => result.status === 'rejected'));
+});
+
+test('a rate-limited credential probe does not block the real operation', async () => {
+  let probeCalls = 0;
+  let operationCalls = 0;
+  const service = isolateDebridService(
+    {
+      serviceName: 'torbox',
+      capabilities: { torrents: true, usenet: false },
+      async resolve() {
+        operationCalls++;
+        return 'playable';
+      },
+      async checkMagnets() {
+        operationCalls++;
+        return [];
+      },
+      async listMagnets() {
+        operationCalls++;
+        return [];
+      },
+      async addMagnet() {
+        throw new Error('not used');
+      },
+      async addTorrent() {
+        throw new Error('not used');
+      },
+      async generateTorrentLink() {
+        throw new Error('not used');
+      },
+      async removeMagnet() {},
+    },
+    'torbox',
+    'temporarily-rate-limited-token',
+    {
+      credentialProbe: async () => {
+        probeCalls++;
+        throw rateLimitError();
+      },
+    }
+  );
+
+  const results = await Promise.all([
+    service.listMagnets(),
+    service.checkMagnets([]),
+  ]);
+  assert.deepEqual(results, [[], []]);
+  assert.equal(probeCalls, 1);
+  assert.equal(operationCalls, 2);
 });

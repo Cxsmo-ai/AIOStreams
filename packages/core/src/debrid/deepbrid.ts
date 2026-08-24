@@ -398,19 +398,11 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     const verified = precached.filter(
       (item): item is DebridDownload => Boolean(item)
     );
-    const verifiedHashes = new Set(
-      verified.map((item) => item.hash).filter((hash): hash is string => Boolean(hash))
-    );
-
-    // Pre-cache is best-effort. A provider may rate-limit an NZB fetch or a
-    // release may still be processing when the bounded verification window
-    // expires. Keep those candidates as ordinary on-demand Deepbrid results so
-    // one failed external indexer cannot make the whole scrape look empty.
-    const pending = candidates
-      .filter((nzb) => !nzb.hash || !verifiedHashes.has(nzb.hash))
-      .map((nzb) => resultForOwned(nzb));
-
-    return [...ownedResults, ...verified, ...pending];
+    // In pre-cache mode a DB lightning-bolt entry is a playback guarantee, not
+    // a promise to try uploading after the click. Keep failed/rate-limited
+    // candidates available through their native AIO and TorBox siblings, but
+    // do not advertise an unverified Deepbrid playback URL.
+    return [...ownedResults, ...verified];
   }
 
   private async preCacheExternalNzb(nzb: {
