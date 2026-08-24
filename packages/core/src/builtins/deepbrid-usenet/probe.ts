@@ -78,7 +78,11 @@ export async function probeDeepbridVideo(
     const headers: Record<string, string> = {
       Accept: '*/*',
       'Accept-Encoding': 'identity',
-      Range: 'bytes=0-63',
+      // Match the first request made by real media clients and our acceptance
+      // benchmark. Some Deepbrid links answer a tiny 64-byte probe as if the
+      // release exists, then return a generated error MP4 for a normal 64 KiB
+      // range. Using the real range size prevents that false positive.
+      Range: 'bytes=0-65535',
     };
     if (isDeepbridHost(target.hostname)) {
       headers.Authorization = `Bearer ${apiKey}`;
