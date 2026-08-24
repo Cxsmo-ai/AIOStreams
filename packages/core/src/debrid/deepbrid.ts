@@ -838,7 +838,14 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     for (let attempt = 0; attempt < 7; attempt++) {
       if (signal?.aborted) return undefined;
       try {
-        const info = await this.client.getUploadInfo(uploadId, { signal });
+        // Reuse the exact upload links that passed scrape-time Range/container
+        // validation. Deepbrid can return a different link from a later
+        // upload-info call, and that replacement can be a tiny generated error
+        // video even though the previously verified link is real media.
+        // getPlayableUploadInfo is shared by credential + upload id across
+        // request-scoped service instances, so the click path stays both safe
+        // and fast after a pre-cache scrape.
+        const info = await this.getPlayableUploadInfo(uploadId, signal);
         const link = this.selectResolvedFile(info, playbackInfo, filename);
         if (link) return link;
       } catch (error) {

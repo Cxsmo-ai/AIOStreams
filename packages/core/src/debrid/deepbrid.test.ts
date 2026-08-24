@@ -424,8 +424,86 @@ test('Deepbrid pre-cache verifies owned uploads and omits generated error videos
   assert.equal(probeCalls, 1);
 });
 
+test('Deepbrid playback reuses the scrape-verified link instead of a refreshed error video', async () => {
+  const scrapeClient = fakeDeepbridApi();
+  scrapeClient.listUploads = async () => [
+    {
+      id: 'stable-upload-id',
+      title: 'The Hawk S01E06',
+      source: 'url',
+      sourceUrl: 'https://indexer.example/hawk-stable.nzb',
+    },
+  ];
+  scrapeClient.getUploadInfo = async () => ({
+    id: 'stable-upload-id',
+    title: 'The Hawk S01E06',
+    files: [
+      {
+        name: 'The.Hawk.S01E06.2160p.mkv',
+        link: 'https://usenet.myfast.link/verified-media',
+        size: 5_476_083_302,
+        sizeHuman: '5.1 GB',
+      },
+    ],
+  });
+  const scrapeService = new DeepbridService(
+    { token: 'stable-playback-cache', preCache: true, preCacheLimit: 1 },
+    scrapeClient,
+    async (file) => file.link.endsWith('/verified-media')
+  );
+  const [cached] = await scrapeService.checkNzbs([
+    {
+      name: 'The Hawk S01E06',
+      hash: 'stable-hawk-hash',
+      nzb: 'https://indexer.example/hawk-stable.nzb',
+    },
+  ]);
+  assert.equal(cached.id, 'stable-upload-id');
+
+  let refreshedInfoCalls = 0;
+  const playbackClient = fakeDeepbridApi();
+  playbackClient.getUploadInfo = async () => {
+    refreshedInfoCalls++;
+    return {
+      id: 'stable-upload-id',
+      title: 'The Hawk S01E06',
+      files: [
+        {
+          name: 'The.Hawk.S01E06.2160p.mkv',
+          link: 'https://usenet.myfast.link/generated-error',
+          size: 5_476_083_302,
+          sizeHuman: '5.1 GB',
+        },
+      ],
+    };
+  };
+  const playbackService = new DeepbridService(
+    { token: 'stable-playback-cache' },
+    playbackClient,
+    async () => false
+  );
+  const url = await playbackService.resolve(
+    {
+      type: 'usenet',
+      hash: 'stable-hawk-hash',
+      nzb: 'https://indexer.example/hawk-stable.nzb',
+      serviceItemId: 'stable-upload-id',
+      metadata: { titles: ['The Hawk'], season: 1, episode: 6, airDates: [] },
+    },
+    'The.Hawk.S01E06.2160p.mkv',
+    true
+  );
+
+  assert.equal(url, 'https://usenet.myfast.link/verified-media');
+  assert.equal(refreshedInfoCalls, 0);
+});
+
 test('Deepbrid service resolves the requested episode from an owned upload', async () => {
-  const service = new DeepbridService({ token: 'test' }, fakeDeepbridApi());
+  const service = new DeepbridService(
+    { token: 'test' },
+    fakeDeepbridApi(),
+    async () => true
+  );
   const url = await service.resolve(
     {
       type: 'usenet',
@@ -524,7 +602,11 @@ test('Deepbrid service recovers the canonical upload id after a missing-id respo
     };
   };
 
-  const service = new DeepbridService({ token: 'recover-id' }, client);
+  const service = new DeepbridService(
+    { token: 'recover-id' },
+    client,
+    async () => true
+  );
   const url = await service.resolve(
     {
       type: 'usenet',
