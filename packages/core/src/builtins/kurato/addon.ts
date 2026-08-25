@@ -204,17 +204,16 @@ export class KuratoAddon {
       name: 'Kurato',
       description: 'Personalized Kurato recommendations, watchlist, and search',
       logo: 'https://kurato.com/favicon.ico',
-      // Deliberately catalog-only: the Stremio client's configured metadata
-      // addon (Cinemeta, TMDB, TVDB, or another provider) must own item pages,
-      // seasons, episodes, artwork, and videos instead of Kurato's sparse
-      // content records.
-      resources: ['catalog'],
+      // Keep meta only as a generic fallback. With no idPrefixes, AIOStreams
+      // tries the client's ID-matching metadata addon (Cinemeta, TMDB, TVDB,
+      // or another provider) first; Kurato is used only when those providers
+      // cannot handle the catalog item's ID.
+      resources: ['catalog', 'meta'],
       types: ['movie', 'series'],
       // Kurato is a catalog/recommendation source, not the authoritative
-      // metadata provider.  Leaving metadata IDs unscoped makes AIOStreams
-      // try an installed ID-matching provider (Cinemeta, TMDB, TVDB, or
-      // another metadata addon) first, while retaining Kurato as a safe
-      // fallback when no other provider can answer the request.
+      // metadata provider. Leaving metadata IDs unscoped makes AIOStreams
+      // try an installed ID-matching provider first, while retaining Kurato
+      // as a safe fallback when no other provider can answer the request.
       catalogs: [
         { type: 'movie', id: 'kurato-for-you-movie', name: 'Kurato · For You Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
         { type: 'series', id: 'kurato-for-you-series', name: 'Kurato · For You Series', extra: [{ name: 'search' }, { name: 'skip' }] },

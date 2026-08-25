@@ -117,7 +117,7 @@ test('Kurato can omit watchlist catalogs without affecting personalized catalogs
   assert.equal(manifest.catalogs?.some((catalog) => catalog.id.includes('watchlist')), false);
   assert.equal(manifest.catalogs?.length, 8);
   assert.equal(manifest.idPrefixes, undefined);
-  assert.deepEqual(manifest.resources, ['catalog']);
+  assert.deepEqual(manifest.resources, ['catalog', 'meta']);
 });
 
 test('Kurato exposes collection contents and generated recommendation catalogs', async () => {
