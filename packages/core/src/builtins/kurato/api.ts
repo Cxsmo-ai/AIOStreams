@@ -232,7 +232,7 @@ export class KuratoApiClient {
     return this.request('/data/collect/collections', {
       method: 'POST',
       body: JSON.stringify({
-        userId: '',
+        userId: 0,
         subscribed: false,
         sort: 'latest',
         reverse: false,
