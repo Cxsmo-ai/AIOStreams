@@ -25,14 +25,37 @@ function mockFetch() {
         { type: 'movie', tmdb_id: 456, title: 'Explicit XXX Film', poster_path: '/adult.jpg' },
       ] });
     }
-    if (url.includes('/data/search/')) {
+    if (url.includes('/data/discover/')) {
       const body = JSON.parse(String(init?.body));
       assert.equal(body.query, 'space opera');
-      assert.equal(body.contentType, 'movie');
+      assert.equal(url.endsWith('/data/discover/movies'), true);
       return response({ results: [
         { content: { contentType: 'movie', tmdb_id: 789, title: 'Space Opera' } },
         { content: { contentType: 'book', id: 999, title: 'Wrong media' } },
       ] });
+    }
+    if (url.includes('/data/collect/collections')) {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.includeGenerated, true);
+      const collections = [
+        {
+          id: 'generated-1',
+          name: 'AI Starter Mix',
+          isGenerated: true,
+          contents: [{ contentType: 'movie', tmdb_id: 321, title: 'Generated Film' }],
+        },
+        {
+          id: 'owned-1',
+          name: 'My Collection',
+          isGenerated: false,
+          contents: [{ contentType: 'movie', tmdb_id: 654, title: 'Collected Film' }],
+        },
+      ];
+      return response({
+        collections: body.query
+          ? collections.filter((item) => item.name.toLowerCase().includes(body.query.toLowerCase()))
+          : collections,
+      });
     }
     return response({});
   }) as typeof fetch;
@@ -62,11 +85,20 @@ test('Kurato routes Stremio search extras to the authenticated search endpoint',
   const addon = new KuratoAddon(config, mock.fetchFn);
   const results = await addon.getCatalog('movie', 'kurato-for-you-movie', 'search=space opera');
   assert.deepEqual(results.map((item) => item.id), ['tmdb:789']);
-  assert.ok(mock.calls.some((url) => url.includes('/data/search/')));
+  assert.ok(mock.calls.some((url) => url.includes('/data/discover/movies')));
 });
 
 test('Kurato can omit watchlist catalogs without affecting personalized catalogs', () => {
   const manifest = new KuratoAddon({ ...config, includeWatchlist: false }, mockFetch().fetchFn).getManifest();
   assert.equal(manifest.catalogs?.some((catalog) => catalog.id.includes('watchlist')), false);
-  assert.equal(manifest.catalogs?.length, 2);
+  assert.equal(manifest.catalogs?.length, 8);
+});
+
+test('Kurato exposes collection contents and generated recommendation catalogs', async () => {
+  const addon = new KuratoAddon(config, mockFetch().fetchFn);
+  const generated = await addon.getCatalog('movie', 'kurato-generated-movie');
+  const collections = await addon.getCatalog('movie', 'kurato-collections-movie', 'search=starter');
+  assert.deepEqual(generated.map((item) => item.id), ['tmdb:321']);
+  assert.deepEqual(collections.map((item) => item.id), ['tmdb:321']);
+  assert.match(generated[0].description ?? '', /AI Starter Mix/);
 });

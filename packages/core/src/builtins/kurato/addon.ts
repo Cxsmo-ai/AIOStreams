@@ -4,6 +4,7 @@ import { KuratoApiClient, KuratoConfigSchema, type KuratoConfig } from './api.js
 
 const NSFW_RE = /\b(?:18\+|adult|erotic|erotica|hentai|porn|xxx|nsfw|sex)\b/i;
 const MAX_CATALOG_ITEMS = 200;
+const MAX_COLLECTIONS_PER_REQUEST = 12;
 
 type KuratoType = 'movie' | 'series';
 
@@ -48,11 +49,69 @@ function collectItems(value: unknown, output: Record<string, unknown>[] = [], se
   if (!current || seen.has(current)) return output;
   seen.add(current);
   const hasTitle = Boolean(firstString(current, ['title', 'name', 'original_title', 'original_name']));
-  const hasId = Boolean(firstString(current, ['imdb_id', 'tmdb_id', 'id', '_id']));
+  const hasId = Boolean(
+    firstString(current, ['imdb_id', 'tmdb_id', 'contentId', 'content_id', 'id', '_id'])
+  );
   if (hasTitle && hasId) output.push(current);
   for (const [key, child] of Object.entries(current)) {
-    if (/^(data|results|items|contents|movies|series|tv|movie|details|result|payload|recommendations|trending|rows|sections|content)$/i.test(key)) {
+    if (/^(data|results|items|contents|movies|series|tv|movie|details|result|payload|recommendations|recommendation|trending|rows|sections|content|discovered|discover|collectionContents)$/i.test(key)) {
       collectItems(child, output, seen);
+    }
+  }
+  return output;
+}
+
+function collectionId(item: Record<string, unknown>) {
+  return firstString(item, ['collectionId', 'collection_id', 'id', '_id']);
+}
+
+function collectionName(item: Record<string, unknown>) {
+  return firstString(item, ['name', 'title', 'collectionName', 'collection_name']) ?? 'Kurato Collection';
+}
+
+function isGeneratedCollection(item: Record<string, unknown>) {
+  const flag = (value: unknown) =>
+    value === true || value === 1 || value === 'true' || value === '1';
+  return Boolean(
+    flag(item.isGenerated) ||
+      flag(item.is_generated) ||
+      flag(item.generated) ||
+      item.collectionType === 'generated' ||
+      item.type === 'generated'
+  );
+}
+
+function looksLikeCollection(item: Record<string, unknown>) {
+  const id = collectionId(item);
+  const name = collectionName(item);
+  const hasCollectionShape =
+    item.isGenerated !== undefined ||
+    item.is_generated !== undefined ||
+    item.isPublic !== undefined ||
+    item.is_public !== undefined ||
+    item.subscribed !== undefined ||
+    item.collectionId !== undefined ||
+    item.collection_id !== undefined ||
+    item.contents !== undefined;
+  return Boolean(id && name && hasCollectionShape);
+}
+
+function collectCollections(
+  value: unknown,
+  output: Record<string, unknown>[] = [],
+  seen = new Set<object>()
+) {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectCollections(entry, output, seen);
+    return output;
+  }
+  const current = record(value);
+  if (!current || seen.has(current)) return output;
+  seen.add(current);
+  if (looksLikeCollection(current)) output.push(current);
+  for (const [key, child] of Object.entries(current)) {
+    if (/^(data|results|items|collections|collection|generated|generatedCollections|recommendations|sections)$/i.test(key)) {
+      collectCollections(child, output, seen);
     }
   }
   return output;
@@ -71,9 +130,17 @@ function isNsfw(item: MetaPreview) {
 }
 
 function toId(item: Record<string, unknown>, type: KuratoType) {
-  const imdb = firstString(item, ['imdb_id', 'imdbId']);
+  const imdb = firstString(item, ['imdb_id', 'imdbId', 'imdb']);
   if (imdb) return imdb.startsWith('tt') ? imdb : `tt${imdb}`;
-  const tmdb = firstString(item, ['tmdb_id', 'tmdbId', 'id', '_id']);
+  const tmdb = firstString(item, [
+    'tmdb_id',
+    'tmdbId',
+    'tmdb',
+    'contentId',
+    'content_id',
+    'id',
+    '_id',
+  ]);
   return tmdb ? `tmdb:${tmdb.replace(/^tmdb:/i, '')}` : `kurato:${type}:${encodeURIComponent(firstString(item, ['title', 'name']) ?? 'unknown')}`;
 }
 
@@ -90,7 +157,7 @@ function toMetaPreview(item: Record<string, unknown>, fallbackType: KuratoType):
     id: toId(item, type),
     type,
     name,
-    poster: imageUrl(item.posterPath ?? item.poster_path ?? item.poster ?? item.image, 'https://img.kurato.com/t/p/w500'),
+    poster: imageUrl(item.posterPath ?? item.poster_path ?? item.poster ?? item.image ?? item.cover, 'https://img.kurato.com/t/p/w500'),
     background: imageUrl(item.backdropPath ?? item.backdrop_path ?? item.backdrop, 'https://img.kurato.com/t/p/w780'),
     description: firstString(item, ['overview', 'synopsis', 'description', 'explanation']),
     releaseInfo: date?.slice(0, 4),
@@ -120,7 +187,12 @@ export class KuratoAddon {
     this.manifest = KuratoAddon.getManifest(this.config);
   }
 
-  static getManifest(config?: Pick<KuratoConfig, 'includeWatchlist'>): Manifest {
+  static getManifest(
+    config?: Pick<
+      KuratoConfig,
+      'includeWatchlist' | 'includeCollections' | 'includeGeneratedRecommendations'
+    >
+  ): Manifest {
     const manifest: Manifest = {
       id: 'org.aiostreams.kurato',
       version: '1.0.0',
@@ -133,8 +205,14 @@ export class KuratoAddon {
       catalogs: [
         { type: 'movie', id: 'kurato-for-you-movie', name: 'Kurato · For You Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
         { type: 'series', id: 'kurato-for-you-series', name: 'Kurato · For You Series', extra: [{ name: 'search' }, { name: 'skip' }] },
+        { type: 'movie', id: 'kurato-ai-discover-movie', name: 'Kurato · AI Discover Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
+        { type: 'series', id: 'kurato-ai-discover-series', name: 'Kurato · AI Discover Series', extra: [{ name: 'search' }, { name: 'skip' }] },
         { type: 'movie', id: 'kurato-watchlist-movie', name: 'Kurato · Watchlist Movies', extra: [{ name: 'skip' }] },
         { type: 'series', id: 'kurato-watchlist-series', name: 'Kurato · Watchlist Series', extra: [{ name: 'skip' }] },
+        { type: 'movie', id: 'kurato-collections-movie', name: 'Kurato · Collections Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
+        { type: 'series', id: 'kurato-collections-series', name: 'Kurato · Collections Series', extra: [{ name: 'search' }, { name: 'skip' }] },
+        { type: 'movie', id: 'kurato-generated-movie', name: 'Kurato · Generated Recommendations Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
+        { type: 'series', id: 'kurato-generated-series', name: 'Kurato · Generated Recommendations Series', extra: [{ name: 'search' }, { name: 'skip' }] },
       ],
       behaviorHints: { adult: false, configurable: true, configurationRequired: true },
     };
@@ -143,19 +221,80 @@ export class KuratoAddon {
         (catalog) => !catalog.id.includes('watchlist')
       );
     }
+    if (config?.includeCollections === false) {
+      manifest.catalogs = manifest.catalogs?.filter(
+        (catalog) => !catalog.id.includes('collection') && !catalog.id.includes('generated')
+      );
+    } else if (config?.includeGeneratedRecommendations === false) {
+      manifest.catalogs = manifest.catalogs?.filter(
+        (catalog) => !catalog.id.includes('generated')
+      );
+    }
     return manifest;
   }
 
   getManifest() { return this.manifest; }
+
+  private async getCollectionCatalog(
+    type: KuratoType,
+    generatedOnly: boolean,
+    query: string | undefined,
+    skip: number
+  ): Promise<CatalogResponse['metas']> {
+    const rawCollections = await this.api.collections(query);
+    const collections = collectCollections(rawCollections)
+      .filter((item) => !generatedOnly || isGeneratedCollection(item))
+      .slice(0, MAX_COLLECTIONS_PER_REQUEST);
+    if (!collections.length) return [];
+
+    const metas: MetaPreview[] = [];
+    const loaded = await Promise.allSettled(
+      collections.map(async (collection) => {
+        const id = collectionId(collection);
+        if (!id) return [] as MetaPreview[];
+        const embedded = collectItems(collection).filter((item) => !looksLikeCollection(item));
+        const raw = embedded.length
+          ? embedded
+          : collectItems(await this.api.collection(id, type, Math.max(this.config.pageSize, 100))).filter(
+              (item) => !looksLikeCollection(item)
+            );
+        return raw
+          .map((item) => toMetaPreview(item, type))
+          .filter((item): item is MetaPreview => Boolean(item && item.type === type))
+          .map((item) => ({
+            ...item,
+            description: [
+              `Kurato collection: ${collectionName(collection)}`,
+              item.description,
+            ].filter(Boolean).join(' · '),
+          }));
+      })
+    );
+    for (const result of loaded) {
+      if (result.status === 'fulfilled') metas.push(...result.value);
+    }
+    return dedupe(metas).slice(skip, skip + this.config.pageSize).slice(0, MAX_CATALOG_ITEMS);
+  }
 
   async getCatalog(type: string, id: string, extras?: string): Promise<CatalogResponse['metas']> {
     if (type !== 'movie' && type !== 'series') return [];
     const requestedType = type as KuratoType;
     const parsed = new ExtrasParser(extras);
     if (parsed.search?.trim()) {
+      if (id.includes('collection') || id.includes('generated')) {
+        return this.getCollectionCatalog(
+          requestedType,
+          id.includes('generated'),
+          decodeURIComponent(parsed.search),
+          Math.max(0, parsed.skip ?? 0)
+        );
+      }
       return this.search(type, decodeURIComponent(parsed.search), extras);
     }
     const skip = Math.max(0, parsed.skip ?? 0);
+    if (id.includes('collection') || id.includes('generated')) {
+      return this.getCollectionCatalog(requestedType, id.includes('generated'), undefined, skip);
+    }
     const page = Math.floor(skip / this.config.pageSize) + 1;
     const raw = id.includes('watchlist') && this.config.includeWatchlist
       ? await this.api.watchlist(requestedType)
@@ -178,7 +317,7 @@ export class KuratoAddon {
     const parsed = new ExtrasParser(extras);
     const skip = Math.max(0, parsed.skip ?? 0);
     const page = Math.floor(skip / this.config.pageSize) + 1;
-    const raw = await this.api.search(type as KuratoType, query.trim(), page, this.config.pageSize);
+    const raw = await this.api.discover(type as KuratoType, query.trim(), page, this.config.pageSize);
     const items = collectItems(raw)
       .map((item) => toMetaPreview(item, type as KuratoType))
       .filter((item): item is MetaPreview => Boolean(item && item.type === type));

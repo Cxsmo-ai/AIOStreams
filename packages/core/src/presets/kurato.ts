@@ -48,6 +48,22 @@ export class KuratoPreset extends BuiltinAddonPreset {
         default: true,
       },
       {
+        id: 'includeCollections',
+        name: 'Include Kurato collection catalogs',
+        description: 'Adds collection search catalogs sourced from your private, subscribed, and generated Kurato collections.',
+        type: 'boolean',
+        required: false,
+        default: true,
+      },
+      {
+        id: 'includeGeneratedRecommendations',
+        name: 'Include generated recommendation catalogs',
+        description: 'Adds the recommendation collections Kurato generates from your activity and preferences.',
+        type: 'boolean',
+        required: false,
+        default: true,
+      },
+      {
         id: 'mediaTypes',
         name: 'Media Types',
         description: 'Leave empty to include both movies and series.',
@@ -99,6 +115,8 @@ export class KuratoPreset extends BuiltinAddonPreset {
       password,
       pageSize: options.pageSize ?? 50,
       includeWatchlist: options.includeWatchlist !== false,
+      includeCollections: options.includeCollections !== false,
+      includeGeneratedRecommendations: options.includeGeneratedRecommendations !== false,
     };
     const encrypted = encryptString(JSON.stringify(privateConfig));
     if (!encrypted.success || !encrypted.data) {

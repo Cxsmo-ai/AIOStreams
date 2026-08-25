@@ -18,6 +18,8 @@ export const KuratoConfigSchema = z.object({
   baseUrl: z.string().url().default(KURATO_API_BASE),
   pageSize: z.number().int().min(1).max(100).default(50),
   includeWatchlist: z.boolean().default(true),
+  includeCollections: z.boolean().default(true),
+  includeGeneratedRecommendations: z.boolean().default(true),
 });
 
 export type KuratoConfig = z.infer<typeof KuratoConfigSchema>;
@@ -213,13 +215,43 @@ export class KuratoApiClient {
     );
   }
 
-  search(type: 'movie' | 'series', query: string, page: number, perPage: number) {
-    return this.request('/data/search/', {
+  /** Kurato's natural-language Discover flow is the addon's primary search. */
+  discover(type: 'movie' | 'series', query: string, page = 1, perPage = 50) {
+    const mediaType = type === 'series' ? 'tv' : 'movies';
+    return this.request(`/data/discover/${mediaType}`, {
       method: 'POST',
       body: JSON.stringify({
-        contentType: type === 'series' ? 'tv_show' : 'movie',
         query,
         page,
+        perPage,
+      }),
+    });
+  }
+
+  collections(query?: string) {
+    return this.request('/data/collect/collections', {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: '',
+        subscribed: false,
+        sort: 'latest',
+        reverse: false,
+        includeGenerated: true,
+        ...(query?.trim() ? { query: query.trim() } : {}),
+      }),
+    });
+  }
+
+  collection(
+    collectionId: string,
+    type: 'movie' | 'series',
+    perPage = 100
+  ) {
+    return this.request('/data/collect/collection', {
+      method: 'POST',
+      body: JSON.stringify({
+        collectionId,
+        filterContentType: type === 'series' ? 'tv_show' : 'movie',
         perPage,
       }),
     });
