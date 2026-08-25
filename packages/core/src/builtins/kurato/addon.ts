@@ -5,6 +5,9 @@ import { KuratoApiClient, KuratoConfigSchema, type KuratoConfig } from './api.js
 const NSFW_RE = /\b(?:18\+|adult|erotic|erotica|hentai|porn|xxx|nsfw|sex)\b/i;
 const MAX_CATALOG_ITEMS = 200;
 const MAX_COLLECTIONS_PER_REQUEST = 12;
+const CINEMETA_BASE_URL = 'https://v3-cinemeta.strem.io';
+const CINEMETA_CACHE_TTL_MS = 60 * 60 * 1000;
+const cinemetaCache = new Map<string, { expiresAt: number; value: Meta | null }>();
 
 type KuratoType = 'movie' | 'series';
 
@@ -180,10 +183,12 @@ export class KuratoAddon {
   private readonly config: KuratoConfig;
   private readonly api: KuratoApiClient;
   private readonly manifest: Manifest;
+  private readonly fetchFn: typeof fetch;
 
   constructor(config: unknown, fetchFn?: typeof fetch) {
     this.config = KuratoConfigSchema.parse(config);
     this.api = new KuratoApiClient(this.config, fetchFn);
+    this.fetchFn = fetchFn ?? fetch;
     this.manifest = KuratoAddon.getManifest(this.config);
   }
 
@@ -199,7 +204,11 @@ export class KuratoAddon {
       name: 'Kurato',
       description: 'Personalized Kurato recommendations, watchlist, and search',
       logo: 'https://kurato.com/favicon.ico',
-      resources: ['catalog', 'meta'],
+      // Deliberately catalog-only: the Stremio client's configured metadata
+      // addon (Cinemeta, TMDB, TVDB, or another provider) must own item pages,
+      // seasons, episodes, artwork, and videos instead of Kurato's sparse
+      // content records.
+      resources: ['catalog'],
       types: ['movie', 'series'],
       // Kurato is a catalog/recommendation source, not the authoritative
       // metadata provider.  Leaving metadata IDs unscoped makes AIOStreams
@@ -328,14 +337,91 @@ export class KuratoAddon {
     return dedupe(items).slice(0, MAX_CATALOG_ITEMS);
   }
 
+  private async cinemetaFallback(
+    contentType: KuratoType,
+    requestedId: string,
+    preview: MetaPreview,
+    sourceItem?: Record<string, unknown>
+  ): Promise<Meta | undefined> {
+    const cacheKey = `${contentType}:${requestedId}`;
+    const cached = cinemetaCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value ?? undefined;
+    cinemetaCache.delete(cacheKey);
+
+    try {
+      let imdbId = firstString(sourceItem ?? {}, ['imdb_id', 'imdbId', 'imdb']);
+      if (imdbId && !/^tt\d+$/i.test(imdbId)) imdbId = `tt${imdbId}`;
+
+      // Kurato commonly returns TMDB-only IDs. Cinemeta is IMDb-keyed, so
+      // resolve the title/year through its catalog search before requesting
+      // the complete metadata object.
+      if (!imdbId && preview.name) {
+        const searchUrl = `${CINEMETA_BASE_URL}/catalog/${contentType}/top/search=${encodeURIComponent(preview.name)}.json`;
+        const searchResponse = await this.fetchFn(searchUrl, {
+          signal: AbortSignal.timeout(5000),
+          headers: { accept: 'application/json' },
+        });
+        if (searchResponse.ok) {
+          const payload = (await searchResponse.json()) as { metas?: unknown };
+          const metas = Array.isArray(payload.metas) ? payload.metas : [];
+          const wantedName = preview.name.trim().toLowerCase();
+          const wantedYear = preview.releaseInfo
+            ? Number(String(preview.releaseInfo).slice(0, 4))
+            : undefined;
+          const candidate = metas.find((value) => {
+            const item = record(value);
+            if (!item || typeof item.id !== 'string' || !/^tt\d+$/i.test(item.id)) return false;
+            const name = firstString(item, ['name'])?.toLowerCase();
+            const year = Number(String(firstString(item, ['releaseInfo']) ?? '').slice(0, 4));
+            return name === wantedName && (!wantedYear || !year || year === wantedYear);
+          });
+          imdbId = firstString(record(candidate) ?? {}, ['id']);
+        }
+      }
+
+      if (!imdbId) {
+        cinemetaCache.set(cacheKey, { expiresAt: Date.now() + CINEMETA_CACHE_TTL_MS, value: null });
+        return undefined;
+      }
+
+      const metaResponse = await this.fetchFn(
+        `${CINEMETA_BASE_URL}/meta/${contentType}/${encodeURIComponent(imdbId)}.json`,
+        { signal: AbortSignal.timeout(5000), headers: { accept: 'application/json' } }
+      );
+      if (!metaResponse.ok) throw new Error(`Cinemeta returned ${metaResponse.status}`);
+      const payload = (await metaResponse.json()) as { meta?: unknown };
+      const external = record(payload.meta);
+      if (!external) throw new Error('Cinemeta returned no metadata');
+
+      const enriched: Meta = {
+        ...preview,
+        ...(external as Meta),
+        // Keep the ID emitted by Kurato so the catalog item remains playable.
+        id: requestedId,
+        type: contentType,
+      };
+      cinemetaCache.set(cacheKey, { expiresAt: Date.now() + CINEMETA_CACHE_TTL_MS, value: enriched });
+      return enriched;
+    } catch {
+      // Metadata enrichment must never make a personalized catalog fail.
+      cinemetaCache.set(cacheKey, { expiresAt: Date.now() + 60_000, value: null });
+      return undefined;
+    }
+  }
+
   async getMeta(type: string, id: string): Promise<Meta> {
     const contentType = type === 'series' ? 'series' : 'movie';
     const rawId = id.replace(/^tmdb:/i, '');
     const raw = await this.api.metadata(contentType, rawId);
-    const preview = collectItems(raw)
-      .map((item) => toMetaPreview(item, contentType))
-      .find((item) => item?.id === id) ?? { id, type: contentType, name: id };
-    return { ...preview, id, type: contentType } as Meta;
+    const rawItems = collectItems(raw);
+    const sourceItem = rawItems.find((item) => toMetaPreview(item, contentType)?.id === id) ?? rawItems[0];
+    const preview = (sourceItem && toMetaPreview(sourceItem, contentType)) ?? {
+      id,
+      type: contentType,
+      name: id,
+    };
+    const enriched = await this.cinemetaFallback(contentType, id, preview, sourceItem);
+    return enriched ?? ({ ...preview, id, type: contentType } as Meta);
   }
 }
 

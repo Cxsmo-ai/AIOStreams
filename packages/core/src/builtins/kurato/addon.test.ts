@@ -62,6 +62,30 @@ function mockFetch() {
   return { calls, fetchFn, get signIns() { return signIns; } };
 }
 
+function metadataMockFetch() {
+  return (async (input: string | URL) => {
+    const url = String(input);
+    if (url.includes('identitytoolkit.googleapis.com')) {
+      return response({ idToken: 'test-id-token', refreshToken: 'test-refresh', expiresIn: '3600' });
+    }
+    if (url.includes('/data/tv/19885')) {
+      return response({ results: [{ tmdb_id: 19885, title: 'Sherlock', overview: 'Kurato summary' }] });
+    }
+    if (url.includes('/catalog/series/top/search=Sherlock.json')) {
+      return response({ metas: [{ id: 'tt1475582', type: 'series', name: 'Sherlock', releaseInfo: '2010-2017' }] });
+    }
+    if (url.includes('/meta/series/tt1475582.json')) {
+      return response({ meta: {
+        id: 'tt1475582', type: 'series', name: 'Sherlock', poster: 'https://cinemeta.test/poster.jpg',
+        background: 'https://cinemeta.test/background.jpg', logo: 'https://cinemeta.test/logo.png',
+        description: 'A complete Cinemeta description.', genres: ['Crime', 'Drama', 'Mystery'],
+        cast: ['Benedict Cumberbatch', 'Martin Freeman'], videos: [{ id: 'tt1475582:1:1', title: 'A Study in Pink', season: 1, episode: 1 }],
+      } });
+    }
+    return response({});
+  }) as typeof fetch;
+}
+
 const config = {
   email: 'test@example.com',
   password: 'not-a-real-password',
@@ -93,6 +117,7 @@ test('Kurato can omit watchlist catalogs without affecting personalized catalogs
   assert.equal(manifest.catalogs?.some((catalog) => catalog.id.includes('watchlist')), false);
   assert.equal(manifest.catalogs?.length, 8);
   assert.equal(manifest.idPrefixes, undefined);
+  assert.deepEqual(manifest.resources, ['catalog']);
 });
 
 test('Kurato exposes collection contents and generated recommendation catalogs', async () => {
@@ -102,4 +127,14 @@ test('Kurato exposes collection contents and generated recommendation catalogs',
   assert.deepEqual(generated.map((item) => item.id), ['tmdb:321']);
   assert.deepEqual(collections.map((item) => item.id), ['tmdb:321']);
   assert.match(generated[0].description ?? '', /AI Starter Mix/);
+});
+
+test('Kurato enriches fallback metadata from Cinemeta while preserving the Kurato ID', async () => {
+  const addon = new KuratoAddon(config, metadataMockFetch());
+  const meta = await addon.getMeta('series', 'tmdb:19885');
+  assert.equal(meta.id, 'tmdb:19885');
+  assert.equal(meta.name, 'Sherlock');
+  assert.equal(meta.logo, 'https://cinemeta.test/logo.png');
+  assert.deepEqual(meta.genres, ['Crime', 'Drama', 'Mystery']);
+  assert.equal(meta.videos?.length, 1);
 });
