@@ -28,7 +28,11 @@ function mockFetch() {
     if (url.includes('/data/search/')) {
       const body = JSON.parse(String(init?.body));
       assert.equal(body.query, 'space opera');
-      return response({ results: [{ type: 'movie', tmdb_id: 789, title: 'Space Opera' }] });
+      assert.equal(body.contentType, 'movie');
+      return response({ results: [
+        { content: { contentType: 'movie', tmdb_id: 789, title: 'Space Opera' } },
+        { content: { contentType: 'book', id: 999, title: 'Wrong media' } },
+      ] });
     }
     return response({});
   }) as typeof fetch;

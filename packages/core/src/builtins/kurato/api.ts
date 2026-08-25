@@ -217,7 +217,7 @@ export class KuratoApiClient {
     return this.request('/data/search/', {
       method: 'POST',
       body: JSON.stringify({
-        type: 'all',
+        contentType: type === 'series' ? 'tv_show' : 'movie',
         query,
         page,
         perPage,

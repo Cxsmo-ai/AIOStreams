@@ -22,9 +22,21 @@ function firstString(item: Record<string, unknown>, keys: string[]) {
   return undefined;
 }
 
-function itemType(item: Record<string, unknown>, fallback: KuratoType): KuratoType {
-  const value = firstString(item, ['type', 'contentType', 'media_type', 'mediaType'])?.toLowerCase();
-  return value === 'tv' || value === 'series' || value === 'show' ? 'series' : value === 'movie' ? 'movie' : fallback;
+function itemType(
+  item: Record<string, unknown>,
+  fallback: KuratoType
+): KuratoType | undefined {
+  const value = firstString(item, [
+    'type',
+    'contentType',
+    'content_type',
+    'media_type',
+    'mediaType',
+  ])?.toLowerCase();
+  if (value === 'tv' || value === 'series' || value === 'show' || value === 'tv_show' || value === 'tv-show') return 'series';
+  if (value === 'movie' || value === 'movies') return 'movie';
+  if (value && !['all', 'content'].includes(value)) return undefined;
+  return fallback;
 }
 
 function collectItems(value: unknown, output: Record<string, unknown>[] = [], seen = new Set<object>()) {
@@ -67,6 +79,7 @@ function toId(item: Record<string, unknown>, type: KuratoType) {
 
 function toMetaPreview(item: Record<string, unknown>, fallbackType: KuratoType): MetaPreview | undefined {
   const type = itemType(item, fallbackType);
+  if (!type) return undefined;
   const name = firstString(item, ['title', 'name', 'original_title', 'original_name']);
   if (!name) return undefined;
   const date = firstString(item, ['releaseDate', 'release_date', 'first_air_date', 'firstAirDate', 'year']);
