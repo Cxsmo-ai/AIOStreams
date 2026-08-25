@@ -83,6 +83,7 @@ import { SeaDexPreset } from './seadex.js';
 import { StreamNZBPreset } from './streamnzb.js';
 import { DavexPreset } from './davex.js';
 import { HdHubPreset } from './hdhub.js';
+import { KuratoPreset } from './kurato.js';
 import { BaguettioPreset } from './baguettio.js';
 import { Preset } from './index.js';
 
@@ -170,6 +171,7 @@ let PRESET_LIST: string[] = [
   'ai-search',
   'more-like-this',
   'content-deep-dive',
+  'kurato',
 ].filter(Boolean);
 
 export class PresetManager {
@@ -305,6 +307,8 @@ export class PresetManager {
         return MoreLikeThisPreset;
       case 'content-deep-dive':
         return ContentDeepDivePreset;
+      case 'kurato':
+        return KuratoPreset;
       case 'ai-companion':
         return AICompanionPreset;
       case 'stremio-gdrive':

@@ -330,6 +330,7 @@ const AIOSTREAMS_SERVICE = 'aiostreams';
 const TORRIN_SERVICE = 'torrin';
 export const DEEPBRID_SERVICE = 'deepbrid' as const;
 export const TORRENTCLAW_SERVICE = 'torrentclaw' as const;
+export const KURATO_SERVICE = 'kurato' as const;
 
 const SERVICES = [
   REALDEBRID_SERVICE,
@@ -352,6 +353,7 @@ const SERVICES = [
   TORRIN_SERVICE,
   DEEPBRID_SERVICE,
   TORRENTCLAW_SERVICE,
+  KURATO_SERVICE,
 ] as const;
 
 export const BUILTIN_SUPPORTED_SERVICES = [
@@ -838,6 +840,30 @@ const SERVICE_DETAILS: Record<
         type: 'url',
         required: false,
         default: 'https://unarr.app',
+      },
+    ],
+  },
+  [KURATO_SERVICE]: {
+    id: KURATO_SERVICE,
+    name: 'Kurato',
+    shortName: 'KU',
+    knownNames: ['Kurato', 'KU'],
+    signUpText:
+      'Use the same email and password as your Kurato account. AIOStreams uses Kurato only for your authenticated recommendations, watchlist, and search.',
+    credentials: [
+      {
+        id: 'email',
+        name: 'Email',
+        description: 'Your Kurato account email. Stored securely with this AIOStreams profile.',
+        type: 'string',
+        required: true,
+      },
+      {
+        id: 'password',
+        name: 'Password',
+        description: 'Your Kurato account password. It is never included in catalog responses.',
+        type: 'password',
+        required: true,
       },
     ],
   },

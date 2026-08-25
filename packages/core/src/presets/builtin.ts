@@ -280,6 +280,13 @@ export class BuiltinAddonPreset extends Preset {
             aiostreamsAuth: credentials.aiostreamsAuth,
           })
         ),
+      [constants.KURATO_SERVICE]: (credentials: any) =>
+        toUrlSafeBase64(
+          JSON.stringify({
+            email: credentials.email,
+            password: credentials.password,
+          })
+        ),
     };
     const altmountSpecialCase: Partial<
       Record<ServiceId, (credentials: any) => any>
