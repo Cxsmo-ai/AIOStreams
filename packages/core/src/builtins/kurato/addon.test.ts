@@ -92,6 +92,7 @@ test('Kurato can omit watchlist catalogs without affecting personalized catalogs
   const manifest = new KuratoAddon({ ...config, includeWatchlist: false }, mockFetch().fetchFn).getManifest();
   assert.equal(manifest.catalogs?.some((catalog) => catalog.id.includes('watchlist')), false);
   assert.equal(manifest.catalogs?.length, 8);
+  assert.equal(manifest.idPrefixes, undefined);
 });
 
 test('Kurato exposes collection contents and generated recommendation catalogs', async () => {

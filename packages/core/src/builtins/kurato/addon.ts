@@ -201,7 +201,11 @@ export class KuratoAddon {
       logo: 'https://kurato.com/favicon.ico',
       resources: ['catalog', 'meta'],
       types: ['movie', 'series'],
-      idPrefixes: ['tt', 'tmdb:'],
+      // Kurato is a catalog/recommendation source, not the authoritative
+      // metadata provider.  Leaving metadata IDs unscoped makes AIOStreams
+      // try an installed ID-matching provider (Cinemeta, TMDB, TVDB, or
+      // another metadata addon) first, while retaining Kurato as a safe
+      // fallback when no other provider can answer the request.
       catalogs: [
         { type: 'movie', id: 'kurato-for-you-movie', name: 'Kurato · For You Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
         { type: 'series', id: 'kurato-for-you-series', name: 'Kurato · For You Series', extra: [{ name: 'search' }, { name: 'skip' }] },
