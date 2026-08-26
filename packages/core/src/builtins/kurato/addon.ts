@@ -275,14 +275,21 @@ export class KuratoAddon {
     query: string | undefined,
     skip: number
   ): Promise<CatalogResponse['metas']> {
-    const [rawCollections, rawPublicCollections] = await Promise.all([
+    const [privateResult, publicResult, searchResult] = await Promise.allSettled([
       this.api.collections(query),
       this.api.publicCollections(),
+      query ? this.api.searchContent(query, 'all', 1, 100) : Promise.resolve(undefined),
     ]);
+    const rawCollections = privateResult.status === 'fulfilled' ? privateResult.value : undefined;
+    const rawPublicCollections = publicResult.status === 'fulfilled' ? publicResult.value : undefined;
+    const rawSearch = searchResult.status === 'fulfilled' ? searchResult.value : undefined;
     const collectionById = new Map<string, Record<string, unknown>>();
     for (const collection of [
       ...collectCollections(rawCollections),
       ...collectCollections(rawPublicCollections).filter((collection) =>
+        collectionMatchesQuery(collection, query)
+      ),
+      ...collectCollections(rawSearch).filter((collection) =>
         collectionMatchesQuery(collection, query)
       ),
     ]) {

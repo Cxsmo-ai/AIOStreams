@@ -234,6 +234,14 @@ export class KuratoApiClient {
     });
   }
 
+  /** Unified Kurato search, including public/community collections. */
+  searchContent(query: string, type = 'all', page = 1, perPage = 100) {
+    return this.request('/data/search/', {
+      method: 'POST',
+      body: JSON.stringify({ query, type, page, perPage }),
+    });
+  }
+
   collections(query?: string) {
     return this.request('/data/collect/collections', {
       method: 'POST',
@@ -251,7 +259,10 @@ export class KuratoApiClient {
   publicCollections(contentType = 'all', category = '') {
     return this.request('/data/collect/public', {
       method: 'POST',
-      body: JSON.stringify({ contentType, category }),
+      // Kurato's mobile client names the second argument contentId. An empty
+      // value asks for the public/featured collection feed; category is kept
+      // as the addon-facing name for compatibility with older configs.
+      body: JSON.stringify({ contentType, contentId: category }),
     });
   }
 

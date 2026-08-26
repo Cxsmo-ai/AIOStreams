@@ -67,6 +67,29 @@ function mockFetch() {
           : collections,
       });
     }
+    if (url.includes('/data/collect/public')) {
+      assert.equal(init?.method, 'POST');
+      return response({ collections: [
+        {
+          id: 'public-1',
+          name: 'Public Fantasy Picks',
+          isPublic: true,
+          contents: [{ contentType: 'movie', tmdb_id: 987, title: 'Public Film' }],
+        },
+      ] });
+    }
+    if (url.includes('/data/search/')) {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.query, 'community');
+      return response({ collections: [
+        {
+          id: 'public-search-1',
+          name: 'Community Collections',
+          isPublic: true,
+          contents: [{ contentType: 'movie', tmdb_id: 988, title: 'Community Film' }],
+        },
+      ] });
+    }
     return response({});
   }) as typeof fetch;
   return { calls, fetchFn, get signIns() { return signIns; } };
@@ -157,6 +180,13 @@ test('Kurato exposes collection contents and generated recommendation catalogs',
   assert.deepEqual(generated.map((item) => item.id), ['tmdb:321']);
   assert.deepEqual(collections.map((item) => item.id), ['tmdb:321']);
   assert.match(generated[0].description ?? '', /AI Starter Mix/);
+});
+
+test('Kurato collection search includes public/community collections', async () => {
+  const addon = new KuratoAddon(config, mockFetch().fetchFn);
+  const results = await addon.getCatalog('movie', 'kurato-collections-movie', 'search=community');
+  assert.deepEqual(results.map((item) => item.id), ['tmdb:988']);
+  assert.match(results[0].description ?? '', /Community Collections/);
 });
 
 test('Kurato enriches fallback metadata from Cinemeta while preserving the Kurato ID', async () => {
