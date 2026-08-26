@@ -72,6 +72,19 @@ function collectionName(item: Record<string, unknown>) {
   return firstString(item, ['name', 'title', 'collectionName', 'collection_name']) ?? 'Kurato Collection';
 }
 
+function collectionMatchesQuery(item: Record<string, unknown>, query?: string) {
+  if (!query?.trim()) return true;
+  const needle = query.trim().toLowerCase();
+  return [
+    collectionName(item),
+    firstString(item, ['description', 'summary', 'category', 'creator', 'username']),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(needle);
+}
+
 function isGeneratedCollection(item: Record<string, unknown>) {
   const flag = (value: unknown) =>
     value === true || value === 1 || value === 'true' || value === '1';
@@ -264,12 +277,14 @@ export class KuratoAddon {
   ): Promise<CatalogResponse['metas']> {
     const [rawCollections, rawPublicCollections] = await Promise.all([
       this.api.collections(query),
-      query ? Promise.resolve(undefined) : this.api.publicCollections(),
+      this.api.publicCollections(),
     ]);
     const collectionById = new Map<string, Record<string, unknown>>();
     for (const collection of [
       ...collectCollections(rawCollections),
-      ...collectCollections(rawPublicCollections),
+      ...collectCollections(rawPublicCollections).filter((collection) =>
+        collectionMatchesQuery(collection, query)
+      ),
     ]) {
       const id = collectionId(collection);
       if (id && !collectionById.has(id)) collectionById.set(id, collection);
