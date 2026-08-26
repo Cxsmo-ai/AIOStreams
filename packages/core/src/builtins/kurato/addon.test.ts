@@ -29,7 +29,7 @@ function mockFetch() {
     if (url.includes('/data/watchlist/get')) {
       assert.equal(init?.method, 'POST');
       assert.deepEqual(JSON.parse(String(init?.body)), {
-        filterContentType: 'tv_show',
+        contentType: 'tv_show',
         sort: 'date',
       });
       return response({ results: [] });

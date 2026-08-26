@@ -267,7 +267,7 @@ export class KuratoApiClient {
     return this.request('/data/watchlist/get', {
       method: 'POST',
       body: JSON.stringify({
-        filterContentType: type === 'series' ? 'tv_show' : 'movie',
+        contentType: type === 'series' ? 'tv_show' : 'movie',
         sort,
       }),
     });
