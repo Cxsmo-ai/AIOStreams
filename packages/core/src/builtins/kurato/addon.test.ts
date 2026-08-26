@@ -29,6 +29,7 @@ function mockFetch() {
     if (url.includes('/data/watchlist/get')) {
       assert.equal(init?.method, 'POST');
       assert.deepEqual(JSON.parse(String(init?.body)), {
+        userId: 0,
         contentType: 'all',
         sort: 'date',
       });

@@ -196,11 +196,8 @@ export class KuratoApiClient {
     });
     const payload = await readJson(response);
     if (!response.ok) {
-      const details = payload && typeof payload === 'object'
-        ? JSON.stringify(payload).slice(0, 500)
-        : String(payload ?? '');
       throw new Error(
-        `Kurato API request failed (${response.status}) for ${path}${details ? `: ${details}` : ''}`
+        `Kurato API request failed (${response.status}) for ${path}`
       );
     }
     if (this.fetchFn === fetch) {
@@ -272,6 +269,7 @@ export class KuratoApiClient {
       body: JSON.stringify({
         // Kurato's watchlist endpoint accepts the aggregate `all` filter;
         // split movie/series entries locally for the two Stremio catalogs.
+        userId: 0,
         contentType: 'all',
         sort,
       }),
