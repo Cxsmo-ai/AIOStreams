@@ -4,7 +4,7 @@ import { KuratoApiClient, KuratoConfigSchema, type KuratoConfig } from './api.js
 
 const NSFW_RE = /\b(?:18\+|adult|erotic|erotica|hentai|porn|xxx|nsfw|sex)\b/i;
 const MAX_CATALOG_ITEMS = 200;
-const MAX_COLLECTIONS_PER_REQUEST = 12;
+const MAX_COLLECTIONS_PER_REQUEST = 40;
 const CINEMETA_BASE_URL = 'https://v3-cinemeta.strem.io';
 const CINEMETA_CACHE_TTL_MS = 60 * 60 * 1000;
 const cinemetaCache = new Map<string, { expiresAt: number; value: Meta | null }>();
@@ -262,8 +262,19 @@ export class KuratoAddon {
     query: string | undefined,
     skip: number
   ): Promise<CatalogResponse['metas']> {
-    const rawCollections = await this.api.collections(query);
-    const collections = collectCollections(rawCollections)
+    const [rawCollections, rawPublicCollections] = await Promise.all([
+      this.api.collections(query),
+      query ? Promise.resolve(undefined) : this.api.publicCollections(),
+    ]);
+    const collectionById = new Map<string, Record<string, unknown>>();
+    for (const collection of [
+      ...collectCollections(rawCollections),
+      ...collectCollections(rawPublicCollections),
+    ]) {
+      const id = collectionId(collection);
+      if (id && !collectionById.has(id)) collectionById.set(id, collection);
+    }
+    const collections = [...collectionById.values()]
       .filter((item) => !generatedOnly || isGeneratedCollection(item))
       .slice(0, MAX_COLLECTIONS_PER_REQUEST);
     if (!collections.length) return [];

@@ -248,6 +248,13 @@ export class KuratoApiClient {
     });
   }
 
+  publicCollections(contentType = 'all', category = '') {
+    return this.request('/data/collect/public', {
+      method: 'POST',
+      body: JSON.stringify({ contentType, category }),
+    });
+  }
+
   collection(
     collectionId: string,
     type: 'movie' | 'series',
