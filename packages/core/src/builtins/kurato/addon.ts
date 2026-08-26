@@ -57,7 +57,7 @@ function collectItems(value: unknown, output: Record<string, unknown>[] = [], se
   );
   if (hasTitle && hasId) output.push(current);
   for (const [key, child] of Object.entries(current)) {
-    if (/^(data|results|items|contents|movies|series|tv|movie|details|result|payload|recommendations|recommendation|trending|rows|sections|content|discovered|discover|collectionContents)$/i.test(key)) {
+    if (/^(data|results|items|contents|collections|publicCollections|movies|series|tv|movie|details|result|payload|recommendations|recommendation|trending|rows|sections|content|discovered|discover|collectionContents)$/i.test(key)) {
       collectItems(child, output, seen);
     }
   }
@@ -110,6 +110,14 @@ function looksLikeCollection(item: Record<string, unknown>) {
     item.collection_id !== undefined ||
     item.contents !== undefined;
   return Boolean(id && name && hasCollectionShape);
+}
+
+function isLikelyContentItem(item: Record<string, unknown>) {
+  const kind = firstString(item, ['type', 'contentType', 'content_type', 'media_type', 'mediaType'])?.toLowerCase();
+  return !['collection', 'collections', 'user', 'book'].includes(kind ?? '') &&
+    item.contents === undefined &&
+    item.collectionId === undefined &&
+    item.collection_id === undefined;
 }
 
 function collectCollections(
@@ -299,33 +307,50 @@ export class KuratoAddon {
     const collections = [...collectionById.values()]
       .filter((item) => !generatedOnly || isGeneratedCollection(item))
       .slice(0, MAX_COLLECTIONS_PER_REQUEST);
-    if (!collections.length) return [];
-
     const metas: MetaPreview[] = [];
-    const loaded = await Promise.allSettled(
-      collections.map(async (collection) => {
-        const id = collectionId(collection);
-        if (!id) return [] as MetaPreview[];
-        const embedded = collectItems(collection).filter((item) => !looksLikeCollection(item));
-        const raw = embedded.length
-          ? embedded
-          : collectItems(await this.api.collection(id, type, Math.max(this.config.pageSize, 100))).filter(
-              (item) => !looksLikeCollection(item)
-            );
-        return raw
-          .map((item) => toMetaPreview(item, type))
-          .filter((item): item is MetaPreview => Boolean(item && item.type === type))
-          .map((item) => ({
-            ...item,
-            description: [
-              `Kurato collection: ${collectionName(collection)}`,
-              item.description,
-            ].filter(Boolean).join(' · '),
-          }));
-      })
-    );
-    for (const result of loaded) {
-      if (result.status === 'fulfilled') metas.push(...result.value);
+    if (collections.length) {
+      const loaded = await Promise.allSettled(
+        collections.map(async (collection) => {
+          const id = collectionId(collection);
+          if (!id) return [] as MetaPreview[];
+          const embedded = collectItems(collection).filter((item) => !looksLikeCollection(item));
+          const raw = embedded.length
+            ? embedded
+            : collectItems(await this.api.collection(id, type, Math.max(this.config.pageSize, 100))).filter(
+                (item) => !looksLikeCollection(item)
+              );
+          return raw
+            .map((item) => toMetaPreview(item, type))
+            .filter((item): item is MetaPreview => Boolean(item && item.type === type))
+            .map((item) => ({
+              ...item,
+              description: [
+                `Kurato collection: ${collectionName(collection)}`,
+                item.description,
+              ].filter(Boolean).join(' · '),
+            }));
+        })
+      );
+      for (const result of loaded) {
+        if (result.status === 'fulfilled') metas.push(...result.value);
+      }
+    }
+    if (query && !generatedOnly) {
+      // Kurato's unified search may return public collection members directly
+      // instead of returning the parent collection objects. Keep those valid
+      // results visible in the collection catalog as a fallback.
+      const publicSearchItems = collectItems(rawSearch)
+        .filter(isLikelyContentItem)
+        .map((item) => toMetaPreview(item, type))
+        .filter((item): item is MetaPreview => Boolean(item && item.type === type))
+        .map((item) => ({
+          ...item,
+          description: [
+            `Kurato public collection search: ${query}`,
+            item.description,
+          ].filter(Boolean).join(' · '),
+        }));
+      metas.push(...publicSearchItems);
     }
     return dedupe(metas).slice(skip, skip + this.config.pageSize).slice(0, MAX_CATALOG_ITEMS);
   }
@@ -350,13 +375,20 @@ export class KuratoAddon {
       return this.getCollectionCatalog(requestedType, id.includes('generated'), undefined, skip);
     }
     const page = Math.floor(skip / this.config.pageSize) + 1;
-    const raw = id.includes('watchlist') && this.config.includeWatchlist
-      ? await this.api.watchlist(requestedType)
-      : await this.api.homepage(
-          requestedType === 'movie' ? 'movies' : 'series',
-          page,
-          this.config.pageSize
-        );
+    let raw: unknown;
+    try {
+      raw = id.includes('watchlist') && this.config.includeWatchlist
+        ? await this.api.watchlist(requestedType)
+        : await this.api.homepage(
+            requestedType === 'movie' ? 'movies' : 'series',
+            page,
+            this.config.pageSize
+          );
+    } catch {
+      // A transient Kurato/API failure must not become a visible error card
+      // for every other catalog in the user's client.
+      return [];
+    }
     const items = collectItems(raw)
       .map((item) => toMetaPreview(item, requestedType))
       .filter((item): item is MetaPreview => Boolean(item && item.type === requestedType));
@@ -371,7 +403,12 @@ export class KuratoAddon {
     const parsed = new ExtrasParser(extras);
     const skip = Math.max(0, parsed.skip ?? 0);
     const page = Math.floor(skip / this.config.pageSize) + 1;
-    const raw = await this.api.discover(type as KuratoType, query.trim(), page, this.config.pageSize);
+    let raw: unknown;
+    try {
+      raw = await this.api.discover(type as KuratoType, query.trim(), page, this.config.pageSize);
+    } catch {
+      return [];
+    }
     const items = collectItems(raw)
       .map((item) => toMetaPreview(item, type as KuratoType))
       .filter((item): item is MetaPreview => Boolean(item && item.type === type));

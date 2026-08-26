@@ -80,6 +80,11 @@ function mockFetch() {
     }
     if (url.includes('/data/search/')) {
       const body = JSON.parse(String(init?.body));
+      if (body.query === 'public-content') {
+        return response({ results: [
+          { contentType: 'movie', tmdb_id: 989, title: 'Public Search Film' },
+        ] });
+      }
       assert.equal(body.query, 'community');
       return response({ collections: [
         {
@@ -187,6 +192,13 @@ test('Kurato collection search includes public/community collections', async () 
   const results = await addon.getCatalog('movie', 'kurato-collections-movie', 'search=community');
   assert.deepEqual(results.map((item) => item.id), ['tmdb:988']);
   assert.match(results[0].description ?? '', /Community Collections/);
+});
+
+test('Kurato collection search keeps direct public-search content results', async () => {
+  const addon = new KuratoAddon(config, mockFetch().fetchFn);
+  const results = await addon.getCatalog('movie', 'kurato-collections-movie', 'search=public-content');
+  assert.deepEqual(results.map((item) => item.id), ['tmdb:989']);
+  assert.match(results[0].description ?? '', /public collection search/);
 });
 
 test('Kurato enriches fallback metadata from Cinemeta while preserving the Kurato ID', async () => {
