@@ -267,7 +267,9 @@ export class KuratoApiClient {
     return this.request('/data/watchlist/get', {
       method: 'POST',
       body: JSON.stringify({
-        contentType: type === 'series' ? 'tv_show' : 'movie',
+        // Kurato's watchlist endpoint accepts the aggregate `all` filter;
+        // split movie/series entries locally for the two Stremio catalogs.
+        contentType: 'all',
         sort,
       }),
     });
