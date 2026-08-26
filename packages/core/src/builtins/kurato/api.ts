@@ -212,8 +212,10 @@ export class KuratoApiClient {
   homepage(section: 'movies' | 'series', page = 1, perPage = 50) {
     // The mobile app calls homepage content through the POST contract. A GET
     // receives 405 from the current API and makes the For You catalogs appear
-    // as empty/error cards in Stremio.
-    return this.request(`/data/homepage/${section}`, {
+    // as empty/error cards in Stremio. Kurato calls the TV section `tv`, not
+    // `series`, matching its `/data/tv/...` metadata API.
+    const apiSection = section === 'series' ? 'tv' : section;
+    return this.request(`/data/homepage/${apiSection}`, {
       method: 'POST',
       body: JSON.stringify({ page, perPage }),
     });
@@ -264,7 +266,10 @@ export class KuratoApiClient {
   watchlist(type: 'movie' | 'series', sort = 'date') {
     return this.request('/data/watchlist/get', {
       method: 'POST',
-      body: JSON.stringify({ contentType: type, sort }),
+      body: JSON.stringify({
+        filterContentType: type === 'series' ? 'tv_show' : 'movie',
+        sort,
+      }),
     });
   }
 

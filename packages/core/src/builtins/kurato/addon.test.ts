@@ -26,6 +26,14 @@ function mockFetch() {
         { type: 'movie', tmdb_id: 456, title: 'Explicit XXX Film', poster_path: '/adult.jpg' },
       ] });
     }
+    if (url.includes('/data/watchlist/get')) {
+      assert.equal(init?.method, 'POST');
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        filterContentType: 'tv_show',
+        sort: 'date',
+      });
+      return response({ results: [] });
+    }
     if (url.includes('/data/discover/')) {
       const body = JSON.parse(String(init?.body));
       assert.equal(body.query, 'space opera');
@@ -114,6 +122,15 @@ test('Kurato uses the POST homepage contract and canonical TMDB artwork URLs', a
 
   const search = await addon.getCatalog('movie', 'kurato-ai-discover-movie', 'search=space opera');
   assert.equal(search[0].poster, undefined);
+});
+
+test('Kurato maps TV homepage and watchlist requests to Kurato API values', async () => {
+  const mock = mockFetch();
+  const addon = new KuratoAddon(config, mock.fetchFn);
+  await addon.getCatalog('series', 'kurato-for-you-series');
+  await addon.getCatalog('series', 'kurato-watchlist-series');
+  assert.ok(mock.calls.some((url) => url.includes('/data/homepage/tv')));
+  assert.ok(mock.calls.some((url) => url.includes('/data/watchlist/get')));
 });
 
 test('Kurato routes Stremio search extras to the authenticated search endpoint', async () => {
