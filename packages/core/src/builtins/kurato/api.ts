@@ -210,9 +210,13 @@ export class KuratoApiClient {
   }
 
   homepage(section: 'movies' | 'series', page = 1, perPage = 50) {
-    return this.request(
-      `/data/homepage/${section}?page=${page}&perPage=${perPage}`
-    );
+    // The mobile app calls homepage content through the POST contract. A GET
+    // receives 405 from the current API and makes the For You catalogs appear
+    // as empty/error cards in Stremio.
+    return this.request(`/data/homepage/${section}`, {
+      method: 'POST',
+      body: JSON.stringify({ page, perPage }),
+    });
   }
 
   /** Kurato's natural-language Discover flow is the addon's primary search. */

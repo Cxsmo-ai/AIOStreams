@@ -20,6 +20,7 @@ function mockFetch() {
       return response({ idToken: 'test-id-token', refreshToken: 'test-refresh', expiresIn: '3600' });
     }
     if (url.includes('/data/homepage/')) {
+      assert.equal(init?.method, 'POST');
       return response({ results: [
         { type: 'movie', tmdb_id: 123, title: 'Clean Film', poster_path: '/clean.jpg' },
         { type: 'movie', tmdb_id: 456, title: 'Explicit XXX Film', poster_path: '/adult.jpg' },
@@ -102,6 +103,17 @@ test('Kurato maps personalized catalogs, filters adult items, and reuses auth', 
   assert.deepEqual(first.map((item) => item.id), ['tmdb:123']);
   assert.deepEqual(second.map((item) => item.name), ['Clean Film']);
   assert.equal(mock.signIns, 1);
+});
+
+test('Kurato uses the POST homepage contract and canonical TMDB artwork URLs', async () => {
+  const mock = mockFetch();
+  const addon = new KuratoAddon(config, mock.fetchFn);
+  const items = await addon.getCatalog('movie', 'kurato-for-you-movie');
+  assert.equal(items[0].poster, 'https://image.tmdb.org/t/p/w500/clean.jpg');
+  assert.ok(mock.calls.some((url) => url.includes('/data/homepage/movies')));
+
+  const search = await addon.getCatalog('movie', 'kurato-ai-discover-movie', 'search=space opera');
+  assert.equal(search[0].poster, undefined);
 });
 
 test('Kurato routes Stremio search extras to the authenticated search endpoint', async () => {

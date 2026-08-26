@@ -122,7 +122,16 @@ function collectCollections(
 
 function imageUrl(value: unknown, base: string) {
   if (typeof value !== 'string' || !value.trim()) return undefined;
-  return /^https?:\/\//i.test(value) ? value : `${base}${value.startsWith('/') ? value : `/${value}`}`;
+  if (/^https?:\/\//i.test(value)) {
+    // Kurato currently returns TMDB paths under img.kurato.com. That host is
+    // reachable from some clients but fails in others; the canonical TMDB
+    // CDN serves the same asset reliably.
+    return value.replace(
+      /^https?:\/\/img\.kurato\.com\/t\/p\/(w\d+)\//i,
+      'https://image.tmdb.org/t/p/$1/'
+    );
+  }
+  return `https://image.tmdb.org/t/p/${base}${value.startsWith('/') ? value : `/${value}`}`;
 }
 
 function isNsfw(item: MetaPreview) {
@@ -160,8 +169,8 @@ function toMetaPreview(item: Record<string, unknown>, fallbackType: KuratoType):
     id: toId(item, type),
     type,
     name,
-    poster: imageUrl(item.posterPath ?? item.poster_path ?? item.poster ?? item.image ?? item.cover, 'https://img.kurato.com/t/p/w500'),
-    background: imageUrl(item.backdropPath ?? item.backdrop_path ?? item.backdrop, 'https://img.kurato.com/t/p/w780'),
+    poster: imageUrl(item.posterPath ?? item.poster_path ?? item.poster ?? item.image ?? item.cover, 'w500'),
+    background: imageUrl(item.backdropPath ?? item.backdrop_path ?? item.backdrop, 'w1280'),
     description: firstString(item, ['overview', 'synopsis', 'description', 'explanation']),
     releaseInfo: date?.slice(0, 4),
     genres,
