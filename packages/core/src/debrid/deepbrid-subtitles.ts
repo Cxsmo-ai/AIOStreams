@@ -142,7 +142,9 @@ export function filterDeepbridSubtitles(
 }
 
 const subtitleSearchCache = Cache.getInstance<string, DeepbridOpenSubtitleItem[]>(
-  'deepbrid:subtitles:search',
+  // v2 invalidates entries created before exact title/episode validation was
+  // added; otherwise a stale fuzzy result could survive for an hour.
+  'deepbrid:subtitles:search:v2',
   300,
   appConfig.bootstrap.redisUri ? 'redis' : 'sql'
 );
@@ -160,7 +162,7 @@ export async function searchDeepbridOpenSubtitles(
 
   const cacheKey = `${cleanQuery.toLowerCase()}:${lang.toLowerCase()}`;
   const cached = await subtitleSearchCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) return filterDeepbridSubtitles(cached, cleanQuery, lang);
 
   const url = `${DEEPBRID_SUBTITLE_BASE}/web/sub/ossearch?query=${encodeURIComponent(
     cleanQuery
