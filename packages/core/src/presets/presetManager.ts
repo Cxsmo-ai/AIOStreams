@@ -67,6 +67,7 @@ import { UnarrIndexerPreset } from './unarrIndexer.js';
 import { NewshostingIndexerPreset } from './newshostingIndexer.js';
 import { DeepbridUsenetPreset } from './deepbridUsenet.js';
 import { ProwlarrPreset } from './prowlarr.js';
+import { HarbrrPreset } from './harbrr.js';
 import { JackettPreset } from './jackett.js';
 import { NZBHydraPreset } from './nzbhydra.js';
 import { KnabenPreset } from './knaben.js';
@@ -113,6 +114,7 @@ let PRESET_LIST: string[] = [
   'animetosho',
   'neko-bt',
   'prowlarr',
+  'harbrr',
   'jackett',
   'nzbhydra',
   'stremio-gdrive',
@@ -333,6 +335,8 @@ export class PresetManager {
         return NekoBtPreset;
       case 'prowlarr':
         return ProwlarrPreset;
+      case 'harbrr':
+        return HarbrrPreset;
       case 'jackett':
         return JackettPreset;
       case 'nzbhydra':

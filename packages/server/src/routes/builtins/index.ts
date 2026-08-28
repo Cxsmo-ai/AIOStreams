@@ -15,3 +15,5 @@ export { default as library } from './library.js';
 export { default as kurato } from './kurato.js';
 
 export { default as deepbridSubtitles } from './deepbrid-subtitles.js';
+
+export { default as harbrr } from './harbrr.js';

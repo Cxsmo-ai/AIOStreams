@@ -236,6 +236,7 @@ const ACRONYMS: Record<string, string> = {
   jackett: 'Jackett',
   zilean: 'Zilean',
   prowlarr: 'Prowlarr',
+  harbrr: 'Harbrr',
   torrentio: 'Torrentio',
   mediafusion: 'MediaFusion',
   comet: 'Comet',

@@ -7,6 +7,7 @@ export * from './unarr-indexer/index.js';
 export * from './newshosting-indexer/index.js';
 export * from './deepbrid-usenet/index.js';
 export * from './prowlarr/index.js';
+export * from './harbrr/index.js';
 export * from './knaben/index.js';
 export * from './eztv/index.js';
 export * from './torrent-galaxy/index.js';

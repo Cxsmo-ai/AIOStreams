@@ -47,6 +47,7 @@ import {
   deepbridUsenet,
   deepbridSubtitles,
   prowlarr,
+  harbrr,
   knaben,
   eztv,
   torrentGalaxy,
@@ -256,6 +257,7 @@ builtinsRouter.use('/newshosting-indexer', newshostingIndexer);
 builtinsRouter.use('/deepbrid-usenet', deepbridUsenet);
 builtinsRouter.use('/deepbrid-subtitles', deepbridSubtitles);
 builtinsRouter.use('/prowlarr', prowlarr);
+builtinsRouter.use('/harbrr', harbrr);
 builtinsRouter.use('/knaben', knaben);
 builtinsRouter.use('/eztv', eztv);
 builtinsRouter.use('/torrent-galaxy', torrentGalaxy);

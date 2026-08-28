@@ -15,6 +15,7 @@ import {
   AnimeDatabase,
   ConfigStartupError,
   ProwlarrAddon,
+  HarbrrAddon,
   TemplateManager,
   SeaDexDataset,
   SceneMappingDataset,
@@ -258,6 +259,7 @@ async function initialiseIdMappingDataset() {
 async function initialiseProwlarr() {
   try {
     await ProwlarrAddon.fetchpreconfiguredIndexers();
+    await HarbrrAddon.fetchpreconfiguredIndexers();
   } catch (error) {
     logger.error('Failed to initialise Prowlarr:', error);
   }
