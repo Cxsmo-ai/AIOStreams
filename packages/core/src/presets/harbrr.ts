@@ -28,10 +28,14 @@ export class HarbrrPreset extends BuiltinAddonPreset {
     let hasPreconfigured = false;
     let defaultTimeout = 7000;
     let searchTimeout = 30000;
+    let internalUrl = 'http://localhost:3000';
+    let userAgent = 'AIOStreams';
     try {
       hasPreconfigured = Boolean(appConfig.builtins.harbrr?.url && appConfig.builtins.harbrr?.apiKey);
       defaultTimeout = appConfig.presets?.defaultTimeout ?? 7000;
       searchTimeout = appConfig.builtins.harbrr?.searchTimeout ?? 30000;
+      internalUrl = appConfig.bootstrap?.internalUrl ?? 'http://localhost:3000';
+      userAgent = appConfig.http?.defaultUserAgent ?? 'AIOStreams';
     } catch {
       hasPreconfigured = false;
     }
@@ -62,7 +66,7 @@ export class HarbrrPreset extends BuiltinAddonPreset {
         name: 'Timeout (ms)',
         description: 'The timeout for this addon',
         type: 'number',
-        default: appConfig.presets.defaultTimeout,
+        default: defaultTimeout,
         constraints: {
           min: appConfig.userLimits.timeouts.minTimeout,
           max: appConfig.userLimits.timeouts.maxTimeout,
@@ -193,9 +197,9 @@ export class HarbrrPreset extends BuiltinAddonPreset {
       ID: 'harbrr',
       NAME: 'Harbrr',
       LOGO: 'https://raw.githubusercontent.com/autobrr/harbrr/refs/heads/main/web/public/favicon.ico',
-      URL: [`${appConfig.bootstrap.internalUrl}/builtins/harbrr`],
-      TIMEOUT: appConfig.presets.defaultTimeout,
-      USER_AGENT: appConfig.http.defaultUserAgent,
+      URL: [`${internalUrl}/builtins/harbrr`],
+      TIMEOUT: defaultTimeout,
+      USER_AGENT: userAgent,
       SUPPORTED_SERVICES: supportedServices,
       DESCRIPTION:
         'An addon to get torrent and usenet results from a Harbrr instance via services.',
