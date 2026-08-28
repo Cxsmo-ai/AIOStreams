@@ -117,7 +117,11 @@ class StreamFetcher {
 
   public async fetch(
     addons: Addon[],
-    context: StreamContext
+    context: StreamContext,
+    onProgress?: (progress: {
+      streams: ParsedStream[];
+      errors: { title?: string; description?: string }[];
+    }) => Promise<void> | void
   ): Promise<{
     streams: ParsedStream[];
     errors: {
@@ -139,6 +143,39 @@ class StreamFetcher {
     const allStatisticStreams: AddonStatistic[] = [];
     let allStreams: ParsedStream[] = [];
     const start = Date.now();
+
+    // Progressive consumers (currently the opt-in Nuvio client) receive a
+    // cumulative raw snapshot. The normal fetch path never installs this
+    // callback and therefore has exactly the same work and ordering as before.
+    const progressiveStreams = new Map<string, ParsedStream>();
+    const progressiveErrors = new Map<string, { title?: string; description?: string }>();
+    let progressiveCallback = Promise.resolve();
+    const reportProgress = onProgress
+      ? (progress: {
+          streams: ParsedStream[];
+          errors: { title?: string; description?: string }[];
+        }) => {
+          for (const stream of progress.streams) {
+            progressiveStreams.set(stream.id, stream);
+          }
+          for (const error of progress.errors) {
+            const key = `${error.title ?? ''}\u0000${error.description ?? ''}`;
+            progressiveErrors.set(key, error);
+          }
+          const snapshot = {
+            streams: [...progressiveStreams.values()],
+            errors: [...progressiveErrors.values()],
+          };
+          progressiveCallback = progressiveCallback
+            .then(() => onProgress(snapshot))
+            .catch((error) => {
+              logger.debug(
+                { error: error instanceof Error ? error.message : String(error) },
+                'progressive stream callback failed'
+              );
+            });
+        }
+      : undefined;
 
     // Seed every input addon with `not_started` so anything filtered out (or
     // never reached on the dynamic path) is attributable to a disposition.
@@ -285,7 +322,28 @@ class StreamFetcher {
     // Helper function to fetch from a group of addons and track time
     const fetchAndProcessAddons = async (addons: Addon[]) => {
       const groupStart = Date.now();
-      const results = await Promise.all(addons.map(fetchFromAddon));
+      let results: Array<Awaited<ReturnType<typeof fetchFromAddon>>>;
+      if (reportProgress) {
+        // Preserve the configured addon order for the eventual final result,
+        // while reporting each completed addon immediately.
+        const slots = new Array<Awaited<ReturnType<typeof fetchFromAddon>>>(addons.length);
+        const arrivals: Array<Awaited<ReturnType<typeof fetchFromAddon>>> = [];
+        await Promise.all(
+          addons.map(async (addon, index) => {
+            const result = await fetchFromAddon(addon);
+            slots[index] = result;
+            arrivals.push(result);
+            reportProgress({
+              streams: arrivals.flatMap((item) => item.streams),
+              errors: arrivals.flatMap((item) => item.errors),
+            });
+          })
+        );
+        await progressiveCallback;
+        results = slots;
+      } else {
+        results = await Promise.all(addons.map(fetchFromAddon));
+      }
 
       const groupStreams = results.flatMap((r) => r.streams);
       const groupErrors = results.flatMap((r) => r.errors);

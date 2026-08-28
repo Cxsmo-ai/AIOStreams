@@ -63,10 +63,14 @@ const logger = createLogger('core');
 const PING_TIMEOUT_MS = 10_000;
 
 /** Shape returned by getStreams */
-type StreamsResponse = AIOStreamsResponse<{
+export type StreamsResponse = AIOStreamsResponse<{
   streams: ParsedStream[];
   statistics: { title: string; description: string; forced?: boolean }[];
 }>;
+
+export type StreamProgressCallback = (
+  response: StreamsResponse
+) => Promise<void> | void;
 
 /**
  * Full-pipeline result cache: caches the final processed response for a whole
@@ -723,7 +727,8 @@ export async function getStreams(
   ctx: AIOStreamsContext,
   id: string,
   type: string,
-  preCaching: boolean = false
+  preCaching: boolean = false,
+  onProgress?: StreamProgressCallback
 ): Promise<StreamsResponse> {
   logger.debug({ type, id }, 'handling stream request');
   const statistics: { title: string; description: string; forced?: boolean }[] =
@@ -743,7 +748,9 @@ export async function getStreams(
   ctx.streamContext = context;
 
   const pipelineTtl = appConfig.resources.cache.pipeline.ttl;
-  const usePipelineCache = !preCaching && pipelineTtl > 0;
+  // A progressive request must execute the fetcher so that snapshots can be
+  // delivered. It is intentionally never served from the final-result cache.
+  const usePipelineCache = !preCaching && !onProgress && pipelineTtl > 0;
   // Hash the full userData: it captures everything the pipeline output depends
   // on
   let pipelineCacheKey = '';
@@ -775,7 +782,42 @@ export async function getStreams(
     errors,
     statistics: addonStatistics,
     dispositions,
-  } = await ctx.fetcher.fetch(supportedAddons, context);
+  } = await ctx.fetcher.fetch(
+    supportedAddons,
+    context,
+    onProgress
+      ? async (progress) => {
+          if (progress.streams.length === 0) return;
+          try {
+            // Reuse the canonical AIOStreams processor for every snapshot, so
+            // Nuvio sees the same filtering, deduplication, sorting, SEL,
+            // service routing, and URL proxying as the final response. The
+            // expensive final-only side effects (statistics and subtitle
+            // expansion) remain exclusive to the terminal response.
+            const partial = await processStreams(
+              ctx,
+              progress.streams,
+              context,
+              false
+            );
+            await onProgress({
+              success: true,
+              data: { streams: partial.streams, statistics: [] },
+              errors: [...progress.errors, ...partial.errors],
+            });
+          } catch (error) {
+            logger.debug(
+              {
+                type,
+                id,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              'progressive snapshot processing failed'
+            );
+          }
+        }
+      : undefined
+  );
   const fetchMs = Date.now() - fetchStart;
 
   if (

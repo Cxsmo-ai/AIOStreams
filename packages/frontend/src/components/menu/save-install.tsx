@@ -534,6 +534,33 @@ function InstallCard({
                   ' Your profile alias stands in for the UUID and password; the long URL still works.'}
               </p>
               <CompatibleClientLogos />
+              <div className="mt-5 border-t border-gray-700/60 pt-4">
+                <label className="text-xs font-medium text-gray-400 ml-1">
+                  Nuvio TV progressive manifest
+                </label>
+                <div className="flex items-center gap-2 mt-1.5">
+                  <TextInput
+                    type="text"
+                    readOnly
+                    value={nuvioProgressiveManifestUrl}
+                    className="flex-1 font-mono text-xs bg-black/20"
+                    onClick={(e) => e.currentTarget.select()}
+                  />
+                  <Button
+                    onClick={copyNuvioProgressiveManifestUrl}
+                    intent="gray-outline"
+                    className="shrink-0 px-3"
+                    aria-label="Copy Nuvio progressive manifest URL"
+                  >
+                    <CopyIcon className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="text-xs text-gray-500 ml-1 mt-1.5">
+                  Use this URL in the modified Nuvio build to show sources as
+                  providers finish. The final list still uses the complete
+                  AIOStreams sorting, filtering, and deduplication pipeline.
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -1578,6 +1605,9 @@ function Content() {
     : aliasForInstall
       ? `${baseUrl}/stremio/u/${aliasForInstall}/manifest.json${variantQuery}`
       : `${baseUrl}/stremio/${uuid}/${encryptedPassword}/manifest.json${variantQuery}`;
+  const nuvioProgressiveManifestUrl = manifestUrl
+    ? `${manifestUrl}${manifestUrl.includes('?') ? '&' : '?'}client=nuvio-progressive`
+    : '';
   const chillLinkUrl = uuid
     ? `${baseUrl}/chilllink/${uuid}/${encryptedPassword}${variantQuery}`
     : '';
@@ -1596,6 +1626,13 @@ function Content() {
     await copyToClipboard(manifestUrl, {
       onSuccess: () => toast.success('Manifest URL copied to clipboard'),
       onError: () => toast.error('Failed to copy manifest URL'),
+    });
+  };
+
+  const copyNuvioProgressiveManifestUrl = async () => {
+    await copyToClipboard(nuvioProgressiveManifestUrl, {
+      onSuccess: () => toast.success('Nuvio progressive manifest URL copied'),
+      onError: () => toast.error('Failed to copy Nuvio manifest URL'),
     });
   };
 

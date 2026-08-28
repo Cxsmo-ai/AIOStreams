@@ -186,7 +186,11 @@ export class StremioTransformer {
       statistics: { title: string; description: string; forced?: boolean }[];
     }>,
     formatterContext: FormatterContext,
-    options?: { provideStreamData?: boolean; disableAutoplay?: boolean }
+    options?: {
+      provideStreamData?: boolean;
+      disableAutoplay?: boolean;
+      includeUniversalSubtitles?: boolean;
+    }
   ): Promise<AIOStreamResponse> {
     const formatter = createFormatter(formatterContext);
     const {
@@ -199,9 +203,11 @@ export class StremioTransformer {
 
     const start = Date.now();
 
-    // Universal Subtitle Resolution: Fetch Deepbrid OpenSubtitles for this media title
+    // Universal Subtitle Resolution: Fetch Deepbrid OpenSubtitles for this media title.
+    // Progressive Nuvio snapshots deliberately skip this repeated request; the
+    // terminal snapshot performs the normal subtitle expansion once.
     let globalSubtitles: Subtitle[] = [];
-    try {
+    if (options?.includeUniversalSubtitles !== false) try {
       const mediaTitle = formatterContext.title;
       if (mediaTitle) {
         let subQuery = mediaTitle;

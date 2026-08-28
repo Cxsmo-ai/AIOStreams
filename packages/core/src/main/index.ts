@@ -36,6 +36,7 @@ import {
   getSubtitles as _getSubtitles,
   getAddonCatalog as _getAddonCatalog,
 } from './resources.js';
+import type { StreamProgressCallback } from './resources.js';
 
 const logger = createLogger('core');
 
@@ -92,9 +93,10 @@ export class AIOStreams {
   public async getStreams(
     id: string,
     type: string,
-    preCaching: boolean = false
+    preCaching: boolean = false,
+    onProgress?: StreamProgressCallback
   ) {
-    return _getStreams(this.ctx, id, type, preCaching);
+    return _getStreams(this.ctx, id, type, preCaching, onProgress);
   }
 
   public async getCatalog(type: string, id: string, extras?: string) {

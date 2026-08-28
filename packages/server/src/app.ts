@@ -23,6 +23,7 @@ import {
   configure,
   manifest,
   stream,
+  progressiveStream,
   catalog,
   meta,
   subtitle,
@@ -215,12 +216,14 @@ const stremioAuthRouter = express.Router({ mergeParams: true });
 stremioAuthRouter.use(corsMiddleware);
 stremioAuthRouter.use('/manifest.json', stremioManifestRateLimiter);
 stremioAuthRouter.use('/stream', stremioStreamRateLimiter);
+stremioAuthRouter.use('/stream-progressive', stremioStreamRateLimiter);
 stremioAuthRouter.use('/meta', stremioMetaRateLimiter);
 stremioAuthRouter.use('/catalog', stremioCatalogRateLimiter);
 stremioAuthRouter.use('/subtitles', stremioSubtitleRateLimiter);
 stremioAuthRouter.use(userDataMiddleware);
 stremioAuthRouter.use('/manifest.json', manifest);
 stremioAuthRouter.use('/stream', stream);
+stremioAuthRouter.use('/stream-progressive', progressiveStream);
 stremioAuthRouter.use('/configure', requireSessionIfAuthRequired, configure);
 stremioAuthRouter.use('/meta', meta);
 stremioAuthRouter.use('/catalog', catalog);
