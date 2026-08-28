@@ -3,24 +3,35 @@ export async function collectHarbrrResultsUntilDeadline<T>(
   deadlineMs: number,
   onError?: (error: unknown) => void
 ): Promise<T[]> {
-  const results: T[] = [];
+  // Keep results in query order even though requests are allowed to complete
+  // concurrently. More importantly, never let a promise that settles after
+  // the deadline mutate the array that has already been returned to the
+  // caller; that race made repeated scrapes appear inconsistent.
+  const resultsByTask: Array<T[] | undefined> = new Array(tasks.length);
+  let deadlineReached = false;
   let timeout: NodeJS.Timeout | undefined;
   const settled = Promise.allSettled(
-    tasks.map(async (task) => {
+    tasks.map(async (task, index) => {
       try {
-        results.push(...(await task));
+        resultsByTask[index] = await task;
       } catch (error) {
-        onError?.(error);
+        if (!deadlineReached) onError?.(error);
       }
     })
   );
   const deadline = new Promise<void>((resolve) => {
-    timeout = setTimeout(resolve, Math.max(1, deadlineMs));
+    timeout = setTimeout(
+      () => {
+        deadlineReached = true;
+        resolve();
+      },
+      Math.max(1, deadlineMs)
+    );
   });
   try {
     await Promise.race([settled, deadline]);
   } finally {
     if (timeout) clearTimeout(timeout);
   }
-  return results;
+  return resultsByTask.flatMap((results) => results ?? []);
 }

@@ -31,3 +31,18 @@ test('keeps successful Harbrr results when another query fails', async () => {
   assert.deepEqual(results, [1]);
   assert.equal(errors.length, 1);
 });
+
+test('preserves query order when requests finish out of order', async () => {
+  let resolveFirst!: (value: number[]) => void;
+  const first = new Promise<number[]>((resolve) => {
+    resolveFirst = resolve;
+  });
+
+  const resultsPromise = collectHarbrrResultsUntilDeadline(
+    [first, Promise.resolve([2])],
+    1_000
+  );
+  resolveFirst([1]);
+
+  assert.deepEqual(await resultsPromise, [1, 2]);
+});

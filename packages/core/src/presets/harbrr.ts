@@ -1,14 +1,6 @@
-import { Addon, Option, Stream, UserData } from '../db/index.js';
-import { Preset, baseOptions } from './preset.js';
+import { Addon, Option, UserData } from '../db/index.js';
 import { withInternalTimeoutMargin } from './timeout.js';
-import {
-  Env,
-  appConfig,
-  RESOURCES,
-  ServiceId,
-  constants,
-  createLogger,
-} from '../utils/index.js';
+import { appConfig, ServiceId, constants } from '../utils/index.js';
 import { StremThruPreset } from './stremthru.js';
 import { BuiltinAddonPreset } from './builtin.js';
 import { HarbrrAddon } from '../builtins/index.js';
@@ -18,11 +10,6 @@ export class HarbrrPreset extends BuiltinAddonPreset {
     const supportedResources = [constants.STREAM_RESOURCE];
     const supportedServices: ServiceId[] = [
       ...StremThruPreset.supportedServices,
-      constants.NZBDAV_SERVICE,
-      constants.ALTMOUNT_SERVICE,
-      constants.STREMIO_NNTP_SERVICE,
-      constants.STREMTHRU_NEWZ_SERVICE,
-      constants.AIOSTREAMS_SERVICE,
       constants.DEEPBRID_SERVICE,
     ];
     let hasPreconfigured = false;
@@ -31,7 +18,9 @@ export class HarbrrPreset extends BuiltinAddonPreset {
     let internalUrl = 'http://localhost:3000';
     let userAgent = 'AIOStreams';
     try {
-      hasPreconfigured = Boolean(appConfig.builtins.harbrr?.url && appConfig.builtins.harbrr?.apiKey);
+      hasPreconfigured = Boolean(
+        appConfig.builtins.harbrr?.url && appConfig.builtins.harbrr?.apiKey
+      );
       defaultTimeout = appConfig.presets?.defaultTimeout ?? 7000;
       searchTimeout = appConfig.builtins.harbrr?.searchTimeout ?? 30000;
       internalUrl = appConfig.bootstrap?.internalUrl ?? 'http://localhost:3000';
@@ -78,24 +67,16 @@ export class HarbrrPreset extends BuiltinAddonPreset {
         name: 'Harbrr URL',
         description: 'The URL of the Harbrr instance',
         type: 'url',
-        required:
-          !hasPreconfigured,
-        showInSimpleMode:
-          hasPreconfigured
-            ? false
-            : undefined,
+        required: !hasPreconfigured,
+        showInSimpleMode: hasPreconfigured ? false : undefined,
       },
       {
         id: 'harbrrApiKey',
         name: 'Harbrr API Key',
         description: 'The API key for the Harbrr instance',
         type: 'password',
-        required:
-          !hasPreconfigured,
-        showInSimpleMode:
-          hasPreconfigured
-            ? false
-            : undefined,
+        required: !hasPreconfigured,
+        showInSimpleMode: hasPreconfigured ? false : undefined,
       },
       ...(HarbrrAddon.preconfiguredIndexers
         ? [
@@ -124,25 +105,6 @@ export class HarbrrPreset extends BuiltinAddonPreset {
               default: '',
             } as const,
           ]),
-      {
-        id: 'sources',
-        name: 'Sources',
-        description:
-          'The sources to use when fetching from Harbrr. If not specified, both torrent and usenet indexers will be used, if available.',
-        type: 'multi-select',
-        required: false,
-        showInSimpleMode: false,
-        options: [
-          {
-            label: 'Torrent',
-            value: 'torrent',
-          },
-          {
-            label: 'Usenet',
-            value: 'usenet',
-          },
-        ],
-      },
       {
         id: 'mediaTypes',
         name: 'Media Types',
@@ -196,18 +158,15 @@ export class HarbrrPreset extends BuiltinAddonPreset {
     return {
       ID: 'harbrr',
       NAME: 'Harbrr',
-      LOGO: 'https://raw.githubusercontent.com/autobrr/harbrr/refs/heads/main/web/public/favicon.ico',
+      LOGO: 'https://raw.githubusercontent.com/nitrobass24/harbrr/main/.github/assets/logo.png',
       URL: [`${internalUrl}/builtins/harbrr`],
       TIMEOUT: defaultTimeout,
       USER_AGENT: userAgent,
       SUPPORTED_SERVICES: supportedServices,
       DESCRIPTION:
-        'An addon to get torrent and usenet results from a Harbrr instance via services.',
+        'An addon to get public and private torrent-tracker results from a Harbrr instance via debrid services.',
       OPTIONS: options,
-      SUPPORTED_STREAM_TYPES: [
-        constants.DEBRID_STREAM_TYPE,
-        constants.USENET_STREAM_TYPE,
-      ],
+      SUPPORTED_STREAM_TYPES: [constants.DEBRID_STREAM_TYPE],
       SUPPORTED_RESOURCES: supportedResources,
       BUILTIN: true,
     };
@@ -264,7 +223,7 @@ export class HarbrrPreset extends BuiltinAddonPreset {
       mediaTypes: options.mediaTypes || [],
       timeout: withInternalTimeoutMargin(
         options.timeout,
-        (appConfig.builtins?.harbrr?.searchTimeout ?? 30000)
+        appConfig.builtins?.harbrr?.searchTimeout ?? 30000
       ),
       preset: {
         id: '',
@@ -310,7 +269,10 @@ export class HarbrrPreset extends BuiltinAddonPreset {
       url: harbrrUrl,
       apiKey: harbrrApiKey,
       indexers: indexers || [],
-      sources: options.sources || [],
+      // Harbrr is a torrent-tracker integration in this fork. Pin the
+      // protocol in generated configs so older/default marketplace payloads
+      // cannot accidentally enable an unrelated Usenet branch.
+      sources: ['torrent'],
     };
 
     const configString = this.base64EncodeJSON(config, 'urlSafe');

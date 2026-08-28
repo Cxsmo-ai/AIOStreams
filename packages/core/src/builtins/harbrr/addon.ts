@@ -5,19 +5,17 @@ import { config as appConfig } from '../../config/index.js';
 import HarbrrApi, {
   HarbrrApiIndexer,
   HarbrrApiSearchResult,
-  HarbrrApiError,
   HARBRR_INTERACTIVE_TIMEOUT_MS,
 } from './api.js';
 import { ParsedId } from '../../utils/id-parser.js';
 import { SearchMetadata } from '../base/debrid.js';
-import { Torrent, NZB, UnprocessedTorrent } from '../../debrid/index.js';
+import { NZB, UnprocessedTorrent } from '../../debrid/index.js';
 import {
   extractInfoHashFromMagnet,
   extractTrackersFromMagnet,
   validateInfoHash,
 } from '../utils/debrid.js';
 import { createQueryLimit, getTitleLanguagesForUrl } from '../utils/general.js';
-import { hashNzbUrl } from '../../debrid/utils.js';
 import { collectHarbrrResultsUntilDeadline } from './deadline.js';
 
 export const HarbrrAddonConfigSchema = BaseDebridConfigSchema.extend({
@@ -56,7 +54,9 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
     let searchTimeout = 30000;
     try {
       isPreconfigured =
-        Boolean(appConfig.builtins.harbrr?.url && appConfig.builtins.harbrr?.apiKey) &&
+        Boolean(
+          appConfig.builtins.harbrr?.url && appConfig.builtins.harbrr?.apiKey
+        ) &&
         appConfig.builtins.harbrr.url === config.url &&
         appConfig.builtins.harbrr.apiKey === config.apiKey;
       searchTimeout = appConfig.builtins.harbrr?.searchTimeout ?? 30000;
@@ -96,7 +96,9 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
       this.preconfiguredIndexers = data.filter((indexer) => {
         if (!indexer.enabled) return false;
         if (appConfig.builtins.harbrr.indexers?.length) {
-          const configured = appConfig.builtins.harbrr.indexers.map((x) => x.toLowerCase());
+          const configured = appConfig.builtins.harbrr.indexers.map((x) =>
+            x.toLowerCase()
+          );
           return [
             indexer.name.toLowerCase(),
             indexer.slug.toLowerCase(),
@@ -177,9 +179,13 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
       return [];
     }
 
-    const queries = this.buildQueries(parsedId, metadata, {
-      titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
-    });
+    const queries = [
+      ...new Set(
+        this.buildQueries(parsedId, metadata, {
+          titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
+        })
+      ),
+    ];
     if (queries.length === 0) {
       return [];
     }
@@ -229,10 +235,13 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
 
     for (const result of results) {
       const rel = result.release;
-      const magnetUrl = rel.magnet?.includes('magnet:') ? rel.magnet : undefined;
+      const magnetUrl = rel.magnet?.includes('magnet:')
+        ? rel.magnet
+        : undefined;
       const downloadUrl = rel.link?.startsWith('http') ? rel.link : undefined;
       const infoHash = validateInfoHash(
-        rel.infohash || (magnetUrl ? extractInfoHashFromMagnet(magnetUrl) : undefined)
+        rel.infohash ||
+          (magnetUrl ? extractInfoHashFromMagnet(magnetUrl) : undefined)
       );
       if (!infoHash && !downloadUrl) continue;
       if (seenTorrents.has(infoHash ?? downloadUrl!)) continue;
@@ -253,35 +262,9 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
   }
 
   protected async _searchNzbs(parsedId: ParsedId): Promise<NZB[]> {
-    const metadata = await this.getSearchMetadata();
-    const results = await this.performSearch('usenet', parsedId, metadata);
-    if (results.length === 0) return [];
-
-    const seenNzbs = new Set<string>();
-    const nzbs: NZB[] = [];
-
-    for (const result of results) {
-      const rel = result.release;
-      const nzbUrl = rel.link;
-      if (!nzbUrl) continue;
-      if (seenNzbs.has(nzbUrl)) continue;
-      seenNzbs.add(nzbUrl);
-
-      const hash = hashNzbUrl(nzbUrl);
-      const age = rel.publishDate
-        ? Math.max(0, Math.ceil((Date.now() - new Date(rel.publishDate).getTime()) / (1000 * 60 * 60 * 24)))
-        : 0;
-
-      nzbs.push({
-        hash,
-        nzb: nzbUrl,
-        age,
-        title: rel.title,
-        size: rel.size,
-        indexer: result.indexer,
-        type: 'usenet',
-      });
-    }
-    return nzbs;
+    // Harbrr is intentionally torrent-only in AIOStreams. Its Usenet
+    // capability remains available in the upstream service, but this preset
+    // is dedicated to the user's public/private torrent tracker fabric.
+    return [];
   }
 }

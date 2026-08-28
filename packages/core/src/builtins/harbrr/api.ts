@@ -1,9 +1,9 @@
-import { fetch } from 'undici';
 import {
   Cache,
   createLogger,
   DistributedLock,
   formatZodError,
+  getSimpleTextHash,
   makeRequest,
 } from '../../utils/index.js';
 import { config as appConfig } from '../../config/index.js';
@@ -67,7 +67,10 @@ const HarbrrApiReleaseSchema = z.object({
     .optional()
     .transform((val) => val?.toLowerCase()),
   guid: z.string().optional(),
-  size: z.number(),
+  // Harbrr's normalized Release contract allows these values to be omitted
+  // by indexers that do not advertise them. Keep the internal shape stable so
+  // one incomplete release cannot invalidate the entire aggregate response.
+  size: z.number().optional().default(0),
   categories: z.array(z.number()).optional(),
   seeders: z.number().optional(),
   leechers: z.number().optional(),
@@ -99,6 +102,44 @@ const HarbrrApiSearchEnvelopeSchema = z.object({
   offset: z.number().optional(),
 });
 
+/**
+ * The management JSON search endpoint returns links to
+ * `/api/indexers/{slug}/download/{token}`. Those links are intentionally
+ * session-oriented for Harbrr's web UI, but AIOStreams later fetches them from
+ * its server-side torrent grabber. Add the Harbrr API key only to Harbrr's
+ * own management-download URL so that grab remains authorized without
+ * exposing it in the search response or sending it to an unrelated host.
+ */
+export function authorizeHarbrrDownloadUrl(
+  link: string | undefined,
+  baseUrl: string,
+  apiKey: string
+): string | undefined {
+  if (!link || !apiKey) return link;
+
+  try {
+    const base = new URL(baseUrl);
+    const url = new URL(link, base);
+    if (url.origin !== base.origin) return link;
+
+    const marker = '/api/indexers/';
+    const markerIndex = url.pathname.indexOf(marker);
+    if (markerIndex < 0) return link;
+
+    const suffix = url.pathname.slice(markerIndex + marker.length);
+    if (!/^[^/]+\/download\/[^/]+$/.test(suffix)) return link;
+
+    if (!url.searchParams.has('apikey')) {
+      url.searchParams.set('apikey', apiKey);
+    }
+    return url.toString();
+  } catch {
+    // A malformed or non-HTTP link should be handled by the normal grabber
+    // validation path; never turn it into a fabricated authorized URL.
+    return link;
+  }
+}
+
 const logger = createLogger('harbrr');
 export const HARBRR_INTERACTIVE_TIMEOUT_MS = 8_000;
 
@@ -125,6 +166,7 @@ export class HarbrrApi {
     this.apiKey = config.apiKey;
     this.#headers = {
       'Content-Type': 'application/json',
+      Accept: 'application/json',
       'X-API-Key': this.apiKey,
       'User-Agent': appConfig.http.defaultUserAgent,
     };
@@ -140,7 +182,7 @@ export class HarbrrApi {
           HarbrrApiIndexersListSchema,
           3000
         ),
-      `${this.baseUrl}:indexers`,
+      `${this.baseUrl}:indexers:${getSimpleTextHash(this.apiKey)}`,
       appConfig.builtins.harbrr.indexersCacheTtl
     );
   }
@@ -156,10 +198,11 @@ export class HarbrrApi {
     limit?: number;
     offset?: number;
   }): Promise<HarbrrApiResponse<HarbrrApiSearchResult[]>> {
-    const indexersKey = indexerSlugs && indexerSlugs.length > 0 ? indexerSlugs.join(',') : 'all';
-    const cacheKey = `${this.baseUrl}:search:${query}:${indexersKey}:${limit}:${offset}`;
+    const indexersKey =
+      indexerSlugs && indexerSlugs.length > 0 ? indexerSlugs.join(',') : 'all';
+    const cacheKey = `${this.baseUrl}:search:${getSimpleTextHash(this.apiKey)}:${query}:${indexersKey}:${limit}:${offset}`;
 
-    return searchWithBackgroundRefresh({
+    const response = await searchWithBackgroundRefresh({
       searchCache: this.searchCache,
       searchCacheKey: cacheKey,
       bgCacheKey: `harbrr:${cacheKey}`,
@@ -187,6 +230,23 @@ export class HarbrrApi {
       isEmptyResult: (result) => result.data.length === 0,
       logger,
     });
+
+    // Keep cached search data credential-free. Authorization is added only to
+    // the per-request copy consumed by the server-side grabber.
+    return {
+      ...response,
+      data: response.data.map((result) => ({
+        ...result,
+        release: {
+          ...result.release,
+          link: authorizeHarbrrDownloadUrl(
+            result.release.link,
+            this.baseUrl,
+            this.apiKey
+          ),
+        },
+      })),
+    };
   }
 
   private getPath(endpoint: string) {
@@ -195,7 +255,10 @@ export class HarbrrApi {
 
   private async request<T>(
     endpoint: string,
-    params: Record<string, string | number | boolean | (string | number)[]> = {},
+    params: Record<
+      string,
+      string | number | boolean | (string | number)[]
+    > = {},
     schema: z.ZodType<T>,
     timeout?: number
   ): Promise<HarbrrApiResponse<T>> {
@@ -212,7 +275,10 @@ export class HarbrrApi {
 
   private async _request<T>(
     endpoint: string,
-    params: Record<string, string | number | boolean | (string | number)[]> = {},
+    params: Record<
+      string,
+      string | number | boolean | (string | number)[]
+    > = {},
     schema: z.ZodType<T>,
     timeout?: number
   ): Promise<HarbrrApiResponse<T>> {
@@ -235,12 +301,11 @@ export class HarbrrApi {
     };
 
     if (!response.ok) {
-      const error = await response.text();
       logger.error(
-        `Harbrr API error: ${response.status} ${response.statusText} - ${error}`
+        `Harbrr API error: ${response.status} ${response.statusText}`
       );
       throw new HarbrrApiError(
-        `Harbrr API error: ${error}`,
+        `Harbrr API error: ${response.status} ${response.statusText}`,
         response.status,
         response.statusText
       );
