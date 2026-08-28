@@ -417,8 +417,10 @@ function VariantSelector({
 interface InstallCardProps {
   encodedManifest: string;
   manifestUrl: string;
+  nuvioProgressiveManifestUrl: string;
   usingAlias: boolean;
   onCopyManifestUrl: () => void;
+  onCopyNuvioProgressiveManifestUrl: () => void;
   onOpenChillio: () => void;
   onOpenSeanime: () => void;
   onOpenJellyfin: () => void;
@@ -437,9 +439,11 @@ interface InstallCardProps {
 function InstallCard({
   encodedManifest,
   manifestUrl,
+  nuvioProgressiveManifestUrl,
   usingAlias,
   variantSelector,
   onCopyManifestUrl,
+  onCopyNuvioProgressiveManifestUrl,
   onOpenChillio,
   onOpenSeanime,
   onOpenJellyfin,
@@ -547,7 +551,7 @@ function InstallCard({
                     onClick={(e) => e.currentTarget.select()}
                   />
                   <Button
-                    onClick={copyNuvioProgressiveManifestUrl}
+                    onClick={onCopyNuvioProgressiveManifestUrl}
                     intent="gray-outline"
                     className="shrink-0 px-3"
                     aria-label="Copy Nuvio progressive manifest URL"
@@ -1821,6 +1825,7 @@ function Content() {
             <InstallCard
               encodedManifest={encodedManifest}
               manifestUrl={manifestUrl}
+              nuvioProgressiveManifestUrl={nuvioProgressiveManifestUrl}
               usingAlias={!!aliasForInstall}
               variantSelector={
                 enabledVariants.length > 0 ? (
@@ -1832,6 +1837,9 @@ function Content() {
                 ) : undefined
               }
               onCopyManifestUrl={copyManifestUrl}
+              onCopyNuvioProgressiveManifestUrl={
+                copyNuvioProgressiveManifestUrl
+              }
               onOpenChillio={chillLinkModal.open}
               onOpenSeanime={seanimeModal.open}
               onOpenJellyfin={jellyfinModal.open}
