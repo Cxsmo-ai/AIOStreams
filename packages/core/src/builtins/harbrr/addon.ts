@@ -250,6 +250,7 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
         hash: infoHash,
         downloadUrl: downloadUrl,
         requestHeaders: this.api.getDownloadHeaders(),
+        forceMetadata: true,
         sources: magnetUrl ? extractTrackersFromMagnet(magnetUrl) : [],
         seeders: rel.seeders,
         title: rel.title,

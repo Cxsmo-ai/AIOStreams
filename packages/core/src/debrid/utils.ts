@@ -206,6 +206,8 @@ export interface UnprocessedTorrent extends BaseFile {
   sources: string[];
   /** Server-only headers required to retrieve torrent metadata. */
   requestHeaders?: Record<string, string>;
+  /** Force metadata retrieval when the global lazy-grab mode is enabled. */
+  forceMetadata?: boolean;
   private?: boolean;
   serviceItemId?: string;
 }

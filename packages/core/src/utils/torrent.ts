@@ -83,7 +83,7 @@ export class TorrentGrabber {
 
     const cache = this.#cache;
     const url = torrent.downloadUrl;
-    const lazy = appConfig.builtins.getTorrent.lazily;
+    const lazy = appConfig.builtins.getTorrent.lazily && !torrent.forceMetadata;
 
     // Cache hit — done.
     const cached = await cache.cached(url);
