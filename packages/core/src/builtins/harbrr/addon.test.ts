@@ -1,6 +1,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { collectHarbrrResultsUntilDeadline } from './deadline.js';
+import { expandHarbrrQueries } from './query-utils.js';
+
+test('adds a countryless fallback for disambiguated TV release queries', () => {
+  assert.deepEqual(
+    expandHarbrrQueries(['The Mentalist US S01', 'The Mentalist S01E04']),
+    [
+      'The Mentalist US S01',
+      'The Mentalist S01',
+      'The Mentalist S01E04',
+    ]
+  );
+});
+
+test('keeps legitimate country tokens and duplicate queries safe', () => {
+  assert.deepEqual(
+    expandHarbrrQueries(['Us S01', 'Us S01', 'The Mentalist']),
+    ['Us S01', 'S01', 'The Mentalist']
+  );
+});
 
 test('returns completed Harbrr query results without waiting for a slow alias', async () => {
   let releaseSlow: (() => void) | undefined;

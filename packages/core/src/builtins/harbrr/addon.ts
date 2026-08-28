@@ -17,6 +17,7 @@ import {
 } from '../utils/debrid.js';
 import { createQueryLimit, getTitleLanguagesForUrl } from '../utils/general.js';
 import { collectHarbrrResultsUntilDeadline } from './deadline.js';
+import { expandHarbrrQueries } from './query-utils.js';
 
 export const HarbrrAddonConfigSchema = BaseDebridConfigSchema.extend({
   url: z.string(),
@@ -179,13 +180,11 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
       return [];
     }
 
-    const queries = [
-      ...new Set(
-        this.buildQueries(parsedId, metadata, {
-          titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
-        })
-      ),
-    ];
+    const queries = expandHarbrrQueries(
+      this.buildQueries(parsedId, metadata, {
+        titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
+      })
+    );
     if (queries.length === 0) {
       return [];
     }
