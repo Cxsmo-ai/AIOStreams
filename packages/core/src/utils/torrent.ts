@@ -129,9 +129,10 @@ export class TorrentGrabber {
     const { downloadUrl } = torrent;
     if (!downloadUrl) throw new Error('Download URL must be provided.');
 
-    const timeout = appConfig.builtins.getTorrent.lazily && !torrent.forceMetadata
-      ? 30000
-      : appConfig.builtins.getTorrent.timeout;
+    const timeout = torrent.metadataTimeout ??
+      (appConfig.builtins.getTorrent.lazily && !torrent.forceMetadata
+        ? 30000
+        : appConfig.builtins.getTorrent.timeout);
     const start = Date.now();
 
     const response = await makeRequest(downloadUrl, {

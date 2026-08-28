@@ -30,6 +30,11 @@ export type HarbrrAddonConfig = z.infer<typeof HarbrrAddonConfigSchema>;
 
 const logger = createLogger('harbrr');
 const HARBRR_RESULT_LIMIT = 500;
+// TorrentLeech and similar private trackers legitimately pace authenticated
+// download requests several seconds apart. Give the server enough time to
+// return more than the first manifest while keeping this slower path isolated
+// from every other indexer and from the global torrent-grab timeout.
+const HARBRR_METADATA_TIMEOUT_MS = 18_000;
 
 export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
   readonly id = 'harbrr';
@@ -251,6 +256,7 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
         downloadUrl: downloadUrl,
         requestHeaders: this.api.getDownloadHeaders(),
         forceMetadata: true,
+        metadataTimeout: HARBRR_METADATA_TIMEOUT_MS,
         sources: magnetUrl ? extractTrackersFromMagnet(magnetUrl) : [],
         seeders: rel.seeders,
         title: rel.title,

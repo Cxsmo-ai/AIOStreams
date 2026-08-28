@@ -208,6 +208,8 @@ export interface UnprocessedTorrent extends BaseFile {
   requestHeaders?: Record<string, string>;
   /** Force metadata retrieval when the global lazy-grab mode is enabled. */
   forceMetadata?: boolean;
+  /** Optional per-torrent metadata timeout for slow, authenticated indexers. */
+  metadataTimeout?: number;
   private?: boolean;
   serviceItemId?: string;
 }
