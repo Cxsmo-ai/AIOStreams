@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  isNonFatalDeepbridUsenetError,
   isTransientRateLimitError,
   reconcileAddonStatisticCount,
 } from './fetcher.js';
@@ -46,6 +47,30 @@ test('identifies only transient provider rate-limit errors', () => {
     isTransientRateLimitError({
       title: 'Indexer',
       description: 'No matching releases found',
+    }),
+    false
+  );
+});
+
+test('identifies non-auth Deepbrid Usenet partial failures', () => {
+  assert.equal(
+    isNonFatalDeepbridUsenetError({
+      title: '[❌] Deepbrid Usenet DB',
+      description: 'Upstream content failure',
+    }),
+    true
+  );
+  assert.equal(
+    isNonFatalDeepbridUsenetError({
+      title: '[❌] Deepbrid Usenet DB',
+      description: 'Invalid API key',
+    }),
+    false
+  );
+  assert.equal(
+    isNonFatalDeepbridUsenetError({
+      title: '[TB⚡] Debridio Scraper',
+      description: 'A release title contains the word failed',
     }),
     false
   );

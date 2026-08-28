@@ -32,6 +32,24 @@ export function isTransientRateLimitError(error: {
 }
 
 /**
+ * Deepbrid Usenet can return a content-level failure for one scrape while
+ * TorBox, native Usenet, or another resolver has already returned usable
+ * streams. That failure is not actionable to the viewer and should not turn
+ * a healthy partial result into a red error card. Authentication, safety, and
+ * configuration failures remain visible so they can still be fixed.
+ */
+export function isNonFatalDeepbridUsenetError(error: {
+  title?: string;
+  description?: string;
+}): boolean {
+  const text = `${error.title ?? ''}\n${error.description ?? ''}`;
+  if (!/deepbrid\s+usenet/i.test(text)) return false;
+  return !/(401|403|unauthori[sz]ed|invalid\s+(?:api\s+)?key|credential|not\s+configured|cloudflare|forbidden|unsafe)/i.test(
+    text
+  );
+}
+
+/**
  * Per-addon outcome tracked through {@link StreamFetcher.fetch} and surfaced
  * to `resources.ts` so the per-user `addon_contribution` event can attribute
  * post-pipeline results back to the right addon.
@@ -694,7 +712,11 @@ class StreamFetcher {
     // broken; preserve all streams and keep every non-rate-limit error.
     const visibleErrors =
       allStreams.length > 0
-        ? allErrors.filter((error) => !isTransientRateLimitError(error))
+        ? allErrors.filter(
+            (error) =>
+              !isTransientRateLimitError(error) &&
+              !isNonFatalDeepbridUsenetError(error)
+          )
         : allErrors;
 
     return {

@@ -20,7 +20,10 @@ import {
   resolveGlobalDeepbridNzbs,
   resolveServiceWrappedStreams,
 } from './serviceWrapper.js';
-import { isTransientRateLimitError } from '../streams/fetcher.js';
+import {
+  isNonFatalDeepbridUsenetError,
+  isTransientRateLimitError,
+} from '../streams/fetcher.js';
 import type { ServiceWrapServiceTiming } from './serviceWrapper.js';
 import { decorateTorboxStreams } from '../debrid/torbox-presentation.js';
 import type { PrecomputeSubTimings } from '../streams/precomputer.js';
@@ -1031,7 +1034,11 @@ export async function getStreams(
   // every non-rate-limit error and all errors when no media was returned.
   const visibleErrors =
     finalStreams.length > 0
-      ? errors.filter((error) => !isTransientRateLimitError(error))
+      ? errors.filter(
+          (error) =>
+            !isTransientRateLimitError(error) &&
+            !isNonFatalDeepbridUsenetError(error)
+        )
       : errors;
 
   logger.debug(
