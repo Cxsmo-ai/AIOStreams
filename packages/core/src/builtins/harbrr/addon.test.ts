@@ -21,6 +21,15 @@ test('keeps legitimate country tokens and duplicate queries safe', () => {
   );
 });
 
+test('can prioritize a focused season-pack query without dropping originals', () => {
+  assert.deepEqual(
+    expandHarbrrQueries(['The Mentalist S01'], {
+      includeSeasonPackQueries: true,
+    }),
+    ['The Mentalist S01 BluRay', 'The Mentalist S01']
+  );
+});
+
 test('returns completed Harbrr query results without waiting for a slow alias', async () => {
   let releaseSlow: (() => void) | undefined;
   const slow = new Promise<number[]>((resolve) => {

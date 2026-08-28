@@ -188,7 +188,8 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
     const queries = expandHarbrrQueries(
       this.buildQueries(parsedId, metadata, {
         titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
-      })
+      }),
+      { includeSeasonPackQueries: parsedId.mediaType === 'series' }
     );
     if (queries.length === 0) {
       return [];
