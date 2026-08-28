@@ -10,7 +10,6 @@ export class HarbrrPreset extends BuiltinAddonPreset {
     const supportedResources = [constants.STREAM_RESOURCE];
     const supportedServices: ServiceId[] = [
       ...StremThruPreset.supportedServices,
-      constants.DEEPBRID_SERVICE,
     ];
     let hasPreconfigured = false;
     let defaultTimeout = 7000;
