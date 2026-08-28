@@ -25,8 +25,18 @@ export class HarbrrPreset extends BuiltinAddonPreset {
       constants.AIOSTREAMS_SERVICE,
       constants.DEEPBRID_SERVICE,
     ];
+    let hasPreconfigured = false;
+    let defaultTimeout = 7000;
+    let searchTimeout = 30000;
+    try {
+      hasPreconfigured = Boolean(appConfig.builtins.harbrr?.url && appConfig.builtins.harbrr?.apiKey);
+      defaultTimeout = appConfig.presets?.defaultTimeout ?? 7000;
+      searchTimeout = appConfig.builtins.harbrr?.searchTimeout ?? 30000;
+    } catch {
+      hasPreconfigured = false;
+    }
     const options: Option[] = [
-      ...(appConfig.builtins.harbrr.url && appConfig.builtins.harbrr.apiKey
+      ...(hasPreconfigured
         ? [
             {
               id: 'notRequiredNote',
@@ -65,10 +75,9 @@ export class HarbrrPreset extends BuiltinAddonPreset {
         description: 'The URL of the Harbrr instance',
         type: 'url',
         required:
-          !appConfig.builtins.harbrr.url ||
-          !appConfig.builtins.harbrr.apiKey,
+          !hasPreconfigured,
         showInSimpleMode:
-          appConfig.builtins.harbrr.url && appConfig.builtins.harbrr.apiKey
+          hasPreconfigured
             ? false
             : undefined,
       },
@@ -78,10 +87,9 @@ export class HarbrrPreset extends BuiltinAddonPreset {
         description: 'The API key for the Harbrr instance',
         type: 'password',
         required:
-          !appConfig.builtins.harbrr.url ||
-          !appConfig.builtins.harbrr.apiKey,
+          !hasPreconfigured,
         showInSimpleMode:
-          appConfig.builtins.harbrr.url && appConfig.builtins.harbrr.apiKey
+          hasPreconfigured
             ? false
             : undefined,
       },
@@ -252,7 +260,7 @@ export class HarbrrPreset extends BuiltinAddonPreset {
       mediaTypes: options.mediaTypes || [],
       timeout: withInternalTimeoutMargin(
         options.timeout,
-        appConfig.builtins.harbrr.searchTimeout
+        (appConfig.builtins?.harbrr?.searchTimeout ?? 30000)
       ),
       preset: {
         id: '',

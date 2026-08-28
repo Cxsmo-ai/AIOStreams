@@ -52,25 +52,42 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
   constructor(config: HarbrrAddonConfig, clientIp?: string) {
     super(config, HarbrrAddonConfigSchema, clientIp);
 
-    this.preconfiguredInstance =
-      appConfig.builtins.harbrr.url === config.url &&
-      appConfig.builtins.harbrr.apiKey === config.apiKey;
+    let isPreconfigured = false;
+    let searchTimeout = 30000;
+    try {
+      isPreconfigured =
+        Boolean(appConfig.builtins.harbrr?.url && appConfig.builtins.harbrr?.apiKey) &&
+        appConfig.builtins.harbrr.url === config.url &&
+        appConfig.builtins.harbrr.apiKey === config.apiKey;
+      searchTimeout = appConfig.builtins.harbrr?.searchTimeout ?? 30000;
+    } catch {
+      isPreconfigured = false;
+      searchTimeout = 30000;
+    }
+    this.preconfiguredInstance = isPreconfigured;
     this.indexers = config.indexers.map((x) => x.toLowerCase());
     this.sources = (config.sources ?? []).map((x) => x.toLowerCase());
     this.api = new HarbrrApi({
       baseUrl: config.url,
       apiKey: config.apiKey,
-      timeout: appConfig.builtins.harbrr.searchTimeout,
+      timeout: searchTimeout,
     });
   }
 
   public static async fetchpreconfiguredIndexers(): Promise<void> {
     if (this.preconfiguredIndexers) return;
-    if (!appConfig.builtins.harbrr.url || !appConfig.builtins.harbrr.apiKey)
+    let harbrrUrl: string | null | undefined;
+    let harbrrApiKey: string | null | undefined;
+    try {
+      harbrrUrl = appConfig.builtins.harbrr?.url;
+      harbrrApiKey = appConfig.builtins.harbrr?.apiKey;
+    } catch {
       return;
+    }
+    if (!harbrrUrl || !harbrrApiKey) return;
     const api = new HarbrrApi({
-      baseUrl: appConfig.builtins.harbrr.url,
-      apiKey: appConfig.builtins.harbrr.apiKey,
+      baseUrl: harbrrUrl,
+      apiKey: harbrrApiKey,
       timeout: 5000,
     });
     try {
