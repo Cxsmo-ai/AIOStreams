@@ -1,57 +1,50 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { authorizeHarbrrDownloadUrl } from './api.js';
+import { normalizeHarbrrDownloadUrl } from './api.js';
 
 const baseUrl = 'https://harbrr.example/';
-const apiKey = 'test-api-key';
-
-test('authorizes Harbrr management download links for server-side grabs', () => {
-  const link = authorizeHarbrrDownloadUrl(
+test('normalizes Harbrr management download links without adding credentials', () => {
+  const link = normalizeHarbrrDownloadUrl(
     'https://harbrr.example/api/indexers/private-tracker/download/token123',
-    baseUrl,
-    apiKey
+    baseUrl
   );
 
   assert.equal(
     link,
-    'https://harbrr.example/api/indexers/private-tracker/download/token123?apikey=test-api-key'
+    'https://harbrr.example/api/indexers/private-tracker/download/token123'
   );
 });
 
-test('supports relative Harbrr links and preserves an existing key', () => {
+test('supports relative Harbrr links and preserves existing query parameters', () => {
   assert.equal(
-    authorizeHarbrrDownloadUrl(
+    normalizeHarbrrDownloadUrl(
       '/api/indexers/private-tracker/download/token123',
-      baseUrl,
-      apiKey
+      baseUrl
     ),
-    'https://harbrr.example/api/indexers/private-tracker/download/token123?apikey=test-api-key'
+    'https://harbrr.example/api/indexers/private-tracker/download/token123'
   );
 
   assert.equal(
-    authorizeHarbrrDownloadUrl(
+    normalizeHarbrrDownloadUrl(
       'https://harbrr.example/api/indexers/private-tracker/download/token123?apikey=caller-key',
-      baseUrl,
-      apiKey
+      baseUrl
     ),
-    'https://harbrr.example/api/indexers/private-tracker/download/token123?apikey=caller-key'
+    'https://harbrr.example/api/indexers/private-tracker/download/token123'
   );
 });
 
 test('does not add Harbrr credentials to unrelated or external links', () => {
   assert.equal(
-    authorizeHarbrrDownloadUrl(
+    normalizeHarbrrDownloadUrl(
       'https://tracker.example/download/file.torrent',
-      baseUrl,
-      apiKey
+      baseUrl
     ),
     'https://tracker.example/download/file.torrent'
   );
   assert.equal(
-    authorizeHarbrrDownloadUrl(
+    normalizeHarbrrDownloadUrl(
       'https://harbrr.example/api/indexers/private-tracker/search',
-      baseUrl,
-      apiKey
+      baseUrl
     ),
     'https://harbrr.example/api/indexers/private-tracker/search'
   );

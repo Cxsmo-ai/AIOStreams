@@ -104,18 +104,16 @@ const HarbrrApiSearchEnvelopeSchema = z.object({
 
 /**
  * The management JSON search endpoint returns links to
- * `/api/indexers/{slug}/download/{token}`. Those links are intentionally
- * session-oriented for Harbrr's web UI, but AIOStreams later fetches them from
- * its server-side torrent grabber. Add the Harbrr API key only to Harbrr's
- * own management-download URL so that grab remains authorized without
- * exposing it in the search response or sending it to an unrelated host.
+ * `/api/indexers/{slug}/download/{token}`. Keep the link credential-free:
+ * Harbrr requires `X-API-Key` for the download request, and putting the key in
+ * the URL would leak it through logs, caches, redirects, and client-visible
+ * stream metadata.
  */
-export function authorizeHarbrrDownloadUrl(
+export function normalizeHarbrrDownloadUrl(
   link: string | undefined,
-  baseUrl: string,
-  apiKey: string
+  baseUrl: string
 ): string | undefined {
-  if (!link || !apiKey) return link;
+  if (!link) return link;
 
   try {
     const base = new URL(baseUrl);
@@ -129,9 +127,9 @@ export function authorizeHarbrrDownloadUrl(
     const suffix = url.pathname.slice(markerIndex + marker.length);
     if (!/^[^/]+\/download\/[^/]+$/.test(suffix)) return link;
 
-    if (!url.searchParams.has('apikey')) {
-      url.searchParams.set('apikey', apiKey);
-    }
+    // Older callers may have already added this credential to the URL. Strip
+    // it before the link can enter caches, logs, or a client-visible object.
+    url.searchParams.delete('apikey');
     return url.toString();
   } catch {
     // A malformed or non-HTTP link should be handled by the normal grabber
@@ -171,6 +169,11 @@ export class HarbrrApi {
       'User-Agent': appConfig.http.defaultUserAgent,
     };
     this.#timeout = config.timeout;
+  }
+
+  /** Headers used only by the server-side torrent metadata grabber. */
+  getDownloadHeaders(): Record<string, string> {
+    return { 'X-API-Key': this.apiKey };
   }
 
   async indexers(): Promise<HarbrrApiResponse<HarbrrApiIndexer[]>> {
@@ -239,11 +242,7 @@ export class HarbrrApi {
         ...result,
         release: {
           ...result.release,
-          link: authorizeHarbrrDownloadUrl(
-            result.release.link,
-            this.baseUrl,
-            this.apiKey
-          ),
+          link: normalizeHarbrrDownloadUrl(result.release.link, this.baseUrl),
         },
       })),
     };

@@ -250,6 +250,7 @@ export class HarbrrAddon extends BaseDebridAddon<HarbrrAddonConfig> {
       torrents.push({
         hash: infoHash,
         downloadUrl: downloadUrl,
+        requestHeaders: this.api.getDownloadHeaders(),
         sources: magnetUrl ? extractTrackersFromMagnet(magnetUrl) : [],
         seeders: rel.seeders,
         title: rel.title,

@@ -285,6 +285,7 @@ export const CROSS_ORIGIN_SENSITIVE_HEADERS = [
   'proxy-authorization',
   'cookie',
   'host',
+  'x-api-key',
 ];
 
 export const MAX_REDIRECTS = 20;

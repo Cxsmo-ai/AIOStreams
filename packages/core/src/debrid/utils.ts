@@ -204,6 +204,8 @@ export interface UnprocessedTorrent extends BaseFile {
   hash?: string;
   downloadUrl?: string;
   sources: string[];
+  /** Server-only headers required to retrieve torrent metadata. */
+  requestHeaders?: Record<string, string>;
   private?: boolean;
   serviceItemId?: string;
 }

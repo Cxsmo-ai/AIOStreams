@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { makeUrlLogSafe } from './http.js';
+import { CROSS_ORIGIN_SENSITIVE_HEADERS, makeUrlLogSafe } from './http.js';
 
 test('makeUrlLogSafe masks provider-specific query credentials', () => {
   const safe = makeUrlLogSafe(
@@ -10,4 +10,8 @@ test('makeUrlLogSafe masks provider-specific query credentials', () => {
   assert.equal(safe.includes('another-secret'), false);
   assert.match(safe, /[?&]r=<redacted>/);
   assert.match(safe, /[?&]apikey=<redacted>/);
+});
+
+test('drops API keys when a torrent download redirects across origins', () => {
+  assert.ok(CROSS_ORIGIN_SENSITIVE_HEADERS.includes('x-api-key'));
 });
