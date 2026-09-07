@@ -13,6 +13,7 @@ import {
   url,
 } from './api.js';
 import { Buffer } from 'node:buffer';
+import { containsAv1 } from './codec.js';
 
 const CHANNEL_CATALOG_PREFIX = 'floatplane-channel-';
 
@@ -353,7 +354,8 @@ export class FloatplaneAddon {
       .map(({ variant, group }) => {
         if (
           first(variant, 'hidden') === true ||
-          first(variant, 'enabled') === false
+          first(variant, 'enabled') === false ||
+          containsAv1(variant)
         )
           return null;
         const origins = array(first(variant, 'origins', 'origin'));
@@ -363,7 +365,7 @@ export class FloatplaneAddon {
           first(variant, 'url', 'playbackUrl', 'manifestUrl', 'hls'),
           origin
         );
-        if (!streamUrl) return null;
+        if (!streamUrl || /\bav1\b|av01/i.test(streamUrl)) return null;
         const quality = first(
           variant,
           'quality',
@@ -391,6 +393,7 @@ export class FloatplaneAddon {
     if (typeof template !== 'string' || !cdn || !params) return [];
     return array(first(data, 'qualityLevels'))
       .map((level) => {
+        if (containsAv1(level)) return null;
         const name = text(first(level, 'name'));
         const token = first(params, name, 'token');
         if (!name || !token) return null;

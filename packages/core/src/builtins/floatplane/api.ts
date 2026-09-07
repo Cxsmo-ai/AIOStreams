@@ -57,7 +57,12 @@ function array(value: unknown): Json[] {
     'items',
     'data',
     'results',
+    'searchResults',
+    'hits',
+    'documents',
     'entries',
+    'blogPosts',
+    'contentItems',
     'creators',
     'channels',
     'posts',
@@ -369,7 +374,8 @@ export class FloatplaneClient {
     creatorId: string,
     channelId?: string,
     fetchAfter = 0,
-    limit = 20
+    limit = 20,
+    search?: string
   ) {
     const query = new URLSearchParams({
       id: creatorId,
@@ -379,16 +385,44 @@ export class FloatplaneClient {
       hasVideo: 'true',
     });
     if (channelId) query.set('channel', channelId);
+    if (search?.trim()) query.set('search', search.trim());
     return this.request(`/api/v3/content/creator?${query}`);
   }
   async search(query: string) {
     const text = query.trim();
     if (!text) return [];
-    // Floatplane's v3 search endpoint accepts the text parameter. The older
-    // perPage/page/returnBlogPosts parameters cause a 400 on current accounts.
-    return this.request(
-      `/api/v3/content/search?${new URLSearchParams({ text })}`
+    // Prefer the dedicated endpoint, but keep the creator search fallback for
+    // current accounts where the endpoint returns an empty envelope. The
+    // creator endpoint is part of the stable v3 API and supports the search
+    // parameter with the same authenticated entitlements.
+    try {
+      const response = await this.request(
+        `/api/v3/content/search?${new URLSearchParams({ text })}`
+      );
+      if (array(response).length) return response;
+    } catch {
+      // Fall through to the stable creator search route.
+    }
+    const subscriptions = array(await this.subscriptions());
+    const creatorIds = [
+      ...new Set(
+        subscriptions
+          .map((item) => first(item, 'creator', 'creatorId'))
+          .map((value) =>
+            value && typeof value === 'object'
+              ? first(value, 'id', 'guid')
+              : value
+          )
+          .map((value) => String(value || ''))
+          .filter(Boolean)
+      ),
+    ];
+    const pages = await Promise.all(
+      creatorIds.map((creatorId) =>
+        this.creatorContent(creatorId, undefined, 0, 20, text)
+      )
     );
+    return pages.flatMap((page) => array(page));
   }
   post(postId: string) {
     return this.request(
