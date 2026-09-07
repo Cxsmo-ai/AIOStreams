@@ -16,3 +16,4 @@ export { default as syncApi } from './sync.js';
 export { default as authApi } from './auth/index.js';
 export { default as dashboardApi } from './dashboard/index.js';
 export { default as usenetApi } from './usenet.js';
+export { default as floatplaneApi } from './floatplane.js';
