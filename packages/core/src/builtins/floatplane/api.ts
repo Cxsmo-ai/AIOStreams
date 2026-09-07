@@ -10,6 +10,7 @@ import { decryptString, encryptString } from '../../utils/crypto.js';
 import { Cache } from '../../utils/cache.js';
 
 type Json = Record<string, any>;
+type JsonValue = unknown;
 type Jwk = Record<string, unknown>;
 
 export interface FloatplaneAuthState {
@@ -73,17 +74,17 @@ function array(value: unknown): Json[] {
   }
   return [];
 }
-function url(value: unknown): string | undefined {
+function url(value: unknown, base = apiBase): string | undefined {
   if (typeof value !== 'string' || !value) return undefined;
   return /^https?:\/\//i.test(value)
     ? value
-    : `${apiBase}${value.startsWith('/') ? '' : '/'}${value}`;
+    : `${base.replace(/\/$/, '')}${value.startsWith('/') ? '' : '/'}${value}`;
 }
 
 async function jsonFetch(
   endpoint: string,
   init: RequestInit = {}
-): Promise<Json> {
+): Promise<JsonValue> {
   const response = await fetch(endpoint, {
     ...init,
     headers: { Accept: 'application/json', ...(init.headers || {}) },
@@ -97,10 +98,10 @@ async function jsonFetch(
   }
   if (!response.ok)
     throw new Error(`Floatplane request failed (${response.status})`);
-  return record(data);
+  return data;
 }
 async function discovery(): Promise<Json> {
-  return jsonFetch(`${issuer}/.well-known/openid-configuration`);
+  return record(await jsonFetch(`${issuer}/.well-known/openid-configuration`));
 }
 function dpopKeys() {
   const pair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
@@ -118,7 +119,8 @@ function pkceChallenge(verifier: string): string {
 function dpopProof(
   auth: FloatplaneAuthState,
   method: string,
-  endpoint: string
+  endpoint: string,
+  accessToken?: string
 ): string {
   const enc = (value: unknown) =>
     Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -129,6 +131,9 @@ function dpopProof(
     jti: randomUUID(),
   };
   if (auth.dpopNonce) payload.nonce = auth.dpopNonce;
+  if (accessToken) {
+    payload.ath = createHash('sha256').update(accessToken).digest('base64url');
+  }
   const input = `${enc({ typ: 'dpop+jwt', alg: 'ES256', jwk: auth.dpopPublicJwk })}.${enc(payload)}`;
   const signer = createSign('SHA256');
   signer.update(input);
@@ -316,7 +321,7 @@ export class FloatplaneClient {
     this.auth.tokenExpiresAt =
       Date.now() + Number(first(data, 'expires_in') || 300) * 1000;
   }
-  async request(path: string, init: RequestInit = {}): Promise<Json> {
+  async request(path: string, init: RequestInit = {}): Promise<JsonValue> {
     await this.refresh();
     const endpoint = path.startsWith('http') ? path : `${apiBase}${path}`;
     const response = await fetch(endpoint, {
@@ -325,7 +330,12 @@ export class FloatplaneClient {
         Accept: 'application/json',
         ...(init.headers || {}),
         Authorization: `DPoP ${this.auth.accessToken}`,
-        DPoP: dpopProof(this.auth, init.method || 'GET', endpoint),
+        DPoP: dpopProof(
+          this.auth,
+          init.method || 'GET',
+          endpoint,
+          this.auth.accessToken
+        ),
       },
     });
     const text = await response.text();
@@ -337,38 +347,68 @@ export class FloatplaneClient {
     }
     if (!response.ok)
       throw new Error(`Floatplane API request failed (${response.status})`);
-    return record(data);
+    return data;
   }
   subscriptions() {
     return this.request('/api/v3/user/subscriptions');
+  }
+  creatorInfo(creatorId: string) {
+    return this.request(
+      `/api/v3/creator/info?${new URLSearchParams({ id: creatorId })}`
+    );
   }
   discover() {
     return this.request('/api/v3/creator/discover');
   }
   channels(creatorId: string) {
     return this.request(
-      `/api/v3/creator/channels/list?creatorId=${encodeURIComponent(creatorId)}`
+      `/api/v3/creator/channels/list?${new URLSearchParams({ ids: creatorId })}`
     );
   }
-  creatorContent(creatorId: string, channelId?: string) {
-    const query = new URLSearchParams({ creatorId });
-    if (channelId) query.set('channelId', channelId);
-    return this.request(`/api/v3/content/creator/list?${query}`);
+  creatorContent(
+    creatorId: string,
+    channelId?: string,
+    fetchAfter = 0,
+    limit = 20
+  ) {
+    const query = new URLSearchParams({
+      id: creatorId,
+      limit: String(Math.min(20, Math.max(1, limit))),
+      fetchAfter: String(Math.max(0, fetchAfter)),
+      sort: 'DESC',
+      hasVideo: 'true',
+    });
+    if (channelId) query.set('channel', channelId);
+    return this.request(`/api/v3/content/creator?${query}`);
   }
   search(query: string) {
     return this.request(
-      `/api/v3/content/search?${new URLSearchParams({ query })}`
+      `/api/v3/content/search?${new URLSearchParams({
+        text: query,
+        perPage: '100',
+        page: '1',
+        returnBlogPosts: 'true',
+      })}`
     );
   }
   post(postId: string) {
     return this.request(
-      `/api/v3/content/post?postId=${encodeURIComponent(postId)}`
+      `/api/v3/content/post?${new URLSearchParams({ id: postId })}`
+    );
+  }
+  video(videoId: string) {
+    return this.request(
+      `/api/v3/content/video?${new URLSearchParams({ id: videoId })}`
     );
   }
   async delivery(contentId: string) {
     try {
       return await this.request(
-        `/api/v3/delivery/info?contentId=${encodeURIComponent(contentId)}`
+        `/api/v3/delivery/info?${new URLSearchParams({
+          entityId: contentId,
+          scenario: 'onDemand',
+          outputKind: 'hls.fmp4',
+        })}`
       );
     } catch {
       return this.request(
@@ -377,9 +417,7 @@ export class FloatplaneClient {
     }
   }
   textTracks(contentId: string) {
-    return this.request(
-      `/api/v3/content/${encodeURIComponent(contentId)}/text-tracks`
-    );
+    return this.video(contentId);
   }
 }
 export { array, first, url };
