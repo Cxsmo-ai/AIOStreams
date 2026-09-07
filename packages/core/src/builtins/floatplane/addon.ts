@@ -345,71 +345,101 @@ export class FloatplaneAddon {
 
   async getStreams(_type: string, itemId: string): Promise<Stream[]> {
     const rawId = itemId.split(':').pop() || itemId;
-    const response = await this.api.delivery(rawId);
-    const groups = array(first(response, 'groups'));
-    const variants = groups.flatMap((group) =>
-      array(first(group, 'variants')).map((variant) => ({ variant, group }))
-    );
-    const v3Streams = variants
-      .map(({ variant, group }) => {
-        if (
-          first(variant, 'hidden') === true ||
-          first(variant, 'enabled') === false ||
-          containsAv1(variant)
-        )
-          return null;
-        const origins = array(first(variant, 'origins', 'origin'));
-        const groupOrigins = array(first(group, 'origins', 'origin'));
-        const origin = first(origins[0] || groupOrigins[0], 'url');
-        const streamUrl = url(
-          first(variant, 'url', 'playbackUrl', 'manifestUrl', 'hls'),
-          origin
-        );
-        if (!streamUrl || /\bav1\b|av01/i.test(streamUrl)) return null;
-        const quality = first(
-          variant,
-          'quality',
-          'resolution',
-          'label',
-          'height'
-        );
-        return {
-          url: streamUrl,
-          name: `Floatplane${quality ? ` • ${quality}` : ''}`,
-          title: title(variant),
-          description: first(variant, 'codec', 'bitrate', 'type'),
-        } as Stream;
-      })
-      .filter((x): x is Stream => Boolean(x));
-    if (v3Streams.length) return v3Streams;
+    const streamsFromDelivery = (response: any): Stream[] => {
+      const groups = array(first(response, 'groups'));
+      const variants = groups.flatMap((group) =>
+        array(first(group, 'variants')).map((variant) => ({ variant, group }))
+      );
+      const v3Streams = variants
+        .map(({ variant, group }) => {
+          if (
+            first(variant, 'hidden') === true ||
+            first(variant, 'enabled') === false ||
+            containsAv1(variant)
+          )
+            return null;
+          const origins = array(first(variant, 'origins', 'origin'));
+          const groupOrigins = array(first(group, 'origins', 'origin'));
+          const origin = first(origins[0] || groupOrigins[0], 'url');
+          const streamUrl = url(
+            first(variant, 'url', 'playbackUrl', 'manifestUrl', 'hls'),
+            origin
+          );
+          if (!streamUrl || /\bav1\b|av01/i.test(streamUrl)) return null;
+          const quality = first(
+            variant,
+            'quality',
+            'resolution',
+            'label',
+            'height'
+          );
+          return {
+            url: streamUrl,
+            name: `Floatplane${quality ? ` • ${quality}` : ''}`,
+            title: title(variant),
+            description: first(variant, 'codec', 'bitrate', 'type'),
+          } as Stream;
+        })
+        .filter((x): x is Stream => Boolean(x));
+      if (v3Streams.length) return v3Streams;
 
-    // Older accounts may only expose the v2 CDN response. Normalize its
-    // quality template so those accounts still receive every available level.
-    const resource = first(response, 'resource');
-    const data = first(resource, 'data');
-    const template = first(resource, 'uri');
-    const cdn = first(response, 'cdn');
-    const params = first(data, 'qualityLevelParams');
-    if (typeof template !== 'string' || !cdn || !params) return [];
-    return array(first(data, 'qualityLevels'))
-      .map((level) => {
-        if (containsAv1(level)) return null;
-        const name = text(first(level, 'name'));
-        const token = first(params, name, 'token');
-        if (!name || !token) return null;
-        const path = template
-          .replaceAll('{qualityLevels}', name)
-          .replaceAll('{qualityLevelParams.token}', text(token));
-        const streamUrl = url(path, text(cdn));
-        return streamUrl
-          ? ({
-              url: streamUrl,
-              name: `Floatplane${first(level, 'label') ? ` • ${first(level, 'label')}` : ''}`,
-              title: text(first(level, 'label'), name),
-            } as Stream)
-          : null;
-      })
-      .filter((x): x is Stream => Boolean(x));
+      // Older accounts may only expose the v2 CDN response. Normalize its
+      // quality template so those accounts still receive every available level.
+      const resource = first(response, 'resource');
+      const data = first(resource, 'data');
+      const template = first(resource, 'uri');
+      const cdn = first(response, 'cdn');
+      const params = first(data, 'qualityLevelParams');
+      if (typeof template !== 'string' || !cdn || !params) return [];
+      return array(first(data, 'qualityLevels'))
+        .map((level) => {
+          if (containsAv1(level)) return null;
+          const name = text(first(level, 'name'));
+          const token = first(params, name, 'token');
+          if (!name || !token) return null;
+          const path = template
+            .replaceAll('{qualityLevels}', name)
+            .replaceAll('{qualityLevelParams.token}', text(token));
+          const streamUrl = url(path, text(cdn));
+          return streamUrl
+            ? ({
+                url: streamUrl,
+                name: `Floatplane${first(level, 'label') ? ` • ${first(level, 'label')}` : ''}`,
+                title: text(first(level, 'label'), name),
+              } as Stream)
+            : null;
+        })
+        .filter((x): x is Stream => Boolean(x));
+    };
+
+    const deliveryFor = async (contentId: string): Promise<Stream[]> => {
+      try {
+        return streamsFromDelivery(await this.api.delivery(contentId));
+      } catch {
+        return [];
+      }
+    };
+
+    const direct = await deliveryFor(rawId);
+    if (direct.length) return direct;
+
+    // Stremio clients differ on whether they request the post id or the
+    // attachment id. Resolve the parent post so both request shapes play.
+    try {
+      const response = await this.api.post(rawId);
+      const item = first(response, 'post', 'content', 'data') || response;
+      const attachments = stringArray(
+        first(item, 'videoAttachments', 'attachmentOrder')
+      );
+      for (const attachmentId of attachments) {
+        const streams = await deliveryFor(attachmentId);
+        if (streams.length) return streams;
+      }
+    } catch {
+      // Preserve the normal empty stream response when the post is not a
+      // playable parent or has expired delivery rights.
+    }
+    return [];
   }
   async getSubtitles(_type: string, itemId: string): Promise<Subtitle[]> {
     if (!this.userData.includeSubtitles) return [];

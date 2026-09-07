@@ -518,7 +518,7 @@ class StreamParser {
     service: ParsedStream['service'],
     currentParsedStream: ParsedStream
   ): ParsedStream['type'] {
-    if (stream.url?.endsWith('.m3u8')) {
+    if (stream.url && /\.m3u8(?:[?#]|$)/i.test(stream.url)) {
       return 'live';
     }
 
