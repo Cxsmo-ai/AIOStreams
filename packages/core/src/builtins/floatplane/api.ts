@@ -395,13 +395,15 @@ export class FloatplaneClient {
     // current accounts where the endpoint returns an empty envelope. The
     // creator endpoint is part of the stable v3 API and supports the search
     // parameter with the same authenticated entitlements.
-    try {
-      const response = await this.request(
-        `/api/v3/content/search?${new URLSearchParams({ text })}`
-      );
-      if (array(response).length) return response;
-    } catch {
-      // Fall through to the stable creator search route.
+    for (const parameter of ['text', 'search', 'query', 'q']) {
+      try {
+        const response = await this.request(
+          `/api/v3/content/search?${new URLSearchParams({ [parameter]: text })}`
+        );
+        if (array(response).length) return response;
+      } catch {
+        // Try the next current-account parameter spelling.
+      }
     }
     const subscriptions = array(await this.subscriptions());
     const creatorIds = [
