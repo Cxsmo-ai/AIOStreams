@@ -424,7 +424,30 @@ export class FloatplaneClient {
         this.creatorContent(creatorId, undefined, 0, 20, text)
       )
     );
-    return pages.flatMap((page) => array(page));
+    const searched = pages.flatMap((page) => array(page));
+    if (searched.length) return searched;
+
+    // Some accounts silently ignore the search filter. Fetch only a bounded
+    // two-page window per subscribed creator and filter locally as a reliable
+    // final fallback; this avoids an unbounded account crawl on every search.
+    const windowPages = await Promise.all(
+      creatorIds.flatMap((creatorId) =>
+        [0, 20].map((fetchAfter) =>
+          this.creatorContent(creatorId, undefined, fetchAfter, 20)
+        )
+      )
+    );
+    const needle = text.toLocaleLowerCase();
+    const seen = new Set<string>();
+    return windowPages
+      .flatMap((page) => array(page))
+      .filter((item) => {
+        const value = JSON.stringify(item).toLocaleLowerCase();
+        const id = String(first(item, 'id', 'guid', 'contentId') || value);
+        if (!value.includes(needle) || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
   }
   post(postId: string) {
     return this.request(
