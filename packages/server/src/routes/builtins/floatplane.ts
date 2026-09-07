@@ -17,7 +17,13 @@ router.get(
   '{/:encodedConfig}/manifest.json',
   async (req: Request<{ encodedConfig?: string }>, res, next) => {
     try {
-      res.json(FloatplaneAddon.getManifest());
+      if (!req.params.encodedConfig) {
+        res.json(FloatplaneAddon.getManifest());
+        return;
+      }
+      res.json(
+        await (await addon(req.params.encodedConfig)).getConfiguredManifest()
+      );
     } catch (e) {
       next(e);
     }

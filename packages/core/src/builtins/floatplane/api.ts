@@ -381,14 +381,13 @@ export class FloatplaneClient {
     if (channelId) query.set('channel', channelId);
     return this.request(`/api/v3/content/creator?${query}`);
   }
-  search(query: string) {
+  async search(query: string) {
+    const text = query.trim();
+    if (!text) return [];
+    // Floatplane's v3 search endpoint accepts the text parameter. The older
+    // perPage/page/returnBlogPosts parameters cause a 400 on current accounts.
     return this.request(
-      `/api/v3/content/search?${new URLSearchParams({
-        text: query,
-        perPage: '100',
-        page: '1',
-        returnBlogPosts: 'true',
-      })}`
+      `/api/v3/content/search?${new URLSearchParams({ text })}`
     );
   }
   post(postId: string) {

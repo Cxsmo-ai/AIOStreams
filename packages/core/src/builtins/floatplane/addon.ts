@@ -12,6 +12,9 @@ import {
   first,
   url,
 } from './api.js';
+import { Buffer } from 'node:buffer';
+
+const CHANNEL_CATALOG_PREFIX = 'floatplane-channel-';
 
 function text(value: unknown, fallback = ''): string {
   return String(value ?? fallback);
@@ -55,6 +58,33 @@ function stringArray(value: unknown): string[] {
     .map((item) => idOf(item))
     .filter((item): item is string => Boolean(item));
 }
+function channelCatalogId(creatorId: string, channelId: string): string {
+  return `${CHANNEL_CATALOG_PREFIX}${Buffer.from(
+    JSON.stringify([creatorId, channelId])
+  ).toString('base64url')}`;
+}
+function parseChannelCatalogId(
+  catalogId: string
+): { creatorId: string; channelId: string } | undefined {
+  if (!catalogId.startsWith(CHANNEL_CATALOG_PREFIX)) return undefined;
+  try {
+    const value = JSON.parse(
+      Buffer.from(
+        catalogId.slice(CHANNEL_CATALOG_PREFIX.length),
+        'base64url'
+      ).toString('utf8')
+    );
+    if (
+      Array.isArray(value) &&
+      typeof value[0] === 'string' &&
+      typeof value[1] === 'string'
+    )
+      return { creatorId: value[0], channelId: value[1] };
+  } catch {
+    // Treat malformed dynamic catalog ids as an unknown catalog.
+  }
+  return undefined;
+}
 
 export class FloatplaneAddon {
   private readonly api: FloatplaneClient;
@@ -75,6 +105,7 @@ export class FloatplaneAddon {
       id: 'com.aiostreams.floatplane',
       version: '1.0.0',
       name: 'Floatplane',
+      logo: 'https://floatplane.com/favicon.ico',
       description:
         'Floatplane subscriptions, creators, channels, posts, search, artwork, variants, and subtitles.',
       types: ['series', 'movie'],
@@ -83,12 +114,6 @@ export class FloatplaneAddon {
           type: 'series',
           id: 'floatplane-subscriptions',
           name: 'Floatplane Subscriptions',
-          extra: [{ name: 'skip' }],
-        },
-        {
-          type: 'series',
-          id: 'floatplane-channels',
-          name: 'Floatplane Channels',
           extra: [{ name: 'skip' }],
         },
         {
@@ -167,6 +192,58 @@ export class FloatplaneAddon {
     return creators.filter(Boolean) as any[];
   }
 
+  private async channelEntries(): Promise<
+    { creator: any; creatorId: string; channel: any; channelId: string }[]
+  > {
+    const creators = await this.creators();
+    const seen = new Set<string>();
+    return (
+      await Promise.all(
+        creators.map(async (creator) => {
+          const creatorId = idOf(creator);
+          if (!creatorId) return [];
+          const channels = array(await this.api.channels(creatorId));
+          return channels
+            .map((channel) => {
+              const channelId = idOf(channel);
+              if (!channelId) return null;
+              const key = `${creatorId}:${channelId}`;
+              if (seen.has(key)) return null;
+              seen.add(key);
+              return { creator, creatorId, channel, channelId };
+            })
+            .filter(Boolean) as {
+            creator: any;
+            creatorId: string;
+            channel: any;
+            channelId: string;
+          }[];
+        })
+      )
+    ).flat();
+  }
+
+  async getConfiguredManifest(): Promise<Manifest> {
+    const manifest = FloatplaneAddon.getManifest();
+    if (this.userData.includeChannels === false) return manifest;
+    try {
+      const entries = await this.channelEntries();
+      manifest.catalogs = [
+        ...(manifest.catalogs || []),
+        ...entries.map(({ creator, creatorId, channel, channelId }) => ({
+          type: 'series',
+          id: channelCatalogId(creatorId, channelId),
+          name: `Floatplane · ${title(creator)} · ${title(channel)}`,
+          extra: [{ name: 'skip' }],
+        })),
+      ];
+    } catch {
+      // Keep the core Floatplane catalogs available if channel discovery is
+      // temporarily unavailable; the next manifest refresh retries it.
+    }
+    return manifest;
+  }
+
   async getCatalog(
     _type: string,
     catalogId: string,
@@ -180,32 +257,25 @@ export class FloatplaneAddon {
         : array(await this.api.search(params.get('search') || '')).map((x) =>
             this.preview(x)
           );
+    const channelCatalog = parseChannelCatalogId(catalogId);
+    if (channelCatalog) {
+      if (this.userData.includeChannels === false) return [];
+      const posts = array(
+        await this.api.creatorContent(
+          channelCatalog.creatorId,
+          channelCatalog.channelId,
+          skip,
+          20
+        )
+      );
+      return posts.slice(0, 100).map((x) => this.preview(x));
+    }
     const creators = await this.creators();
     if (catalogId === 'floatplane-subscriptions')
       return this.userData.includeSubscriptions === false
         ? []
         : creators.map((x) => this.preview(x, 'creator'));
-    if (catalogId === 'floatplane-channels') {
-      if (this.userData.includeChannels === false) return [];
-      const channels = (
-        await Promise.all(
-          creators.map(async (creator) => {
-            const creatorId = idOf(creator);
-            return array(await this.api.channels(creatorId)).map((channel) => ({
-              ...channel,
-              __floatplaneCreatorId: creatorId,
-            }));
-          })
-        )
-      ).flat();
-      return channels.map((x) =>
-        this.preview(
-          x,
-          'channel',
-          `fp:channel:${x.__floatplaneCreatorId}:${idOf(x)}`
-        )
-      );
-    }
+    if (catalogId === 'floatplane-channels') return [];
     const posts = (
       await Promise.all(
         creators.map(async (creator) =>
