@@ -11,6 +11,7 @@ import {
   FloatplaneClient,
   array,
   first,
+  storeFloatplaneAuth,
   url,
 } from './api.js';
 import { Buffer } from 'node:buffer';
@@ -406,13 +407,21 @@ export class FloatplaneAddon {
   constructor(
     private readonly userData: {
       auth: FloatplaneAuthState;
+      authRef?: string;
       includeSubscriptions?: boolean;
       includeChannels?: boolean;
       includeSearch?: boolean;
       includeSubtitles?: boolean;
     }
   ) {
-    this.api = new FloatplaneClient(userData.auth);
+    this.api = new FloatplaneClient(userData.auth, {
+      sessionKey: userData.authRef,
+      onAuthChange: userData.authRef
+        ? async (auth) => {
+            await storeFloatplaneAuth(auth, userData.authRef);
+          }
+        : undefined,
+    });
   }
 
   static getManifest(): Manifest {

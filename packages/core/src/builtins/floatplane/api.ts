@@ -36,6 +36,13 @@ export interface FloatplaneDeviceAuthorization {
   codeVerifier: string;
 }
 
+export interface FloatplaneClientOptions {
+  /** Stable per-config key used to share refresh state across route requests. */
+  sessionKey?: string;
+  /** Persists rotated access/refresh tokens and DPoP state. */
+  onAuthChange?: (auth: FloatplaneAuthState) => Promise<void> | void;
+}
+
 const authBase = 'https://auth.floatplane.com';
 const issuer = `${authBase}/realms/floatplane`;
 const clientId = 'fp-tv-app';
@@ -229,13 +236,14 @@ const authStore = Cache.getInstance<string, string>(
   'sql'
 );
 export async function storeFloatplaneAuth(
-  auth: FloatplaneAuthState
+  auth: FloatplaneAuthState,
+  reference: string = randomUUID()
 ): Promise<string> {
-  const reference = randomUUID();
   await authStore.set(
     reference,
     encodeFloatplaneAuth(auth),
-    365 * 24 * 60 * 60
+    365 * 24 * 60 * 60,
+    true
   );
   return reference;
 }
@@ -298,6 +306,56 @@ export async function requestFloatplaneDeviceAuthorization(): Promise<Floatplane
 export type FloatplaneTokenPoll =
   | { status: 'pending'; retryAfter: number }
   | { status: 'authorized'; auth: FloatplaneAuthState };
+
+interface SharedFloatplaneSession {
+  auth: FloatplaneAuthState;
+  refreshInFlight?: Promise<void>;
+  onAuthChange?: (auth: FloatplaneAuthState) => Promise<void> | void;
+  authPersistDirty?: boolean;
+  lastUsedAt: number;
+}
+
+// A manifest request creates a new addon instance, so a per-client refresh
+// lock is not enough: catalog, metadata, and stream requests can otherwise
+// redeem one rotating refresh token concurrently. Keep a bounded process-local
+// session map keyed by the auth reference and persist every rotation through
+// the callback supplied by the server route.
+const sharedSessions = new Map<string, SharedFloatplaneSession>();
+const MAX_SHARED_SESSIONS = 256;
+
+function sessionFor(
+  auth: FloatplaneAuthState,
+  options: FloatplaneClientOptions
+): SharedFloatplaneSession {
+  if (!options.sessionKey) {
+    return {
+      auth,
+      onAuthChange: options.onAuthChange,
+      lastUsedAt: Date.now(),
+    };
+  }
+
+  const existing = sharedSessions.get(options.sessionKey);
+  if (existing) {
+    existing.lastUsedAt = Date.now();
+    if (options.onAuthChange) existing.onAuthChange = options.onAuthChange;
+    return existing;
+  }
+
+  const session: SharedFloatplaneSession = {
+    auth,
+    onAuthChange: options.onAuthChange,
+    lastUsedAt: Date.now(),
+  };
+  sharedSessions.set(options.sessionKey, session);
+  if (sharedSessions.size > MAX_SHARED_SESSIONS) {
+    const oldest = [...sharedSessions.entries()].sort(
+      (left, right) => left[1].lastUsedAt - right[1].lastUsedAt
+    )[0];
+    if (oldest) sharedSessions.delete(oldest[0]);
+  }
+  return session;
+}
 export async function pollFloatplaneDeviceAuthorization(
   device: FloatplaneDeviceAuthorization
 ): Promise<FloatplaneTokenPoll> {
@@ -348,15 +406,41 @@ export async function pollFloatplaneDeviceAuthorization(
         Number(first(data, 'expires_in', 'expiresIn') || 300) * 1000,
       refreshTokenExpiresAt:
         Date.now() +
-        Number(first(data, 'refresh_expires_in') || 2592000) * 1000,
+        Number(
+          first(data, 'refresh_expires_in', 'refreshTokenExpiresIn') || 2592000
+        ) *
+          1000,
     },
   };
 }
 
 export class FloatplaneClient {
-  private refreshInFlight?: Promise<void>;
+  private readonly session: SharedFloatplaneSession;
 
-  constructor(private readonly auth: FloatplaneAuthState) {}
+  constructor(
+    auth: FloatplaneAuthState,
+    options: FloatplaneClientOptions = {}
+  ) {
+    this.session = sessionFor(auth, options);
+  }
+
+  private get auth(): FloatplaneAuthState {
+    return this.session.auth;
+  }
+
+  private async persistAuthChange() {
+    if (!this.session.onAuthChange) return;
+    this.session.authPersistDirty = true;
+    try {
+      await this.session.onAuthChange(this.auth);
+      this.session.authPersistDirty = false;
+    } catch {
+      // A transient cache/database failure must not turn a valid refreshed
+      // Floatplane request into a playback failure. The in-memory session
+      // remains valid and the next request retries persistence.
+    }
+  }
+
   private async refresh(force = false) {
     if (
       !force &&
@@ -372,8 +456,8 @@ export class FloatplaneClient {
     // metadata requests are intentionally concurrent, so make refresh a
     // single-flight operation or two requests near expiry can race with the
     // same token and invalidate each other's session.
-    if (this.refreshInFlight) {
-      await this.refreshInFlight;
+    if (this.session.refreshInFlight) {
+      await this.session.refreshInFlight;
       return;
     }
 
@@ -402,16 +486,27 @@ export class FloatplaneClient {
         first(data, 'refresh_token') || this.auth.refreshToken;
       this.auth.tokenExpiresAt =
         Date.now() + Number(first(data, 'expires_in') || 300) * 1000;
+      const refreshExpiresIn = first(
+        data,
+        'refresh_expires_in',
+        'refreshTokenExpiresIn'
+      );
+      if (refreshExpiresIn) {
+        this.auth.refreshTokenExpiresAt =
+          Date.now() + Number(refreshExpiresIn) * 1000;
+      }
+      await this.persistAuthChange();
     })();
-    this.refreshInFlight = refreshTask;
+    this.session.refreshInFlight = refreshTask;
     try {
       await refreshTask;
     } finally {
-      if (this.refreshInFlight === refreshTask)
-        this.refreshInFlight = undefined;
+      if (this.session.refreshInFlight === refreshTask)
+        this.session.refreshInFlight = undefined;
     }
   }
   async request(path: string, init: RequestInit = {}): Promise<JsonValue> {
+    if (this.session.authPersistDirty) await this.persistAuthChange();
     await this.refresh();
     const endpoint = path.startsWith('http') ? path : `${apiBase}${path}`;
     for (let attempt = 0; attempt < 2; attempt++) {

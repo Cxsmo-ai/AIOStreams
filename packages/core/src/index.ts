@@ -32,6 +32,7 @@ export {
   requestFloatplaneDeviceAuthorization,
   pollFloatplaneDeviceAuthorization,
   type FloatplaneDeviceAuthorization,
+  type FloatplaneClientOptions,
   TorznabAddon,
   NewznabAddon,
   UnarrIndexerAddon,

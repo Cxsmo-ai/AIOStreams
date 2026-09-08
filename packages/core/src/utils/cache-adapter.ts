@@ -1,6 +1,6 @@
 import { config as appConfig } from '../config/index.js';
 import { RedisClientType } from 'redis';
-import { REDIS_PREFIX } from './index.js';
+import { REDIS_PREFIX } from './constants.js';
 import { createLogger } from '../logging/logger.js';
 import { getTimeTakenSincePoint } from './time.js';
 import { getDb } from '../db/db.js';
