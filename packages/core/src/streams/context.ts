@@ -185,6 +185,15 @@ export class StreamContext {
       return;
     }
 
+    // Built-in addons may use opaque IDs (for example Floatplane's
+    // fp:post:* and fp:video:* IDs). They have no TMDB/TVDB/IMDb mapping, so
+    // there is no metadata request to make. Mark the lookup complete instead
+    // of passing null into MetadataService.
+    if (!this.parsedId) {
+      this._metadataFetched = true;
+      return;
+    }
+
     this._metadataPromise = (async () => {
       try {
         const service = new MetadataService({

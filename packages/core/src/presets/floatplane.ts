@@ -71,7 +71,13 @@ export class FloatplanePreset extends Preset {
       TIMEOUT: appConfig.presets.defaultTimeout,
       USER_AGENT: appConfig.http.defaultUserAgent,
       SUPPORTED_RESOURCES: resources,
-      SUPPORTED_STREAM_TYPES: [constants.HTTP_STREAM_TYPE],
+      // Floatplane delivers VOD as signed HLS playlists. The parser exposes
+      // those as `live` internally, so advertise both forms to keep the
+      // stream-type pipeline from treating them as an unsupported addon.
+      SUPPORTED_STREAM_TYPES: [
+        constants.HTTP_STREAM_TYPE,
+        constants.LIVE_STREAM_TYPE,
+      ],
       SUPPORTED_SERVICES: [],
       OPTIONS: options,
       BUILTIN: true,
@@ -106,6 +112,9 @@ export class FloatplanePreset extends Preset {
       timeout: options.timeout || this.METADATA.TIMEOUT,
       preset: { id: '', type: this.METADATA.ID, options },
       headers: { 'User-Agent': this.METADATA.USER_AGENT },
+      // Floatplane already supplies quality labels and direct signed CDN
+      // URLs. Do not run those streams through an unrelated global formatter.
+      formatPassthrough: true,
     };
   }
 }
