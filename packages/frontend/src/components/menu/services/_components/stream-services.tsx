@@ -99,7 +99,9 @@ const SERVICE_LOGO_MAP: Record<ServiceId, string> = {
   torrentclaw: 'https://torrentclaw.com/icon-512.png',
   torrin: 'https://torrin.app/favicon.png',
   kurato: 'https://kurato.com/favicon.ico',
-  floatplane: 'https://floatplane.com/favicon.ico',
+  // Keep this local: the public Floatplane favicon is not a stable image URL
+  // and renders as a broken-image placeholder in several clients.
+  floatplane: '/assets/floatplane-icon.png',
 };
 
 function ServiceLogo({
@@ -110,8 +112,15 @@ function ServiceLogo({
   shortName: string;
 }) {
   const logoUrl = SERVICE_LOGO_MAP[serviceId];
+  const [src, setSrc] = useState(logoUrl);
+  const [failed, setFailed] = useState(false);
 
-  if (!logoUrl) {
+  useEffect(() => {
+    setSrc(logoUrl);
+    setFailed(false);
+  }, [logoUrl]);
+
+  if (!src || failed) {
     return (
       <div className="w-9 h-9 rounded-lg bg-[--subtle] border border-[--border] flex items-center justify-center text-xs font-bold font-mono shrink-0 text-[--muted]">
         {shortName}
@@ -121,9 +130,10 @@ function ServiceLogo({
 
   return (
     <img
-      src={logoUrl}
+      src={src}
       alt={shortName}
-      className="w-9 h-9 rounded-lg object-contain shrink-0"
+      className="w-9 h-9 rounded-lg object-contain p-1 shrink-0"
+      onError={() => setFailed(true)}
     />
   );
 }

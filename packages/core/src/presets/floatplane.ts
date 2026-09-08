@@ -50,7 +50,10 @@ export class FloatplanePreset extends Preset {
       NAME: 'Floatplane',
       DESCRIPTION:
         'Official Floatplane device-link integration with subscriptions, channels, search, metadata, artwork, quality variants, and subtitles.',
-      LOGO: 'https://floatplane.com/favicon.ico',
+      // The old public favicon URL is not a stable image endpoint. The
+      // frontend serves this bundled icon locally so the marketplace never
+      // shows a broken-image placeholder when Floatplane is selected.
+      LOGO: '/assets/floatplane-icon.png',
       URL: [`${appConfig.bootstrap.internalUrl}/builtins/floatplane`],
       TIMEOUT: appConfig.presets.defaultTimeout,
       USER_AGENT: appConfig.http.defaultUserAgent,

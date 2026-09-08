@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button } from '../../../ui/button';
 import { Modal } from '../../../ui/modal';
 import { Popover } from '../../../ui/popover';
@@ -7,6 +7,42 @@ import { Alert } from '../../../ui/alert';
 import MarkdownLite from '../../../shared/markdown-lite';
 import { PlusIcon } from 'lucide-react';
 import * as constants from '../../../../../../core/src/utils/constants';
+
+const FLOATPLANE_LOGO_PATH = '/assets/floatplane-icon.png';
+
+function AddonLogo({ preset }: { preset: any }) {
+  const fallback =
+    preset.ID === 'floatplane' ? FLOATPLANE_LOGO_PATH : undefined;
+  const [src, setSrc] = useState<string | undefined>(preset.LOGO || fallback);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setSrc(preset.LOGO || fallback);
+    setFailed(false);
+  }, [fallback, preset.LOGO]);
+
+  if (!src || failed) {
+    return (
+      <div className="relative rounded-md size-12 bg-gray-950 overflow-hidden flex items-center justify-center">
+        <p className="text-2xl font-bold">{preset.NAME[0].toUpperCase()}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative rounded-md size-12 bg-gray-950 overflow-hidden flex items-center justify-center">
+      <img
+        src={src}
+        alt={preset.NAME}
+        className="w-full h-full object-contain p-1"
+        onError={() => {
+          if (fallback && src !== fallback) setSrc(fallback);
+          else setFailed(true);
+        }}
+      />
+    </div>
+  );
+}
 
 export function AddonCard({
   preset,
@@ -39,13 +75,7 @@ export function AddonCard({
                 <PlusIcon className="w-6 h-6 text-[--brand]" />
               </div>
             ) : preset.LOGO ? (
-              <div className="relative rounded-md size-12 bg-gray-900 overflow-hidden">
-                <img
-                  src={preset.LOGO}
-                  alt={preset.NAME}
-                  className="w-full h-full object-cover"
-                />
-              </div>
+              <AddonLogo preset={preset} />
             ) : (
               <div className="relative rounded-md size-12 bg-gray-950 overflow-hidden flex items-center justify-center">
                 <p className="text-2xl font-bold">

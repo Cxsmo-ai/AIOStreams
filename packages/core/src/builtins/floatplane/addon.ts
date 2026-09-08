@@ -5,6 +5,7 @@ import {
   Stream,
   Subtitle,
 } from '../../db/index.js';
+import { config as appConfig } from '../../config/index.js';
 import {
   FloatplaneAuthState,
   FloatplaneClient,
@@ -13,13 +14,18 @@ import {
   url,
 } from './api.js';
 import { Buffer } from 'node:buffer';
-import {
-  containsAv1,
-  filterPlayableFloatplaneMedia,
-  filterPlayableFloatplanePlaylists,
-} from './codec.js';
+import { containsAv1 } from './codec.js';
 
 const CHANNEL_CATALOG_PREFIX = 'floatplane-channel-';
+const FLOATPLANE_LOGO_PATH = '/assets/floatplane-icon.png';
+
+function floatplaneLogoUrl(): string {
+  const base =
+    appConfig.bootstrap.baseUrl || appConfig.bootstrap.internalUrl || '';
+  return base
+    ? `${base.replace(/\/$/, '')}${FLOATPLANE_LOGO_PATH}`
+    : FLOATPLANE_LOGO_PATH;
+}
 
 function text(value: unknown, fallback = ''): string {
   return String(value ?? fallback);
@@ -414,7 +420,7 @@ export class FloatplaneAddon {
       id: 'com.aiostreams.floatplane',
       version: '1.0.0',
       name: 'Floatplane',
-      logo: 'https://floatplane.com/favicon.ico',
+      logo: floatplaneLogoUrl(),
       description:
         'Floatplane subscriptions, creators, channels, posts, search, artwork, variants, and subtitles.',
       types: ['series', 'movie'],
@@ -775,10 +781,15 @@ export class FloatplaneAddon {
           } as Stream;
         })
         .filter((x): x is Stream => Boolean(x));
-      if (v3Streams.length)
-        return outputKind === 'flat'
-          ? filterPlayableFloatplaneMedia(v3Streams)
-          : filterPlayableFloatplanePlaylists(v3Streams);
+      if (v3Streams.length) {
+        // Delivery responses already contain freshly signed CDN URLs. Probing
+        // every variant here added 2–5 seconds to every source request and
+        // could reject a valid URL when the server could not reach the CDN's
+        // watch-key endpoint. Let the client start the direct URL immediately;
+        // stream caching is disabled for Floatplane, so every request still
+        // receives fresh authorization.
+        return v3Streams;
+      }
 
       // Older accounts may only expose the v2 CDN response. Normalize its
       // quality template so those accounts still receive every available level.
@@ -831,28 +842,32 @@ export class FloatplaneAddon {
             : null;
         })
         .filter((x): x is Stream => Boolean(x));
-      return filterPlayableFloatplanePlaylists(legacyStreams);
+      return legacyStreams;
     };
 
     // Metadata is only used to enrich the display. Keep it bounded and fetch
     // it concurrently with delivery so formatting never makes playback wait
     // on a slow metadata endpoint.
-    const metadataPromise = Promise.race([
-      this.api.video(rawId).catch(() => undefined),
-      new Promise<undefined>((resolve) =>
-        setTimeout(() => resolve(undefined), 1200)
-      ),
-    ]);
+    const metadataPromise = this.api.video(rawId).catch(() => undefined);
+    const metadataForDisplay = () =>
+      Promise.race([
+        metadataPromise,
+        // Metadata enriches descriptions and duration, but must never hold a
+        // fresh direct playback URL hostage when the metadata endpoint is
+        // slow or rate-limited.
+        new Promise<undefined>((resolve) =>
+          setTimeout(() => resolve(undefined), 350)
+        ),
+      ]);
 
     const deliveryFor = async (
       contentId: string,
       outputKind = 'hls.fmp4'
     ): Promise<Stream[]> => {
       try {
-        const [delivery, metadata] = await Promise.all([
-          this.api.delivery(contentId, outputKind),
-          contentId === rawId ? metadataPromise : Promise.resolve(undefined),
-        ]);
+        const delivery = await this.api.delivery(contentId, outputKind);
+        const metadata =
+          contentId === rawId ? await metadataForDisplay() : undefined;
         return streamsFromDelivery(delivery, outputKind, metadata);
       } catch {
         return [];
