@@ -141,9 +141,24 @@ jobs:
         run: echo "${{ steps.build.outputs.digest }}" > "/tmp/${{ matrix.suffix }}"
 
       - name: Upload digest artifact
+        id: upload_digest
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.suffix }}
+          path: /tmp/${{ matrix.suffix }}
+          archive: false
+          retention-days: 1
+
+      # Artifact finalization can occasionally receive a transient 403 from
+      # GitHub's intermediary. The image is already pushed at this point, so
+      # retry the digest transfer under a distinct name and let the merge job
+      # select whichever upload completed.
+      - name: Retry digest artifact upload
+        if: ${{ steps.upload_digest.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.suffix }}-retry
           path: /tmp/${{ matrix.suffix }}
           archive: false
           retention-days: 1
@@ -160,7 +175,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: '{amd64,arm64}'
+          pattern: '{amd64,arm64,amd64-retry,arm64-retry}'
           merge-multiple: true
 
       - name: Set lower case repository name
@@ -180,9 +195,23 @@ jobs:
         env:
           TAGS: ${{ needs.setup.outputs.tags }}
         run: |
+          digest_for() {
+            local suffix="$1"
+            if [[ -f "/tmp/digests/${suffix}" ]]; then
+              cat "/tmp/digests/${suffix}"
+              return 0
+            fi
+            if [[ -f "/tmp/digests/${suffix}-retry" ]]; then
+              cat "/tmp/digests/${suffix}-retry"
+              return 0
+            fi
+            echo "Missing ${suffix} image digest artifact" >&2
+            return 1
+          }
+
           for tag in ${TAGS}; do
             docker buildx imagetools create \
               -t "ghcr.io/${REPO}:${tag}" \
-              "ghcr.io/${REPO}@$(cat /tmp/digests/amd64)" \
-              "ghcr.io/${REPO}@$(cat /tmp/digests/arm64)"
+              "ghcr.io/${REPO}@$(digest_for amd64)" \
+              "ghcr.io/${REPO}@$(digest_for arm64)"
           done
