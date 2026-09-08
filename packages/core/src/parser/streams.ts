@@ -464,6 +464,12 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
+    // Floatplane is an authenticated direct HTTP/CDN source, not a debrid
+    // cache service. Its stream labels contain the word "Floatplane", which
+    // would otherwise make the generic parser mark every stream as
+    // `service.cached === false`; users with "Exclude uncached" enabled would
+    // then lose every valid Floatplane result after a successful scrape.
+    if (this.addon.preset?.type === 'floatplane') return undefined;
     return this.parseServiceData(stream.name || '');
   }
 
