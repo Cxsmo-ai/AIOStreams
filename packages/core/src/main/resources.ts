@@ -750,7 +750,14 @@ export async function getStreams(
   const pipelineTtl = appConfig.resources.cache.pipeline.ttl;
   // A progressive request must execute the fetcher so that snapshots can be
   // delivered. It is intentionally never served from the final-result cache.
-  const usePipelineCache = !preCaching && !onProgress && pipelineTtl > 0;
+  // Floatplane stream URLs are signed CDN URLs and must never be replayed
+  // from the full-pipeline cache. The source addon will mint and validate a
+  // fresh direct URL for each request.
+  const hasEphemeralSignedAddon = supportedAddons.some(
+    (addon) => addon.preset.type === 'floatplane'
+  );
+  const usePipelineCache =
+    !preCaching && !onProgress && pipelineTtl > 0 && !hasEphemeralSignedAddon;
   // Hash the full userData: it captures everything the pipeline output depends
   // on
   let pipelineCacheKey = '';

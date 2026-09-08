@@ -13,7 +13,10 @@ import {
   url,
 } from './api.js';
 import { Buffer } from 'node:buffer';
-import { containsAv1 } from './codec.js';
+import {
+  containsAv1,
+  filterPlayableFloatplanePlaylists,
+} from './codec.js';
 
 const CHANNEL_CATALOG_PREFIX = 'floatplane-channel-';
 
@@ -345,7 +348,7 @@ export class FloatplaneAddon {
 
   async getStreams(_type: string, itemId: string): Promise<Stream[]> {
     const rawId = itemId.split(':').pop() || itemId;
-    const streamsFromDelivery = (response: any): Stream[] => {
+    const streamsFromDelivery = async (response: any): Promise<Stream[]> => {
       const groups = array(first(response, 'groups'));
       const variants = groups.flatMap((group) =>
         array(first(group, 'variants')).map((variant) => ({ variant, group }))
@@ -381,7 +384,8 @@ export class FloatplaneAddon {
           } as Stream;
         })
         .filter((x): x is Stream => Boolean(x));
-      if (v3Streams.length) return v3Streams;
+      if (v3Streams.length)
+        return filterPlayableFloatplanePlaylists(v3Streams);
 
       // Older accounts may only expose the v2 CDN response. Normalize its
       // quality template so those accounts still receive every available level.
@@ -391,7 +395,7 @@ export class FloatplaneAddon {
       const cdn = first(response, 'cdn');
       const params = first(data, 'qualityLevelParams');
       if (typeof template !== 'string' || !cdn || !params) return [];
-      return array(first(data, 'qualityLevels'))
+      const legacyStreams = array(first(data, 'qualityLevels'))
         .map((level) => {
           if (containsAv1(level)) return null;
           const name = text(first(level, 'name'));
@@ -410,6 +414,7 @@ export class FloatplaneAddon {
             : null;
         })
         .filter((x): x is Stream => Boolean(x));
+      return filterPlayableFloatplanePlaylists(legacyStreams);
     };
 
     const deliveryFor = async (contentId: string): Promise<Stream[]> => {

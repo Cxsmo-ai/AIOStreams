@@ -295,17 +295,23 @@ export class Wrapper {
         options: this.addon.preset.options,
         headers: this.addon.headers,
       }) || this.buildResourceUrl('stream', type, id);
-    const streamTtl = resolveTtl(
-      appConfig.resources.cache.stream.ttl,
-      this.addon.preset.type,
-      this.manifestUrl
-    );
+    // Floatplane delivery URLs contain short-lived CDN signatures. Never
+    // reuse a cached stream response for this preset; each playback request
+    // must ask Floatplane for a fresh signed playlist URL.
+    const ephemeralSignedUrls = this.addon.preset.type === 'floatplane';
+    const streamTtl = ephemeralSignedUrls
+      ? -1
+      : resolveTtl(
+          appConfig.resources.cache.stream.ttl,
+          this.addon.preset.type,
+          this.manifestUrl
+        );
     const upstreamStreams = await this.makeResourceRequest(
       'stream',
       { type, id },
       this.addon.timeout,
       validator,
-      streamTtl != -1 ? streamsCache : undefined,
+      !ephemeralSignedUrls && streamTtl != -1 ? streamsCache : undefined,
       streamTtl,
       this.preset.getCacheKey({
         resource: 'stream',
