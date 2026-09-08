@@ -885,21 +885,24 @@ export class FloatplaneAddon {
       .then((response) => first(response, 'post', 'content', 'data') || response)
       .catch(() => undefined);
 
-    // Flat MP4 is the fastest and most broadly compatible Floatplane output.
-    // It is returned directly from the fresh delivery response; no server-side
-    // proxy or CDN preflight is needed for a signed URL.
-    const direct = await deliveryFor(rawId, 'flat');
-    if (direct.length) return direct;
-
-    // Alternate transports are compatibility fallbacks only. Run them
-    // together so an older account that rejects flat delivery waits for the
-    // slowest one transport round trip, not the sum of both.
-    const [mpegtsFallback, fmp4Fallback] = await Promise.all([
-      deliveryFor(rawId, 'hls.mpegts'),
+    // Progressive flat MP4 is broadly compatible, but Floatplane's large
+    // 2160p files can place the MP4 metadata after a long media region. That
+    // makes some TV players wait much longer than the CDN's byte-range
+    // response time before they can render the first frame. Request the
+    // fragmented HLS transport in parallel and prefer it when available: it
+    // exposes the initialization metadata and short media segments up front,
+    // while remaining a direct signed CDN URL with no server-side proxy.
+    const [direct, fmp4Preferred] = await Promise.all([
+      deliveryFor(rawId, 'flat'),
       deliveryFor(rawId, 'hls.fmp4'),
     ]);
+    if (fmp4Preferred.length) return fmp4Preferred;
+    if (direct.length) return direct;
+
+    // MPEG-TS remains the final compatibility fallback for older accounts
+    // whose fMP4 delivery is unavailable.
+    const mpegtsFallback = await deliveryFor(rawId, 'hls.mpegts');
     if (mpegtsFallback.length) return mpegtsFallback;
-    if (fmp4Fallback.length) return fmp4Fallback;
 
     // Attachment-only posts are uncommon, but their old serial fallback was
     // the largest source of long waits. Keep the request fan-out bounded and
@@ -911,18 +914,10 @@ export class FloatplaneAddon {
     if (!attachments.length) return [];
 
     const attachmentMetadata = item;
-    const flatResults = await Promise.all(
-      attachments.map((attachmentId) =>
-        deliveryFor(attachmentId, 'flat', attachmentMetadata)
-      )
-    );
-    const flatAttachment = flatResults.find((streams) => streams.length);
-    if (flatAttachment?.length) return flatAttachment;
-
-    const [mpegtsResults, fmp4Results] = await Promise.all([
+    const [flatResults, fmp4Results] = await Promise.all([
       Promise.all(
         attachments.map((attachmentId) =>
-          deliveryFor(attachmentId, 'hls.mpegts', attachmentMetadata)
+          deliveryFor(attachmentId, 'flat', attachmentMetadata)
         )
       ),
       Promise.all(
@@ -931,10 +926,18 @@ export class FloatplaneAddon {
         )
       ),
     ]);
-    const mpegtsAttachment = mpegtsResults.find((streams) => streams.length);
-    if (mpegtsAttachment?.length) return mpegtsAttachment;
     const fmp4Attachment = fmp4Results.find((streams) => streams.length);
     if (fmp4Attachment?.length) return fmp4Attachment;
+    const flatAttachment = flatResults.find((streams) => streams.length);
+    if (flatAttachment?.length) return flatAttachment;
+
+    const mpegtsResults = await Promise.all(
+      attachments.map((attachmentId) =>
+        deliveryFor(attachmentId, 'hls.mpegts', attachmentMetadata)
+      )
+    );
+    const mpegtsAttachment = mpegtsResults.find((streams) => streams.length);
+    if (mpegtsAttachment?.length) return mpegtsAttachment;
 
     // Preserve the normal empty stream response when the post is not a
     // playable parent or its delivery rights have expired.
