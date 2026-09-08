@@ -32,6 +32,7 @@ function descriptionOf(item: any, fallback?: string): string | undefined {
     'summary',
     'text',
     'body',
+    'content',
     'caption'
   );
   const nested = raw && typeof raw === 'object' ? first(raw, 'text', 'value') : raw;
@@ -39,6 +40,11 @@ function descriptionOf(item: any, fallback?: string): string | undefined {
   if (!value) return undefined;
   return value
     .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -196,9 +202,18 @@ function image(item: any): string | undefined {
   return undefined;
 }
 function title(item: any): string {
-  return text(
-    first(item, 'title', 'name', 'displayName'),
-    'Floatplane content'
+  const raw = first(
+    item,
+    'title',
+    'name',
+    'displayName',
+    'headline',
+    'subject',
+    'videoTitle'
+  );
+  const nested = raw && typeof raw === 'object' ? first(raw, 'text', 'value') : raw;
+  return (
+    descriptionOf({ description: nested }) || 'Floatplane content'
   );
 }
 function idOf(item: any): string {
