@@ -417,16 +417,28 @@ export class FloatplaneAddon {
       return filterPlayableFloatplanePlaylists(legacyStreams);
     };
 
-    const deliveryFor = async (contentId: string): Promise<Stream[]> => {
+    const deliveryFor = async (
+      contentId: string,
+      outputKind = 'hls.fmp4'
+    ): Promise<Stream[]> => {
       try {
-        return streamsFromDelivery(await this.api.delivery(contentId));
+        return streamsFromDelivery(
+          await this.api.delivery(contentId, outputKind)
+        );
       } catch {
         return [];
       }
     };
 
-    const direct = await deliveryFor(rawId);
+    const direct = await deliveryFor(rawId, 'hls.fmp4');
     if (direct.length) return direct;
+
+    // fMP4 is efficient but some clients cannot access Floatplane's
+    // authenticated watchKey endpoint. MPEG-TS carries the same direct CDN
+    // delivery without that key exchange, so use it as a compatibility
+    // fallback before trying parent-post attachment ids.
+    const transportFallback = await deliveryFor(rawId, 'hls.mpegts');
+    if (transportFallback.length) return transportFallback;
 
     // Stremio clients differ on whether they request the post id or the
     // attachment id. Resolve the parent post so both request shapes play.
@@ -437,7 +449,9 @@ export class FloatplaneAddon {
         first(item, 'videoAttachments', 'attachmentOrder')
       );
       for (const attachmentId of attachments) {
-        const streams = await deliveryFor(attachmentId);
+        const streams =
+          (await deliveryFor(attachmentId, 'hls.fmp4'))
+            .concat(await deliveryFor(attachmentId, 'hls.mpegts'));
         if (streams.length) return streams;
       }
     } catch {

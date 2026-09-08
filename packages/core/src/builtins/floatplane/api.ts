@@ -504,13 +504,13 @@ export class FloatplaneClient {
       `/api/v3/content/video?${new URLSearchParams({ id: videoId })}`
     );
   }
-  async delivery(contentId: string) {
+  async delivery(contentId: string, outputKind = 'hls.fmp4') {
     try {
       return await this.request(
         `/api/v3/delivery/info?${new URLSearchParams({
           entityId: contentId,
           scenario: 'onDemand',
-          outputKind: 'hls.fmp4',
+          outputKind,
         })}`
       );
     } catch {
