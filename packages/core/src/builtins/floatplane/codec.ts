@@ -7,6 +7,7 @@ export function containsAv1(value: unknown): boolean {
 }
 
 export type FloatplanePlaylistProbe = 'valid' | 'invalid' | 'unknown';
+export type FloatplaneMediaProbe = 'valid' | 'invalid' | 'unknown';
 
 const PLAYLIST_PROBE_TIMEOUT_MS = 5_000;
 
@@ -129,6 +130,63 @@ export async function filterPlayableFloatplanePlaylists<
       result:
         typeof stream.url === 'string'
           ? await probeFloatplanePlaylist(stream.url)
+          : ('invalid' as const),
+    }))
+  );
+  const valid = checked
+    .filter(({ result }) => result === 'valid')
+    .map(({ stream }) => stream);
+  if (valid.length) return valid;
+  return checked
+    .filter(({ result }) => result === 'unknown')
+    .map(({ stream }) => stream);
+}
+
+/**
+ * Validate a Floatplane `flat` delivery without downloading the media. A
+ * ranged read proves that the signed URL is still accepted and that the
+ * response is not an HTML/API error page while keeping the client-side video
+ * path direct to Floatplane's CDN.
+ */
+export async function probeFloatplaneMedia(
+  mediaUrl: string
+): Promise<FloatplaneMediaProbe> {
+  if (!/^https?:\/\//i.test(mediaUrl) || containsAv1(mediaUrl)) {
+    return 'invalid';
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    PLAYLIST_PROBE_TIMEOUT_MS
+  );
+  try {
+    const response = await fetch(mediaUrl, {
+      headers: { Range: 'bytes=0-4095' },
+      signal: controller.signal,
+    });
+    if (!response.ok && response.status !== 206) return 'invalid';
+    const contentType = response.headers.get('content-type') || '';
+    if (/text\/html|application\/json/i.test(contentType)) return 'invalid';
+    await response.body?.cancel();
+    return 'valid';
+  } catch {
+    return 'unknown';
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function filterPlayableFloatplaneMedia<
+  T extends { url?: string | null }
+>(
+  streams: T[]
+): Promise<T[]> {
+  const checked = await Promise.all(
+    streams.map(async (stream) => ({
+      stream,
+      result:
+        typeof stream.url === 'string'
+          ? await probeFloatplaneMedia(stream.url)
           : ('invalid' as const),
     }))
   );

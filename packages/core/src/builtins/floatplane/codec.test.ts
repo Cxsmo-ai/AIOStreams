@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   containsAv1,
+  filterPlayableFloatplaneMedia,
   filterPlayableFloatplanePlaylists,
+  probeFloatplaneMedia,
   probeFloatplanePlaylist,
 } from './codec.js';
 
@@ -19,6 +21,31 @@ test('keeps H.264, HEVC, and VP9 delivery objects eligible', () => {
   assert.equal(containsAv1({ codec: 'avc1.640028' }), false);
   assert.equal(containsAv1({ codec: 'hvc1.2.4.L153.B0' }), false);
   assert.equal(containsAv1({ codec: 'vp09.00.51.08' }), false);
+});
+
+test('accepts a ranged direct-media response for flat delivery', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(new Uint8Array([0, 1, 2]), {
+      status: 206,
+      headers: { 'content-type': 'video/mp4' },
+    })) as typeof fetch;
+  try {
+    assert.equal(
+      await probeFloatplaneMedia(
+        'https://cdn-vod-drm2.floatplane.com/Videos/direct/1080.mp4?token=redacted'
+      ),
+      'valid'
+    );
+    assert.deepEqual(
+      await filterPlayableFloatplaneMedia([
+        { url: 'https://cdn-vod-drm2.floatplane.com/Videos/direct/1080.mp4' },
+      ]),
+      [{ url: 'https://cdn-vod-drm2.floatplane.com/Videos/direct/1080.mp4' }]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('rejects a signed playlist that the CDN no longer authorizes', async () => {

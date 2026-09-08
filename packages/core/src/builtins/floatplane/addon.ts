@@ -15,6 +15,7 @@ import {
 import { Buffer } from 'node:buffer';
 import {
   containsAv1,
+  filterPlayableFloatplaneMedia,
   filterPlayableFloatplanePlaylists,
 } from './codec.js';
 
@@ -348,7 +349,10 @@ export class FloatplaneAddon {
 
   async getStreams(_type: string, itemId: string): Promise<Stream[]> {
     const rawId = itemId.split(':').pop() || itemId;
-    const streamsFromDelivery = async (response: any): Promise<Stream[]> => {
+    const streamsFromDelivery = async (
+      response: any,
+      outputKind: string
+    ): Promise<Stream[]> => {
       const groups = array(first(response, 'groups'));
       const variants = groups.flatMap((group) =>
         array(first(group, 'variants')).map((variant) => ({ variant, group }))
@@ -385,7 +389,9 @@ export class FloatplaneAddon {
         })
         .filter((x): x is Stream => Boolean(x));
       if (v3Streams.length)
-        return filterPlayableFloatplanePlaylists(v3Streams);
+        return outputKind === 'flat'
+          ? filterPlayableFloatplaneMedia(v3Streams)
+          : filterPlayableFloatplanePlaylists(v3Streams);
 
       // Older accounts may only expose the v2 CDN response. Normalize its
       // quality template so those accounts still receive every available level.
@@ -423,7 +429,8 @@ export class FloatplaneAddon {
     ): Promise<Stream[]> => {
       try {
         return streamsFromDelivery(
-          await this.api.delivery(contentId, outputKind)
+          await this.api.delivery(contentId, outputKind),
+          outputKind
         );
       } catch {
         return [];
@@ -440,6 +447,11 @@ export class FloatplaneAddon {
     const transportFallback = await deliveryFor(rawId, 'hls.mpegts');
     if (transportFallback.length) return transportFallback;
 
+    // Floatplane also exposes a signed direct-media representation. It is the
+    // last-resort path for clients that cannot obtain the HLS watch key.
+    const flatFallback = await deliveryFor(rawId, 'flat');
+    if (flatFallback.length) return flatFallback;
+
     // Stremio clients differ on whether they request the post id or the
     // attachment id. Resolve the parent post so both request shapes play.
     try {
@@ -451,7 +463,8 @@ export class FloatplaneAddon {
       for (const attachmentId of attachments) {
         const streams =
           (await deliveryFor(attachmentId, 'hls.fmp4'))
-            .concat(await deliveryFor(attachmentId, 'hls.mpegts'));
+            .concat(await deliveryFor(attachmentId, 'hls.mpegts'))
+            .concat(await deliveryFor(attachmentId, 'flat'));
         if (streams.length) return streams;
       }
     } catch {
