@@ -40,6 +40,12 @@ router.get(
     }
     const transformer = new StremioTransformer(req.userData);
 
+    // Some clients and reverse proxies cache the ordinary Stremio JSON
+    // response even though its stream URLs may be short-lived signed CDN
+    // URLs. Always force a fresh stream request, especially for Floatplane.
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+
     const provideSetting = appConfig.api.provideStreamData;
     const provideStreamData =
       provideSetting === null
