@@ -322,6 +322,7 @@ const PIKPAK_SERVICE = 'pikpak';
 const OFFCLOUD_SERVICE = 'offcloud';
 const SEEDR_SERVICE = 'seedr';
 const EASYNEWS_SERVICE = 'easynews';
+export const FLOATPLANE_SERVICE = 'floatplane' as const;
 const NZBDAV_SERVICE = 'nzbdav';
 const ALTMOUNT_SERVICE = 'altmount';
 const STREMIO_NNTP_SERVICE = 'stremio_nntp';
@@ -345,6 +346,7 @@ const SERVICES = [
   OFFCLOUD_SERVICE,
   SEEDR_SERVICE,
   EASYNEWS_SERVICE,
+  FLOATPLANE_SERVICE,
   NZBDAV_SERVICE,
   ALTMOUNT_SERVICE,
   STREMIO_NNTP_SERVICE,
@@ -520,6 +522,24 @@ const SERVICE_DETAILS: Record<
         name: 'API Key',
         description:
           'Your Torbox API key. Obtain it from [here](https://torbox.app/settings)',
+        type: 'password',
+        required: true,
+      },
+    ],
+  },
+  [FLOATPLANE_SERVICE]: {
+    id: FLOATPLANE_SERVICE,
+    name: 'Floatplane',
+    shortName: 'FP',
+    knownNames: ['FP', 'Floatplane'],
+    signUpText:
+      'Link your Floatplane account with the official device-code flow. Tokens are kept encrypted on this AIOStreams instance.',
+    credentials: [
+      {
+        id: 'authRef',
+        name: 'Floatplane Account',
+        description:
+          'Use the Connect Floatplane button to link with Floatplane. The real access and refresh tokens never leave the server.',
         type: 'password',
         required: true,
       },

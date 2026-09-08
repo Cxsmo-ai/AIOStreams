@@ -11,6 +11,7 @@ import {
   AIOSTREAMS_SERVICE,
   DEEPBRID_SERVICE,
   TORRENTCLAW_SERVICE,
+  FLOATPLANE_SERVICE,
 } from '../../../../../../core/src/utils/constants';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import {
@@ -38,6 +39,7 @@ import TemplateOption from '../../../shared/template-option';
 import MarkdownLite from '../../../shared/markdown-lite';
 import { StatusResponse, UserData } from '@aiostreams/core';
 import { TorboxServiceModal } from './torbox-service-modal';
+import { FloatplaneServiceModal } from './floatplane-service-modal';
 
 // Usenet service IDs
 const USENET_SERVICE_IDS: string[] = [
@@ -51,7 +53,10 @@ const USENET_SERVICE_IDS: string[] = [
 ];
 
 const DUAL_SERVICE_IDS: string[] = ['torbox'];
-const INTEGRATION_SERVICE_IDS: string[] = [TORRENTCLAW_SERVICE];
+const INTEGRATION_SERVICE_IDS: string[] = [
+  TORRENTCLAW_SERVICE,
+  FLOATPLANE_SERVICE,
+];
 
 function isUsenetService(id: string): boolean {
   return USENET_SERVICE_IDS.includes(id);
@@ -93,6 +98,8 @@ const SERVICE_LOGO_MAP: Record<ServiceId, string> = {
     'https://www.deepbrid.com/application/default/themes/okagev4/public/img/logo-light.png',
   torrentclaw: 'https://torrentclaw.com/icon-512.png',
   torrin: 'https://torrin.app/favicon.png',
+  kurato: 'https://kurato.com/favicon.ico',
+  floatplane: 'https://floatplane.com/favicon.ico',
 };
 
 function ServiceLogo({
@@ -171,7 +178,14 @@ export function StreamServices() {
       const newUserData = { ...prev };
       newUserData.services = (newUserData.services ?? []).map((service) => {
         if (service.id === modalService) {
-          return { ...service, enabled: true, credentials: values };
+          return {
+            ...service,
+            enabled:
+              modalService === FLOATPLANE_SERVICE
+                ? Boolean(values.authRef)
+                : true,
+            credentials: values,
+          };
         }
         return service;
       });
@@ -617,6 +631,18 @@ function ServiceModal({
   if (serviceId === 'torbox') {
     return (
       <TorboxServiceModal
+        open={open}
+        onOpenChange={onOpenChange}
+        values={values}
+        onSubmit={onSubmit}
+        onClose={onClose}
+      />
+    );
+  }
+
+  if (serviceId === FLOATPLANE_SERVICE) {
+    return (
+      <FloatplaneServiceModal
         open={open}
         onOpenChange={onOpenChange}
         values={values}

@@ -12,22 +12,6 @@ export class FloatplanePreset extends Preset {
     ];
     const options: Option[] = [
       {
-        id: 'auth',
-        name: 'Authorise Floatplane',
-        description:
-          'Link Floatplane with the official device-code flow. Credentials stay encrypted in this AIOStreams instance.',
-        type: 'oauth',
-        required: true,
-        oauth: {
-          authorisationUrl: `${appConfig.bootstrap.baseUrl}/api/v1/floatplane/link/start`,
-          oauthResultField: {
-            name: 'Floatplane Link Reference',
-            description:
-              'Paste the opaque reference shown after you complete the Floatplane device link.',
-          },
-        },
-      },
-      {
         id: 'includeSubscriptions',
         name: 'Subscription Catalog',
         description: 'Show creators included in your Floatplane subscriptions.',
@@ -78,25 +62,33 @@ export class FloatplanePreset extends Preset {
         constants.HTTP_STREAM_TYPE,
         constants.LIVE_STREAM_TYPE,
       ],
-      SUPPORTED_SERVICES: [],
+      SUPPORTED_SERVICES: [constants.FLOATPLANE_SERVICE],
       OPTIONS: options,
       BUILTIN: true,
     };
   }
   static async generateAddons(
-    _userData: UserData,
+    userData: UserData,
     options: Record<string, any>
   ): Promise<Addon[]> {
-    return [this.generateAddon(options)];
+    const service = this.getUsableServices(
+      userData,
+      options.services,
+      options.name
+    )?.[0];
+    // Keep existing Floatplane addon URLs working while users migrate to the
+    // Services page. New configurations use the per-user service credential.
+    const authRef = options.auth ?? service?.credentials?.authRef;
+    return [this.generateAddon({ ...options, authRef })];
   }
   private static generateAddon(options: Record<string, any>): Addon {
-    if (!options.auth)
+    if (!options.authRef)
       throw new Error(
-        'Floatplane requires a link reference. Open Authorise Floatplane and complete device linking first.'
+        'Floatplane requires a linked Floatplane service. Open Services → Floatplane and complete the official device link first.'
       );
     const config = this.base64EncodeJSON(
       {
-        authRef: options.auth,
+        authRef: options.authRef,
         includeSubscriptions: options.includeSubscriptions !== false,
         includeChannels: options.includeChannels !== false,
         includeSearch: options.includeSearch !== false,
@@ -112,9 +104,11 @@ export class FloatplanePreset extends Preset {
       timeout: options.timeout || this.METADATA.TIMEOUT,
       preset: { id: '', type: this.METADATA.ID, options },
       headers: { 'User-Agent': this.METADATA.USER_AGENT },
-      // Floatplane already supplies quality labels and direct signed CDN
-      // URLs. Do not run those streams through an unrelated global formatter.
-      formatPassthrough: true,
+      // Let the user's configured formatter add the same source metadata,
+      // cache markers, resolution, audio, subtitle, and playback hints used
+      // by every other addon. Floatplane's technical variant details remain
+      // in the parsed stream description for the formatter to consume.
+      formatPassthrough: options.formatPassthrough === true,
     };
   }
 }
