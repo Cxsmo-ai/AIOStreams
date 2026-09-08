@@ -294,16 +294,19 @@ export async function pollFloatplaneDeviceAuthorization(
 
 export class FloatplaneClient {
   constructor(private readonly auth: FloatplaneAuthState) {}
-  private async refresh() {
+  private async refresh(force = false) {
     if (
-      !this.auth.refreshToken ||
+      !force &&
+      (!this.auth.refreshToken ||
       (this.auth.tokenExpiresAt &&
-        this.auth.tokenExpiresAt > Date.now() + 30000)
+        this.auth.tokenExpiresAt > Date.now() + 30000))
     )
       return;
+    const refreshToken = this.auth.refreshToken;
+    if (!refreshToken) return;
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
-      refresh_token: this.auth.refreshToken,
+      refresh_token: refreshToken,
       client_id: clientId,
     });
     const response = await fetch(this.auth.tokenEndpoint, {
@@ -329,30 +332,47 @@ export class FloatplaneClient {
   async request(path: string, init: RequestInit = {}): Promise<JsonValue> {
     await this.refresh();
     const endpoint = path.startsWith('http') ? path : `${apiBase}${path}`;
-    const response = await fetch(endpoint, {
-      ...init,
-      headers: {
-        Accept: 'application/json',
-        ...(init.headers || {}),
-        Authorization: `DPoP ${this.auth.accessToken}`,
-        DPoP: dpopProof(
-          this.auth,
-          init.method || 'GET',
-          endpoint,
-          this.auth.accessToken
-        ),
-      },
-    });
-    const text = await response.text();
-    let data: any = {};
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = { raw: text };
-    }
-    if (!response.ok)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(endpoint, {
+        ...init,
+        headers: {
+          Accept: 'application/json',
+          ...(init.headers || {}),
+          Authorization: `DPoP ${this.auth.accessToken}`,
+          DPoP: dpopProof(
+            this.auth,
+            init.method || 'GET',
+            endpoint,
+            this.auth.accessToken
+          ),
+        },
+      });
+      const text = await response.text();
+      let data: any = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = { raw: text };
+      }
+      const retryableAuthFailure =
+        attempt === 0 &&
+        Boolean(this.auth.refreshToken) &&
+        [401, 403, 404].includes(response.status);
+      if (response.ok) return data;
+      if (retryableAuthFailure) {
+        const nonce = response.headers.get('DPoP-Nonce');
+        if (nonce) this.auth.dpopNonce = nonce;
+        try {
+          await this.refresh(true);
+          continue;
+        } catch {
+          // Keep the original API failure when the refresh token is also
+          // rejected; the caller can request a fresh device link.
+        }
+      }
       throw new Error(`Floatplane API request failed (${response.status})`);
-    return data;
+    }
+    throw new Error('Floatplane API request failed');
   }
   subscriptions() {
     return this.request('/api/v3/user/subscriptions');
