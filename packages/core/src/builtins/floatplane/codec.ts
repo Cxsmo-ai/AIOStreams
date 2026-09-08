@@ -60,53 +60,12 @@ export async function probeFloatplanePlaylist(
         continue;
       }
 
-      const quotedUri = (line: string): string | undefined => {
-        const marker = 'URI="';
-        const start = line.indexOf(marker);
-        if (start < 0) return undefined;
-        const valueStart = start + marker.length;
-        const valueEnd = line.indexOf('"', valueStart);
-        return valueEnd > valueStart
-          ? line.slice(valueStart, valueEnd)
-          : undefined;
-      };
-
-      // Floatplane fMP4 playlists currently reference watchKey. A 403 here
-      // means ordinary media players will spin forever even though the
-      // playlist and segment endpoints themselves return 200.
-      const keyLine = lines.find((line) => line.startsWith('#EXT-X-KEY'));
-      if (keyLine) {
-        const method = keyLine.match(/METHOD=([^,]+)/i)?.[1]?.toUpperCase();
-        const keyUri = quotedUri(keyLine);
-        if (method !== 'AES-128' || !keyUri) return 'invalid';
-        const keyResponse = await fetch(new URL(keyUri, playlistUrl), {
-          signal: controller.signal,
-        });
-        if (!keyResponse.ok) return 'invalid';
-        await keyResponse.body?.cancel();
-      }
-
-      const mapLine = lines.find((line) => line.startsWith('#EXT-X-MAP'));
-      if (mapLine) {
-        const mapUri = quotedUri(mapLine);
-        if (!mapUri) return 'invalid';
-        const mapResponse = await fetch(new URL(mapUri, playlistUrl), {
-          headers: { Range: 'bytes=0-4095' },
-          signal: controller.signal,
-        });
-        if (!mapResponse.ok) return 'invalid';
-        await mapResponse.body?.cancel();
-      }
-
-      const mediaResponse = await fetch(
-        new URL(uriLines[0], playlistUrl),
-        {
-          headers: { Range: 'bytes=0-4095' },
-          signal: controller.signal,
-        }
-      );
-      if (!mediaResponse.ok) return 'invalid';
-      await mediaResponse.body?.cancel();
+      // Do not probe watchKey/init-map/segment URLs from the Oracle server.
+      // Floatplane authorizes those child requests differently across CDN
+      // edges, and an Oracle-side 403 can incorrectly discard a playlist that
+      // works from the user's TV. The signed master and first child playlist
+      // are the stable, low-cost checks that catch stale/revoked delivery
+      // URLs without adding a media-proxy hop or several seconds of latency.
       return 'valid';
     }
     return 'invalid';

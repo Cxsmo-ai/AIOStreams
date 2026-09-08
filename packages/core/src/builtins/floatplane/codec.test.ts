@@ -64,7 +64,7 @@ test('rejects a signed playlist that the CDN no longer authorizes', async () => 
   }
 });
 
-test('rejects an HLS playlist whose AES key is unauthorized', async () => {
+test('accepts HLS when an optional watch key cannot be probed server-side', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input) => {
     const value = String(input);
@@ -81,7 +81,7 @@ test('rejects an HLS playlist whose AES key is unauthorized', async () => {
       await probeFloatplanePlaylist(
         'https://cdn-vod-drm2.floatplane.com/Videos/keyed/1080.mp4/playlist.m3u8'
       ),
-      'invalid'
+      'valid'
     );
   } finally {
     globalThis.fetch = originalFetch;
