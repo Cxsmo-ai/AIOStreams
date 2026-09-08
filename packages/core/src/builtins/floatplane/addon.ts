@@ -24,6 +24,69 @@ const CHANNEL_CATALOG_PREFIX = 'floatplane-channel-';
 function text(value: unknown, fallback = ''): string {
   return String(value ?? fallback);
 }
+function descriptionOf(item: any, fallback?: string): string | undefined {
+  const raw = first(
+    item,
+    'description',
+    'overview',
+    'summary',
+    'text',
+    'body',
+    'caption'
+  );
+  const nested = raw && typeof raw === 'object' ? first(raw, 'text', 'value') : raw;
+  const value = typeof nested === 'string' ? nested : fallback;
+  if (!value) return undefined;
+  return value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function durationSeconds(value: unknown): number | undefined {
+  if (value && typeof value === 'object')
+    return durationSeconds(first(value, 'seconds', 'duration', 'value'));
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+    return value > 100_000 ? value / 1000 : value;
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const input = value.trim().toLowerCase();
+  if (input.includes(':')) {
+    const parts = input.split(':').map((part) => Number(part));
+    if (parts.every((part) => Number.isFinite(part))) {
+      return parts.length === 3
+        ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+        : parts.length === 2
+          ? parts[0] * 60 + parts[1]
+          : parts[0];
+    }
+  }
+  const number = numberValue(input);
+  if (!number) return undefined;
+  if (/ms\b/.test(input)) return number / 1000;
+  if (/hour|hr|h\b/.test(input)) return number * 3600;
+  if (/minute|min|m\b/.test(input)) return number * 60;
+  return number > 100_000 ? number / 1000 : number;
+}
+function durationLabel(item: any): string | undefined {
+  const seconds = durationSeconds(
+    first(
+      item,
+      'duration',
+      'durationSeconds',
+      'durationMs',
+      'runtime',
+      'length',
+      'mediaDuration'
+    )
+  );
+  if (seconds === undefined) return undefined;
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remaining = total % 60;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${String(remaining).padStart(2, '0')}s`;
+  return `${remaining}s`;
+}
 function numberValue(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'string') return 0;
@@ -254,8 +317,9 @@ export class FloatplaneAddon {
       poster,
       posterShape: 'landscape',
       background: poster,
-      description: first(item, 'description', 'overview', 'summary'),
+      description: descriptionOf(item),
       releaseInfo: released ? text(released).slice(0, 10) : undefined,
+      ...(durationLabel(item) ? { runtime: durationLabel(item) } : {}),
     };
   }
   private async creators(): Promise<any[]> {
@@ -406,20 +470,26 @@ export class FloatplaneAddon {
             return {
               id: `fp:video:${videoId}`,
               title: title(video) || title(item),
-              overview:
-                first(video, 'description', 'overview') ||
-                first(item, 'text', 'description', 'overview'),
+              overview: descriptionOf(video) || descriptionOf(item),
               released:
                 first(video, 'releaseDate') || first(item, 'releaseDate'),
               thumbnail: image(video) || image(item),
               available: first(video, 'isAccessible') !== false,
               streams: null,
+              ...(durationLabel(video) ? { runtime: durationLabel(video) } : {}),
+              ...(durationSeconds(first(video, 'duration', 'durationSeconds', 'durationMs')) !== undefined
+                ? {
+                    duration: durationSeconds(
+                      first(video, 'duration', 'durationSeconds', 'durationMs')
+                    ),
+                  }
+                : {}),
             };
           } catch {
             return {
               id: `fp:video:${videoId || `${rawId}:${index}`}`,
               title: title(item),
-              overview: first(item, 'text', 'description', 'overview'),
+              overview: descriptionOf(item),
               released: first(item, 'releaseDate'),
               thumbnail: image(item),
               available: false,
@@ -549,21 +619,24 @@ export class FloatplaneAddon {
       }
     };
 
-    const direct = await deliveryFor(rawId, 'hls.fmp4');
+    // Flat MP4 is the fastest and most broadly compatible Floatplane output.
+    // It is still ranged-probed before exposure, so moving it first does not
+    // trade away signed-link validation or the direct-CDN playback contract.
+    const direct = await deliveryFor(rawId, 'flat');
     if (direct.length) return direct;
 
     // fMP4 is efficient but some clients cannot access Floatplane's
     // authenticated watchKey endpoint. MPEG-TS carries the same direct CDN
     // delivery without that key exchange, so use it as a compatibility
-    // fallback before trying parent-post attachment ids.
+    // fallback before trying fMP4 and parent-post attachment ids.
     const transportFallback = await deliveryFor(rawId, 'hls.mpegts');
     if (transportFallback.length) return transportFallback;
 
+    const fmp4Fallback = await deliveryFor(rawId, 'hls.fmp4');
+    if (fmp4Fallback.length) return fmp4Fallback;
+
     // Floatplane also exposes a signed direct-media representation. It is the
     // last-resort path for clients that cannot obtain the HLS watch key.
-    const flatFallback = await deliveryFor(rawId, 'flat');
-    if (flatFallback.length) return flatFallback;
-
     // Stremio clients differ on whether they request the post id or the
     // attachment id. Resolve the parent post so both request shapes play.
     try {
@@ -574,9 +647,9 @@ export class FloatplaneAddon {
       );
       for (const attachmentId of attachments) {
         const streams =
-          (await deliveryFor(attachmentId, 'hls.fmp4'))
+          (await deliveryFor(attachmentId, 'flat'))
             .concat(await deliveryFor(attachmentId, 'hls.mpegts'))
-            .concat(await deliveryFor(attachmentId, 'flat'));
+            .concat(await deliveryFor(attachmentId, 'hls.fmp4'));
         if (streams.length) return streams;
       }
     } catch {
