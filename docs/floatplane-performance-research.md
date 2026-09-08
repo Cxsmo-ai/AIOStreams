@@ -29,6 +29,16 @@ outside this patch and were not reverted.
 5. Keeps AV1 filtering, direct CDN delivery, metadata enrichment, duration,
    language, subtitle, resolution, codec, and audio-quality formatting intact.
 
+After live endpoint testing found two additional integration issues, the
+following fixes were added:
+
+6. Post-level subtitle requests now resolve the post's bounded video
+   attachments and query their text tracks in parallel, while preserving the
+   direct video-id path and deduplicating track URLs.
+7. Search-hit envelopes (`_source`, `source`, `document`, `post`, `content`,
+   or `item`) are normalized before catalog formatting so search results keep
+   their real IDs, titles, artwork, and descriptions.
+
 ## Local verification completed
 
 | Check | Result |
@@ -62,6 +72,37 @@ completed for every variant; the observed elapsed times were approximately:
 | 720p | 1.22 s |
 | 480p | 1.42 s |
 | 360p | 0.59 s |
+
+## Post-deployment representative matrix
+
+Against the authenticated saved manifest, the current live endpoint was also
+tested with the exact older item reported as **Why is WAN Late Episode 26**,
+two other WAN Late items, one recent WAN Show item, one older long-form WAN
+item, and a known 4K-capable Floatplane item. The live response matrix showed:
+
+- WAN Late Episode 26, two other WAN Late items, and the known 4K item each
+  exposed 2160p, 1080p, 720p, 480p, and 360p.
+- The recent and older long-form WAN items exposed 1080p, 720p, 480p, and
+  360p, which is a provider availability difference rather than a server-side
+  resolution filter.
+- Every returned source was a signed direct Floatplane CDN URL with no AV1
+  result.
+- The exact WAN Late Episode 26 2160p URL passed FFprobe as H.264, 3840x2160,
+  1406.66 seconds, and decoded five seconds successfully.
+- The known 4K post's complete 2160p/1080p/720p/480p/360p set all passed
+  FFprobe and three-second decode checks as H.264; the reported duration was
+  803.52 seconds.
+- Video-level subtitle requests returned an English VTT track for two tested
+  videos; both subtitle responses were HTTP 200 and valid WEBVTT documents.
+
+The remote manifest used for these endpoint checks is an existing Oracle
+instance. GitHub Actions builds and publishes the new image, but this
+repository does not have SSH/deployment authority for the user's Podman VM.
+Therefore the newly added search-envelope and post-level subtitle fixes are
+locally compiled and tested but must be confirmed on that VM after it pulls
+the image and recreates the container. The direct media matrix above is
+evidence of provider/client behavior, not a claim that the VM has already
+been restarted onto every latest commit.
 
 The 2160p result is a measurement of the test machine/network and decoder,
 not a claim about Android TV startup. It is why the client must be allowed to
