@@ -943,18 +943,46 @@ export class FloatplaneAddon {
   async getSubtitles(_type: string, itemId: string): Promise<Subtitle[]> {
     if (!this.userData.includeSubtitles) return [];
     const rawId = itemId.split(':').pop() || itemId;
-    const response = await this.api.textTracks(rawId);
-    return array(response)
-      .map((track, index) => {
-        const trackUrl = url(first(track, 'url', 'src', 'uri'));
-        return trackUrl
-          ? {
-              id: `fp-sub-${index}`,
-              url: trackUrl,
-              lang: text(first(track, 'language', 'lang', 'label'), 'und'),
-            }
-          : null;
-      })
-      .filter((x): x is Subtitle => Boolean(x));
+    const ids = [rawId];
+
+    // Stremio can ask for subtitles using the post id even though Floatplane
+    // stores text tracks on the individual video attachment. Resolve that
+    // parent once and query its bounded attachment list in parallel. Video
+    // item ids continue to use the direct, single-request path.
+    if (itemId.includes(':post:')) {
+      try {
+        const response = await this.api.post(rawId);
+        const item = first(response, 'post', 'content', 'data') || response;
+        ids.push(
+          ...stringArray(first(item, 'videoAttachments', 'attachmentOrder')).slice(
+            0,
+            8
+          )
+        );
+      } catch {
+        // Preserve the direct post-id attempt below for accounts that expose
+        // tracks on the parent object.
+      }
+    }
+
+    const trackResponses = await Promise.allSettled(
+      [...new Set(ids)].map((id) => this.api.textTracks(id))
+    );
+    const seen = new Set<string>();
+    return trackResponses.flatMap((result) => {
+      if (result.status !== 'fulfilled') return [];
+      return array(result.value)
+        .map((track, index) => {
+          const trackUrl = url(first(track, 'url', 'src', 'uri'));
+          if (!trackUrl || seen.has(trackUrl)) return null;
+          seen.add(trackUrl);
+          return {
+            id: `fp-sub-${seen.size - 1}-${index}`,
+            url: trackUrl,
+            lang: text(first(track, 'language', 'lang', 'label'), 'und'),
+          };
+        })
+        .filter((x): x is Subtitle => Boolean(x));
+    });
   }
 }
