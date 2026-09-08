@@ -293,46 +293,68 @@ export async function pollFloatplaneDeviceAuthorization(
 }
 
 export class FloatplaneClient {
+  private refreshInFlight?: Promise<void>;
+
   constructor(private readonly auth: FloatplaneAuthState) {}
   private async refresh(force = false) {
     if (
       !force &&
       (!this.auth.refreshToken ||
-      (this.auth.tokenExpiresAt &&
-        this.auth.tokenExpiresAt > Date.now() + 30000))
+        (this.auth.tokenExpiresAt &&
+          this.auth.tokenExpiresAt > Date.now() + 30000))
     )
       return;
     const refreshToken = this.auth.refreshToken;
     if (!refreshToken) return;
-    const body = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      client_id: clientId,
-    });
-    const response = await fetch(this.auth.tokenEndpoint, {
-      method: 'POST',
-      body,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        DPoP: dpopProof(this.auth, 'POST', this.auth.tokenEndpoint),
-      },
-    });
-    const nonce = response.headers.get('DPoP-Nonce');
-    if (nonce) this.auth.dpopNonce = nonce;
-    const data = record(await response.json());
-    if (!response.ok || !first(data, 'access_token'))
-      throw new Error('Floatplane session expired; link the account again');
-    this.auth.accessToken = String(first(data, 'access_token'));
-    this.auth.refreshToken =
-      first(data, 'refresh_token') || this.auth.refreshToken;
-    this.auth.tokenExpiresAt =
-      Date.now() + Number(first(data, 'expires_in') || 300) * 1000;
+
+    // Device-linked sessions may rotate their refresh token. Catalog and
+    // metadata requests are intentionally concurrent, so make refresh a
+    // single-flight operation or two requests near expiry can race with the
+    // same token and invalidate each other's session.
+    if (this.refreshInFlight) {
+      await this.refreshInFlight;
+      return;
+    }
+
+    const refreshTask = (async () => {
+      const body = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: clientId,
+      });
+      const response = await fetch(this.auth.tokenEndpoint, {
+        method: 'POST',
+        body,
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          DPoP: dpopProof(this.auth, 'POST', this.auth.tokenEndpoint),
+        },
+      });
+      const nonce = response.headers.get('DPoP-Nonce');
+      if (nonce) this.auth.dpopNonce = nonce;
+      const data = record(await response.json());
+      if (!response.ok || !first(data, 'access_token'))
+        throw new Error('Floatplane session expired; link the account again');
+      this.auth.accessToken = String(first(data, 'access_token'));
+      this.auth.refreshToken =
+        first(data, 'refresh_token') || this.auth.refreshToken;
+      this.auth.tokenExpiresAt =
+        Date.now() + Number(first(data, 'expires_in') || 300) * 1000;
+    })();
+    this.refreshInFlight = refreshTask;
+    try {
+      await refreshTask;
+    } finally {
+      if (this.refreshInFlight === refreshTask)
+        this.refreshInFlight = undefined;
+    }
   }
   async request(path: string, init: RequestInit = {}): Promise<JsonValue> {
     await this.refresh();
     const endpoint = path.startsWith('http') ? path : `${apiBase}${path}`;
     for (let attempt = 0; attempt < 2; attempt++) {
+      const accessTokenBeforeRequest = this.auth.accessToken;
       const response = await fetch(endpoint, {
         ...init,
         headers: {
@@ -363,7 +385,10 @@ export class FloatplaneClient {
         const nonce = response.headers.get('DPoP-Nonce');
         if (nonce) this.auth.dpopNonce = nonce;
         try {
-          await this.refresh(true);
+          // Another concurrent request may already have refreshed the token.
+          // Reuse that new token instead of rotating the refresh token again.
+          if (this.auth.accessToken === accessTokenBeforeRequest)
+            await this.refresh(true);
           continue;
         } catch {
           // Keep the original API failure when the refresh token is also
