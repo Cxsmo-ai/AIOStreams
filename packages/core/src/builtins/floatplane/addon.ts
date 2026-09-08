@@ -15,7 +15,11 @@ import {
   url,
 } from './api.js';
 import { Buffer } from 'node:buffer';
-import { containsAv1 } from './codec.js';
+import {
+  containsAv1,
+  filterPlayableFloatplaneMedia,
+  filterPlayableFloatplanePlaylists,
+} from './codec.js';
 
 const CHANNEL_CATALOG_PREFIX = 'floatplane-channel-';
 const FLOATPLANE_LOGO_PATH = '/assets/floatplane-icon.png';
@@ -791,13 +795,16 @@ export class FloatplaneAddon {
         })
         .filter((x): x is Stream => Boolean(x));
       if (v3Streams.length) {
-        // Delivery responses already contain freshly signed CDN URLs. Probing
-        // every variant here added 2–5 seconds to every source request and
-        // could reject a valid URL when the server could not reach the CDN's
-        // watch-key endpoint. Let the client start the direct URL immediately;
-        // stream caching is disabled for Floatplane, so every request still
-        // receives fresh authorization.
-        return v3Streams;
+        // A delivery response can contain a signed-looking URL that the CDN
+        // rejects immediately (403), for example after a rotated session or
+        // when one rendition was revoked. Probe variants concurrently at the
+        // delivery boundary so the client never receives a known-dead link.
+        // The probe keeps unknown network failures, so a transient CDN outage
+        // does not erase otherwise fresh sources.
+        if (outputKind.startsWith('hls.')) {
+          return filterPlayableFloatplanePlaylists(v3Streams);
+        }
+        return filterPlayableFloatplaneMedia(v3Streams);
       }
 
       // Older accounts may only expose the v2 CDN response. Normalize its
