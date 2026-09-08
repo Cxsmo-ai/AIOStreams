@@ -85,6 +85,20 @@ function array(value: unknown): Json[] {
   return [];
 }
 
+function searchItem(value: unknown): Json {
+  const input = record(value);
+  // The v3 search endpoint can return Elasticsearch-style hits instead of
+  // post objects. Normalize those envelopes before the addon formats titles,
+  // artwork, ids, and descriptions. Keep the original object when the
+  // nested value is not an object so ordinary post responses are unchanged.
+  for (const key of ['_source', 'source', 'document', 'post', 'content', 'item']) {
+    const nested = input[key];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested))
+      return record(nested);
+  }
+  return input;
+}
+
 const TEXT_TRACK_KEYS = [
   'textTracks',
   'texttracks',
@@ -492,7 +506,8 @@ export class FloatplaneClient {
         const response = await this.request(
           `/api/v3/content/search?${new URLSearchParams({ [parameter]: text })}`
         );
-        if (array(response).length) return response;
+        const matches = array(response).map(searchItem);
+        if (matches.length) return matches;
       } catch {
         // Try the next current-account parameter spelling.
       }
@@ -516,7 +531,7 @@ export class FloatplaneClient {
         this.creatorContent(creatorId, undefined, 0, 20, text)
       )
     );
-    const searched = pages.flatMap((page) => array(page));
+    const searched = pages.flatMap((page) => array(page).map(searchItem));
     if (searched.length) return searched;
 
     // Some accounts silently ignore the search filter. Fetch only a bounded
@@ -532,7 +547,7 @@ export class FloatplaneClient {
     const needle = text.toLocaleLowerCase();
     const seen = new Set<string>();
     return windowPages
-      .flatMap((page) => array(page))
+      .flatMap((page) => array(page).map(searchItem))
       .filter((item) => {
         const value = JSON.stringify(item).toLocaleLowerCase();
         const id = String(first(item, 'id', 'guid', 'contentId') || value);
