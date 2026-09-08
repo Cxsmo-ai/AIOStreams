@@ -10,6 +10,9 @@ export type FloatplanePlaylistProbe = 'valid' | 'invalid' | 'unknown';
 export type FloatplaneMediaProbe = 'valid' | 'invalid' | 'unknown';
 
 const PLAYLIST_PROBE_TIMEOUT_MS = 5_000;
+// A direct MP4 only needs a small ranged read to prove that the signed CDN
+// link is usable. Keep a slow rendition from delaying all other qualities.
+const MEDIA_PROBE_TIMEOUT_MS = 2_000;
 
 /**
  * Signed Floatplane playlist URLs are short-lived.  A URL can therefore be
@@ -157,7 +160,7 @@ export async function probeFloatplaneMedia(
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    PLAYLIST_PROBE_TIMEOUT_MS
+    MEDIA_PROBE_TIMEOUT_MS
   );
   try {
     const response = await fetch(mediaUrl, {
