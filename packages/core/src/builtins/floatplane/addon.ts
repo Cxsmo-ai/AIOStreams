@@ -862,54 +862,82 @@ export class FloatplaneAddon {
 
     const deliveryFor = async (
       contentId: string,
-      outputKind = 'hls.fmp4'
+      outputKind = 'hls.fmp4',
+      metadataOverride?: any
     ): Promise<Stream[]> => {
       try {
         const delivery = await this.api.delivery(contentId, outputKind);
         const metadata =
-          contentId === rawId ? await metadataForDisplay() : undefined;
+          metadataOverride ??
+          (contentId === rawId ? await metadataForDisplay() : undefined);
         return streamsFromDelivery(delivery, outputKind, metadata);
       } catch {
         return [];
       }
     };
 
+    // Older Floatplane posts sometimes accept delivery only for their video
+    // attachment id. Resolve that parent in parallel with the first direct
+    // delivery request so an attachment-only post does not pay an extra full
+    // API round trip before fallback can begin.
+    const postPromise = this.api
+      .post(rawId)
+      .then((response) => first(response, 'post', 'content', 'data') || response)
+      .catch(() => undefined);
+
     // Flat MP4 is the fastest and most broadly compatible Floatplane output.
-    // It is still ranged-probed before exposure, so moving it first does not
-    // trade away signed-link validation or the direct-CDN playback contract.
+    // It is returned directly from the fresh delivery response; no server-side
+    // proxy or CDN preflight is needed for a signed URL.
     const direct = await deliveryFor(rawId, 'flat');
     if (direct.length) return direct;
 
-    // fMP4 is efficient but some clients cannot access Floatplane's
-    // authenticated watchKey endpoint. MPEG-TS carries the same direct CDN
-    // delivery without that key exchange, so use it as a compatibility
-    // fallback before trying fMP4 and parent-post attachment ids.
-    const transportFallback = await deliveryFor(rawId, 'hls.mpegts');
-    if (transportFallback.length) return transportFallback;
-
-    const fmp4Fallback = await deliveryFor(rawId, 'hls.fmp4');
+    // Alternate transports are compatibility fallbacks only. Run them
+    // together so an older account that rejects flat delivery waits for the
+    // slowest one transport round trip, not the sum of both.
+    const [mpegtsFallback, fmp4Fallback] = await Promise.all([
+      deliveryFor(rawId, 'hls.mpegts'),
+      deliveryFor(rawId, 'hls.fmp4'),
+    ]);
+    if (mpegtsFallback.length) return mpegtsFallback;
     if (fmp4Fallback.length) return fmp4Fallback;
 
-    // Floatplane also exposes a signed direct-media representation. It is the
-    // last-resort path for clients that cannot obtain the HLS watch key.
-    // Stremio clients differ on whether they request the post id or the
-    // attachment id. Resolve the parent post so both request shapes play.
-    try {
-      const response = await this.api.post(rawId);
-      const item = first(response, 'post', 'content', 'data') || response;
-      const attachments = stringArray(
-        first(item, 'videoAttachments', 'attachmentOrder')
-      );
-      for (const attachmentId of attachments) {
-        const streams = (await deliveryFor(attachmentId, 'flat'))
-          .concat(await deliveryFor(attachmentId, 'hls.mpegts'))
-          .concat(await deliveryFor(attachmentId, 'hls.fmp4'));
-        if (streams.length) return streams;
-      }
-    } catch {
-      // Preserve the normal empty stream response when the post is not a
-      // playable parent or has expired delivery rights.
-    }
+    // Attachment-only posts are uncommon, but their old serial fallback was
+    // the largest source of long waits. Keep the request fan-out bounded and
+    // preserve Floatplane's attachment order when choosing a result.
+    const item = await postPromise;
+    const attachments = stringArray(
+      first(item, 'videoAttachments', 'attachmentOrder')
+    ).slice(0, 8);
+    if (!attachments.length) return [];
+
+    const attachmentMetadata = item;
+    const flatResults = await Promise.all(
+      attachments.map((attachmentId) =>
+        deliveryFor(attachmentId, 'flat', attachmentMetadata)
+      )
+    );
+    const flatAttachment = flatResults.find((streams) => streams.length);
+    if (flatAttachment?.length) return flatAttachment;
+
+    const [mpegtsResults, fmp4Results] = await Promise.all([
+      Promise.all(
+        attachments.map((attachmentId) =>
+          deliveryFor(attachmentId, 'hls.mpegts', attachmentMetadata)
+        )
+      ),
+      Promise.all(
+        attachments.map((attachmentId) =>
+          deliveryFor(attachmentId, 'hls.fmp4', attachmentMetadata)
+        )
+      ),
+    ]);
+    const mpegtsAttachment = mpegtsResults.find((streams) => streams.length);
+    if (mpegtsAttachment?.length) return mpegtsAttachment;
+    const fmp4Attachment = fmp4Results.find((streams) => streams.length);
+    if (fmp4Attachment?.length) return fmp4Attachment;
+
+    // Preserve the normal empty stream response when the post is not a
+    // playable parent or its delivery rights have expired.
     return [];
   }
   async getSubtitles(_type: string, itemId: string): Promise<Subtitle[]> {
