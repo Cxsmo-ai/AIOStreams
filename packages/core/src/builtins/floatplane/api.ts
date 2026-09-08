@@ -84,6 +84,48 @@ function array(value: unknown): Json[] {
   }
   return [];
 }
+
+const TEXT_TRACK_KEYS = [
+  'textTracks',
+  'texttracks',
+  'text_tracks',
+  'captions',
+  'subtitles',
+  'tracks',
+] as const;
+
+/**
+ * Floatplane has returned video data in a few envelopes over time.  The TV
+ * client and the public v3 response use `textTracks`, but some deployments
+ * wrap the video in `data`, `video`, `content`, `result`, or `payload`.
+ * Search only those known envelopes so an unrelated array (for example a
+ * post's attachments) can never be mistaken for subtitles.
+ */
+function textTrackArray(value: unknown, depth = 0): Json[] {
+  if (depth > 5 || value === null || value === undefined) return [];
+  if (Array.isArray(value)) return value.map(record);
+  const input = record(value);
+  for (const key of TEXT_TRACK_KEYS) {
+    const candidate = input[key];
+    if (Array.isArray(candidate)) return candidate.map(record);
+    if (candidate && typeof candidate === 'object') {
+      const nested = textTrackArray(candidate, depth + 1);
+      if (nested.length) return nested;
+    }
+  }
+  for (const key of [
+    'data',
+    'video',
+    'content',
+    'result',
+    'payload',
+    'response',
+  ]) {
+    const nested = textTrackArray(input[key], depth + 1);
+    if (nested.length) return nested;
+  }
+  return [];
+}
 function url(value: unknown, base = apiBase): string | undefined {
   if (typeof value !== 'string' || !value) return undefined;
   return /^https?:\/\//i.test(value)
@@ -524,8 +566,8 @@ export class FloatplaneClient {
       );
     }
   }
-  textTracks(contentId: string) {
-    return this.video(contentId);
+  async textTracks(contentId: string) {
+    return textTrackArray(await this.video(contentId));
   }
 }
-export { array, first, url };
+export { array, first, textTrackArray, url };

@@ -24,6 +24,91 @@ const CHANNEL_CATALOG_PREFIX = 'floatplane-channel-';
 function text(value: unknown, fallback = ''): string {
   return String(value ?? fallback);
 }
+function numberValue(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return 0;
+  const match = value.replace(/,/g, '').match(/\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : 0;
+}
+function variantMediaValue(
+  variant: any,
+  media: 'video' | 'audio',
+  ...keys: string[]
+): unknown {
+  const direct = first(variant, ...keys);
+  if (direct !== undefined && direct !== null) return direct;
+  for (const containerKey of ['meta', 'metadata', 'media', 'streams']) {
+    const container = first(variant, containerKey);
+    const mediaObject = first(container, media, `${media}Track`);
+    const nested = first(mediaObject, ...keys);
+    if (nested !== undefined && nested !== null) return nested;
+  }
+  return undefined;
+}
+function variantHeight(variant: any): number {
+  const raw = variantMediaValue(
+    variant,
+    'video',
+    'height',
+    'videoHeight',
+    'resolution',
+    'quality',
+    'label'
+  );
+  const value = text(raw).toLowerCase();
+  if (/8k/.test(value)) return 4320;
+  if (/4k|2160|uhd/.test(value)) return 2160;
+  if (/1440|2k|qhd/.test(value)) return 1440;
+  if (/1080|fhd/.test(value)) return 1080;
+  if (/720|hd/.test(value)) return 720;
+  if (/480|sd/.test(value)) return 480;
+  return numberValue(raw);
+}
+function audioQuality(variant: any): number {
+  const bitrate = numberValue(
+    variantMediaValue(
+      variant,
+      'audio',
+      'bitrate',
+      'bitRate',
+      'bandwidth',
+      'bitrateKbps'
+    )
+  );
+  const sampleRate = numberValue(
+    variantMediaValue(variant, 'audio', 'sampleRate', 'samplerate', 'samplingRate')
+  );
+  const channels = numberValue(
+    variantMediaValue(variant, 'audio', 'channelCount', 'channels', 'channelLayout')
+  );
+  const codec = text(
+    variantMediaValue(variant, 'audio', 'codec', 'audioCodec', 'format')
+  ).toLowerCase();
+  const codecWeight = /truehd|atmos|dts.?hd|eac3|ac3|opus|flac/.test(codec)
+    ? 100
+    : /aac|mp3/.test(codec)
+      ? 10
+      : 0;
+  // Bitrate is the primary quality signal. The other fields break ties while
+  // keeping the score bounded and deterministic for malformed API values.
+  return bitrate * 1_000_000 + sampleRate * 100 + channels * 10_000 + codecWeight;
+}
+function audioDescription(variant: any): string[] {
+  const codec = text(
+    variantMediaValue(variant, 'audio', 'codec', 'audioCodec', 'format')
+  );
+  const bitrate = numberValue(
+    variantMediaValue(variant, 'audio', 'bitrate', 'bitRate', 'bandwidth', 'bitrateKbps')
+  );
+  const channels = numberValue(
+    variantMediaValue(variant, 'audio', 'channelCount', 'channels', 'channelLayout')
+  );
+  return [
+    codec && `audio ${codec}`,
+    bitrate > 0 && `audio ${Math.round(bitrate)} kbps`,
+    channels > 0 && `audio ${channels}ch`,
+  ].filter((value): value is string => Boolean(value));
+}
 function image(item: any): string | undefined {
   const value = first(
     item,
@@ -357,7 +442,25 @@ export class FloatplaneAddon {
       const variants = groups.flatMap((group) =>
         array(first(group, 'variants')).map((variant) => ({ variant, group }))
       );
-      const v3Streams = variants
+      // Keep the best audio rendition first for each video quality.  Floatplane
+      // normally embeds audio in every flat MP4/HLS variant, but some delivery
+      // responses contain duplicate resolutions with different audio bitrates.
+      // Sorting here lets Stremio's default selection choose the highest-quality
+      // audio without hiding the other resolutions from the user.
+      const orderedVariants = variants
+        .map((entry, index) => ({
+          ...entry,
+          index,
+          height: variantHeight(entry.variant),
+          audio: audioQuality(entry.variant),
+        }))
+        .sort(
+          (left, right) =>
+            right.height - left.height ||
+            right.audio - left.audio ||
+            left.index - right.index
+        );
+      const v3Streams = orderedVariants
         .map(({ variant, group }) => {
           if (
             first(variant, 'hidden') === true ||
@@ -380,11 +483,20 @@ export class FloatplaneAddon {
             'label',
             'height'
           );
+          const technicalAudio = audioDescription(variant);
+          const technicalVideo = text(
+            variantMediaValue(variant, 'video', 'codec', 'videoCodec', 'format')
+          );
           return {
             url: streamUrl,
             name: `Floatplane${quality ? ` • ${quality}` : ''}`,
             title: title(variant),
-            description: first(variant, 'codec', 'bitrate', 'type'),
+            description:
+              [
+                technicalVideo && `video ${technicalVideo}`,
+                ...technicalAudio,
+              ].join(' • ') ||
+              first(variant, 'codec', 'bitrate', 'type'),
           } as Stream;
         })
         .filter((x): x is Stream => Boolean(x));
