@@ -467,16 +467,19 @@ export class FloatplaneAddon {
         attachmentIds.map(async (videoId, index) => {
           try {
             const video = await this.api.video(videoId);
+            const overview = descriptionOf(video) || descriptionOf(item);
+            const runtime = durationLabel(video);
             return {
               id: `fp:video:${videoId}`,
               title: title(video) || title(item),
-              overview: descriptionOf(video) || descriptionOf(item),
+              overview,
+              description: overview,
               released:
                 first(video, 'releaseDate') || first(item, 'releaseDate'),
               thumbnail: image(video) || image(item),
               available: first(video, 'isAccessible') !== false,
               streams: null,
-              ...(durationLabel(video) ? { runtime: durationLabel(video) } : {}),
+              ...(runtime ? { runtime } : {}),
               ...(durationSeconds(first(video, 'duration', 'durationSeconds', 'durationMs')) !== undefined
                 ? {
                     duration: durationSeconds(
@@ -486,10 +489,12 @@ export class FloatplaneAddon {
                 : {}),
             };
           } catch {
+            const overview = descriptionOf(item);
             return {
               id: `fp:video:${videoId || `${rawId}:${index}`}`,
               title: title(item),
-              overview: descriptionOf(item),
+              overview,
+              description: overview,
               released: first(item, 'releaseDate'),
               thumbnail: image(item),
               available: false,
@@ -499,7 +504,18 @@ export class FloatplaneAddon {
         })
       )
     ).filter(Boolean);
-    return { ...this.preview(item), type: 'series', videos };
+    const firstVideo = videos[0] as any;
+    const runtime =
+      durationLabel(item) ||
+      (typeof firstVideo?.runtime === 'string' ? firstVideo.runtime : undefined);
+    const description = descriptionOf(item) || firstVideo?.overview;
+    return {
+      ...this.preview(item),
+      type: 'series',
+      description,
+      videos,
+      ...(runtime ? { runtime } : {}),
+    };
   }
 
   async getStreams(_type: string, itemId: string): Promise<Stream[]> {
