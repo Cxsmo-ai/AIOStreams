@@ -35,7 +35,8 @@ function descriptionOf(item: any, fallback?: string): string | undefined {
     'content',
     'caption'
   );
-  const nested = raw && typeof raw === 'object' ? first(raw, 'text', 'value') : raw;
+  const nested =
+    raw && typeof raw === 'object' ? first(raw, 'text', 'value') : raw;
   const value = typeof nested === 'string' ? nested : fallback;
   if (!value) return undefined;
   return value
@@ -145,10 +146,22 @@ function audioQuality(variant: any): number {
     )
   );
   const sampleRate = numberValue(
-    variantMediaValue(variant, 'audio', 'sampleRate', 'samplerate', 'samplingRate')
+    variantMediaValue(
+      variant,
+      'audio',
+      'sampleRate',
+      'samplerate',
+      'samplingRate'
+    )
   );
   const channels = numberValue(
-    variantMediaValue(variant, 'audio', 'channelCount', 'channels', 'channelLayout')
+    variantMediaValue(
+      variant,
+      'audio',
+      'channelCount',
+      'channels',
+      'channelLayout'
+    )
   );
   const codec = text(
     variantMediaValue(variant, 'audio', 'codec', 'audioCodec', 'format')
@@ -160,23 +173,152 @@ function audioQuality(variant: any): number {
       : 0;
   // Bitrate is the primary quality signal. The other fields break ties while
   // keeping the score bounded and deterministic for malformed API values.
-  return bitrate * 1_000_000 + sampleRate * 100 + channels * 10_000 + codecWeight;
+  return (
+    bitrate * 1_000_000 + sampleRate * 100 + channels * 10_000 + codecWeight
+  );
 }
 function audioDescription(variant: any): string[] {
   const codec = text(
     variantMediaValue(variant, 'audio', 'codec', 'audioCodec', 'format')
   );
   const bitrate = numberValue(
-    variantMediaValue(variant, 'audio', 'bitrate', 'bitRate', 'bandwidth', 'bitrateKbps')
+    variantMediaValue(
+      variant,
+      'audio',
+      'bitrate',
+      'bitRate',
+      'bandwidth',
+      'bitrateKbps'
+    )
   );
   const channels = numberValue(
-    variantMediaValue(variant, 'audio', 'channelCount', 'channels', 'channelLayout')
+    variantMediaValue(
+      variant,
+      'audio',
+      'channelCount',
+      'channels',
+      'channelLayout'
+    )
   );
   return [
     codec && `audio ${codec}`,
     bitrate > 0 && `audio ${Math.round(bitrate)} kbps`,
     channels > 0 && `audio ${channels}ch`,
   ].filter((value): value is string => Boolean(value));
+}
+
+function usefulTitle(item: any): string | undefined {
+  const value = title(item);
+  return value && value !== 'Floatplane content' ? value : undefined;
+}
+
+function resolutionLabel(variant: any): string | undefined {
+  const height = variantHeight(variant);
+  if (height > 0) return `${height}p`;
+  const raw = text(
+    variantMediaValue(
+      variant,
+      'video',
+      'resolution',
+      'quality',
+      'label',
+      'name'
+    )
+  ).trim();
+  return raw || undefined;
+}
+
+function languageLabels(item: any): string[] {
+  const audioLanguage = variantMediaValue(item, 'audio', 'language', 'lang');
+  const values = [
+    first(item, 'language', 'lang', 'audioLanguage', 'audioLang'),
+    typeof audioLanguage === 'object'
+      ? first(audioLanguage, 'name', 'label', 'code')
+      : audioLanguage,
+    first(item, 'languages', 'audioLanguages'),
+  ];
+  return [
+    ...new Set(
+      values
+        .flatMap((value) =>
+          Array.isArray(value) ? value : value === undefined ? [] : [value]
+        )
+        .map((value) =>
+          typeof value === 'object'
+            ? first(value, 'name', 'label', 'language', 'lang', 'code')
+            : value
+        )
+        .map((value) => text(value).trim())
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function subtitleLabels(item: any): string[] {
+  const tracks = array(
+    first(
+      item,
+      'textTracks',
+      'texttracks',
+      'text_tracks',
+      'captions',
+      'subtitles',
+      'tracks'
+    )
+  );
+  return [
+    ...new Set(
+      tracks
+        .map((track) =>
+          text(first(track, 'language', 'lang', 'label', 'name', 'code')).trim()
+        )
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function floatplaneFilename(
+  variant: any,
+  metadata: any,
+  resolution: string | undefined,
+  videoCodec: string,
+  languages: string[]
+): string {
+  const parts = [
+    usefulTitle(metadata) || usefulTitle(variant) || 'Floatplane',
+    resolution,
+    videoCodec,
+    ...languages,
+  ].filter(Boolean);
+  return parts
+    .join(' ')
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .trim();
+}
+
+function floatplaneDescription(
+  variant: any,
+  metadata: any,
+  resolution: string | undefined,
+  videoCodec: string,
+  technicalAudio: string[],
+  duration: string | undefined,
+  languages: string[],
+  subtitles: string[]
+): string {
+  const titleLine = usefulTitle(metadata) || usefulTitle(variant);
+  return [
+    titleLine,
+    resolution && `🎥 ${resolution}`,
+    videoCodec && `🎞️ ${videoCodec}`,
+    technicalAudio.length ? `🎧 ${technicalAudio.join(' · ')}` : undefined,
+    duration && `⏱️ ${duration}`,
+    languages.length ? `🌎 ${languages.join(' · ')}` : undefined,
+    subtitles.length ? `📝 ${subtitles.join(' · ')}` : undefined,
+    '📺 Direct Floatplane',
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join('\n');
 }
 function image(item: any): string | undefined {
   const value = first(
@@ -211,10 +353,9 @@ function title(item: any): string {
     'subject',
     'videoTitle'
   );
-  const nested = raw && typeof raw === 'object' ? first(raw, 'text', 'value') : raw;
-  return (
-    descriptionOf({ description: nested }) || 'Floatplane content'
-  );
+  const nested =
+    raw && typeof raw === 'object' ? first(raw, 'text', 'value') : raw;
+  return descriptionOf({ description: nested }) || 'Floatplane content';
 }
 function idOf(item: any): string {
   if (typeof item === 'string') return item;
@@ -495,7 +636,9 @@ export class FloatplaneAddon {
               available: first(video, 'isAccessible') !== false,
               streams: null,
               ...(runtime ? { runtime } : {}),
-              ...(durationSeconds(first(video, 'duration', 'durationSeconds', 'durationMs')) !== undefined
+              ...(durationSeconds(
+                first(video, 'duration', 'durationSeconds', 'durationMs')
+              ) !== undefined
                 ? {
                     duration: durationSeconds(
                       first(video, 'duration', 'durationSeconds', 'durationMs')
@@ -522,7 +665,9 @@ export class FloatplaneAddon {
     const firstVideo = videos[0] as any;
     const runtime =
       durationLabel(item) ||
-      (typeof firstVideo?.runtime === 'string' ? firstVideo.runtime : undefined);
+      (typeof firstVideo?.runtime === 'string'
+        ? firstVideo.runtime
+        : undefined);
     const description = descriptionOf(item) || firstVideo?.overview;
     return {
       ...this.preview(item),
@@ -537,7 +682,8 @@ export class FloatplaneAddon {
     const rawId = itemId.split(':').pop() || itemId;
     const streamsFromDelivery = async (
       response: any,
-      outputKind: string
+      outputKind: string,
+      metadata?: any
     ): Promise<Stream[]> => {
       const groups = array(first(response, 'groups'));
       const variants = groups.flatMap((group) =>
@@ -588,16 +734,44 @@ export class FloatplaneAddon {
           const technicalVideo = text(
             variantMediaValue(variant, 'video', 'codec', 'videoCodec', 'format')
           );
+          const resolution = resolutionLabel(variant);
+          const languages = [
+            ...new Set([
+              ...languageLabels(metadata),
+              ...languageLabels(variant),
+            ]),
+          ];
+          const subtitles = subtitleLabels(metadata);
+          const duration = durationLabel(metadata) || durationLabel(variant);
+          const filename = floatplaneFilename(
+            variant,
+            metadata,
+            resolution,
+            technicalVideo,
+            languages
+          );
+          const displayQuality = resolution || text(quality).trim();
           return {
             url: streamUrl,
-            name: `Floatplane${quality ? ` • ${quality}` : ''}`,
-            title: title(variant),
-            description:
-              [
-                technicalVideo && `video ${technicalVideo}`,
-                ...technicalAudio,
-              ].join(' • ') ||
-              first(variant, 'codec', 'bitrate', 'type'),
+            name: `Floatplane${displayQuality ? ` • ${displayQuality}` : ''}`,
+            title: usefulTitle(variant) || usefulTitle(metadata),
+            description: floatplaneDescription(
+              variant,
+              metadata,
+              resolution,
+              technicalVideo,
+              technicalAudio,
+              duration,
+              languages,
+              subtitles
+            ),
+            behaviorHints: {
+              // The generic parser uses this as the canonical filename for
+              // resolution/codec/language extraction. Without it Floatplane
+              // streams look like anonymous `video avc1` links in custom
+              // formatters even though the delivery variant is well known.
+              filename,
+            },
           } as Stream;
         })
         .filter((x): x is Stream => Boolean(x));
@@ -624,11 +798,35 @@ export class FloatplaneAddon {
             .replaceAll('{qualityLevels}', name)
             .replaceAll('{qualityLevelParams.token}', text(token));
           const streamUrl = url(path, text(cdn));
+          const resolution =
+            resolutionLabel(level) ||
+            text(first(level, 'label', 'name')).trim();
+          const languages = languageLabels(metadata);
+          const subtitles = subtitleLabels(metadata);
+          const duration = durationLabel(metadata);
+          const filename = floatplaneFilename(
+            level,
+            metadata,
+            resolution,
+            '',
+            languages
+          );
           return streamUrl
             ? ({
                 url: streamUrl,
-                name: `Floatplane${first(level, 'label') ? ` • ${first(level, 'label')}` : ''}`,
-                title: text(first(level, 'label'), name),
+                name: `Floatplane${resolution ? ` • ${resolution}` : ''}`,
+                title: usefulTitle(metadata),
+                description: floatplaneDescription(
+                  level,
+                  metadata,
+                  resolution,
+                  '',
+                  [],
+                  duration,
+                  languages,
+                  subtitles
+                ),
+                behaviorHints: { filename },
               } as Stream)
             : null;
         })
@@ -636,15 +834,26 @@ export class FloatplaneAddon {
       return filterPlayableFloatplanePlaylists(legacyStreams);
     };
 
+    // Metadata is only used to enrich the display. Keep it bounded and fetch
+    // it concurrently with delivery so formatting never makes playback wait
+    // on a slow metadata endpoint.
+    const metadataPromise = Promise.race([
+      this.api.video(rawId).catch(() => undefined),
+      new Promise<undefined>((resolve) =>
+        setTimeout(() => resolve(undefined), 1200)
+      ),
+    ]);
+
     const deliveryFor = async (
       contentId: string,
       outputKind = 'hls.fmp4'
     ): Promise<Stream[]> => {
       try {
-        return streamsFromDelivery(
-          await this.api.delivery(contentId, outputKind),
-          outputKind
-        );
+        const [delivery, metadata] = await Promise.all([
+          this.api.delivery(contentId, outputKind),
+          contentId === rawId ? metadataPromise : Promise.resolve(undefined),
+        ]);
+        return streamsFromDelivery(delivery, outputKind, metadata);
       } catch {
         return [];
       }
@@ -677,10 +886,9 @@ export class FloatplaneAddon {
         first(item, 'videoAttachments', 'attachmentOrder')
       );
       for (const attachmentId of attachments) {
-        const streams =
-          (await deliveryFor(attachmentId, 'flat'))
-            .concat(await deliveryFor(attachmentId, 'hls.mpegts'))
-            .concat(await deliveryFor(attachmentId, 'hls.fmp4'));
+        const streams = (await deliveryFor(attachmentId, 'flat'))
+          .concat(await deliveryFor(attachmentId, 'hls.mpegts'))
+          .concat(await deliveryFor(attachmentId, 'hls.fmp4'));
         if (streams.length) return streams;
       }
     } catch {
