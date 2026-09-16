@@ -4,6 +4,7 @@ export type MediaType = 'movie' | 'series';
 
 export type MetadataSource =
   | 'anime'
+  | 'anilist'
   | 'request'
   | 'tmdb'
   | 'tvdb'
@@ -71,31 +72,46 @@ const FIELD_PRIORITY = {
     'tvdb',
     'tmdb',
     'anime',
+    'anilist',
     'skyhook',
     'tvmaze',
     'cinemeta',
     'imdbSuggestion',
   ],
-  yearEnd: ['tvdb', 'tmdb', 'tvmaze', 'cinemeta', 'imdbSuggestion'],
-  originalLanguage: ['tmdb', 'tvdb', 'skyhook', 'tvmaze'],
-  country: ['tvdb', 'tmdb', 'skyhook', 'tvmaze'],
-  releaseDate: ['tmdb', 'cinemeta'],
-  runtime: ['tmdb', 'tvdb', 'skyhook', 'tvmaze', 'cinemeta'],
+  yearEnd: ['tvdb', 'tmdb', 'anilist', 'tvmaze', 'cinemeta', 'imdbSuggestion'],
+  originalLanguage: ['tmdb', 'tvdb', 'anilist', 'skyhook', 'tvmaze'],
+  country: ['tvdb', 'tmdb', 'anilist', 'skyhook', 'tvmaze'],
+  releaseDate: ['tmdb', 'cinemeta', 'anilist'],
+  runtime: ['tmdb', 'tvdb', 'anilist', 'skyhook', 'tvmaze', 'cinemeta'],
   seasons: ['cinemeta', 'tmdb', 'skyhook', 'tvmaze'],
   nextAirDate: ['tvdb', 'tmdbEpisode'],
-  firstAiredDate: ['tvdb', 'skyhook', 'tvmaze', 'tmdb'],
-  lastAiredDate: ['tvdb', 'skyhook', 'tvmaze', 'tmdb'],
+  firstAiredDate: ['tvdb', 'skyhook', 'anilist', 'tvmaze', 'tmdb'],
+  lastAiredDate: ['tvdb', 'skyhook', 'anilist', 'tvmaze', 'tmdb'],
   tmdbId: ['tmdb', 'request', 'skyhook'],
   tvdbId: ['tvdb', 'request', 'skyhook'],
 } as const satisfies Partial<Record<keyof SourceContribution, SourcePriority>>;
 
 /** Genres accumulate across these sources instead of one winning outright. */
-const GENRE_SOURCES: SourcePriority = ['tmdb', 'skyhook', 'tvmaze', 'cinemeta'];
+const GENRE_SOURCES: SourcePriority = [
+  'tmdb',
+  'skyhook',
+  'anilist',
+  'tvmaze',
+  'cinemeta',
+];
 
 /** Which source's canonical title becomes `metadata.title`. */
 const PRIMARY_TITLE_PRIORITY: SourcePriority = {
   movie: ['tmdb', 'tvdb', 'skyhook', 'cinemeta', 'imdbSuggestion'],
-  series: ['tvdb', 'skyhook', 'tmdb', 'tvmaze', 'cinemeta', 'imdbSuggestion'],
+  series: [
+    'tvdb',
+    'skyhook',
+    'tmdb',
+    'anilist',
+    'tvmaze',
+    'cinemeta',
+    'imdbSuggestion',
+  ],
 };
 
 /**
@@ -110,6 +126,7 @@ const TITLE_ORDER: readonly {
   { source: 'cinemeta', kind: 'primary' },
   { source: 'tvdb', kind: 'primary' },
   { source: 'tmdb', kind: 'primary' },
+  { source: 'anilist', kind: 'primary' },
   { source: 'tvmaze', kind: 'primary' },
   { source: 'anime', kind: 'aliases' },
   { source: 'tmdb', kind: 'aliases' },

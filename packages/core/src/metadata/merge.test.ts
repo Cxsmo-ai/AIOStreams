@@ -90,3 +90,27 @@ test('movie merge does not let a series-only TVMaze contribution affect fields',
   assert.equal(merged.tmdbId, 42);
   assert.equal(resolveSource(contributions, 'runtime', 'movie'), 'tmdb');
 });
+
+test('keyless AniList enrichment fills anime fields without outranking canonical sources', () => {
+  const contributions = {
+    anilist: {
+      primaryTitle: 'Anime title',
+      year: 2020,
+      runtime: 24,
+      genres: ['Action'],
+    },
+    tmdb: {
+      primaryTitle: 'Anime title',
+      year: 2021,
+      runtime: 23,
+      genres: ['Drama'],
+      tmdbId: 42,
+    },
+  };
+
+  const merged = mergeMetadata(contributions, 'series');
+
+  assert.equal(merged.year, 2021);
+  assert.equal(merged.runtime, 23);
+  assert.deepEqual(merged.genres, ['Drama', 'Action']);
+});

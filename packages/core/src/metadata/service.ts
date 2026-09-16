@@ -37,6 +37,7 @@ import { SceneMappingDataset } from './scene-mappings.js';
 import { IdMappingDataset } from './id-mappings.js';
 import { SkyhookMetadata } from './skyhook.js';
 import { getTvMazeMetadata } from './tvmaze.js';
+import { getAniListMetadata } from './anilist.js';
 
 const logger = createLogger('metadata-service');
 
@@ -215,6 +216,16 @@ export class MetadataService {
               promises.push(Promise.resolve(undefined));
             }
 
+            // AniList is a public, keyless enrichment source. Only query it
+            // when the local anime database already supplied a trusted ID;
+            // never search by title and risk attaching the wrong anime.
+            const anilistId = animeEntry?.mappings?.anilistId;
+            if (anilistId) {
+              promises.push(getAniListMetadata(Number(anilistId)));
+            } else {
+              promises.push(Promise.resolve(undefined));
+            }
+
             // Execute all promises in parallel
             const [
               tmdbResult,
@@ -224,11 +235,13 @@ export class MetadataService {
               imdbSuggestionResult,
               skyhookResult,
               tvmazeResult,
+              anilistResult,
             ] = (await Promise.allSettled(promises)) as [
               PromiseSettledResult<(Metadata & { tmdbId: string }) | undefined>,
               PromiseSettledResult<(Metadata & { tvdbId: number }) | undefined>,
               PromiseSettledResult<MetadataTitle[] | undefined>,
               PromiseSettledResult<Meta | undefined>,
+              PromiseSettledResult<Metadata | undefined>,
               PromiseSettledResult<Metadata | undefined>,
               PromiseSettledResult<Metadata | undefined>,
               PromiseSettledResult<Metadata | undefined>,
@@ -463,6 +476,27 @@ export class MetadataService {
             } else if (tvmazeResult.status === 'rejected') {
               logger.debug(
                 `Failed to fetch TVMaze metadata for ${id.fullId}: ${tvmazeResult.reason}`
+              );
+            }
+
+            if (anilistResult.status === 'fulfilled' && anilistResult.value) {
+              const anilist = anilistResult.value;
+              contributions.anilist = {
+                primaryTitle: anilist.title,
+                aliases: anilist.titles,
+                year: anilist.year,
+                yearEnd: anilist.yearEnd,
+                originalLanguage: anilist.originalLanguage,
+                country: anilist.country,
+                releaseDate: anilist.releaseDate,
+                runtime: anilist.runtime,
+                genres: anilist.genres,
+                firstAiredDate: anilist.firstAiredDate,
+                lastAiredDate: anilist.lastAiredDate,
+              };
+            } else if (anilistResult.status === 'rejected') {
+              logger.debug(
+                `Failed to fetch AniList metadata for ${id.fullId}: ${anilistResult.reason}`
               );
             }
 
