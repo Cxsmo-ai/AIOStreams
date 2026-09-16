@@ -296,8 +296,13 @@ export class TMDBMetadata {
       );
     }
 
-    const json = await response.json();
+    return this.parseAlternativeTitles(await response.json(), mediaType);
+  }
 
+  private parseAlternativeTitles(
+    json: unknown,
+    mediaType: string
+  ): MetadataTitle[] {
     if (mediaType === 'movie') {
       const data = MovieAlternativeTitlesSchema.parse(json);
       return data.titles
@@ -306,21 +311,18 @@ export class TMDBMetadata {
           title: title.title,
           language: iso31661ToIso6391(title.iso_3166_1) || undefined,
         }));
-    } else {
-      const data = TVAlternativeTitlesSchema.parse(json);
-      return data.results
-        .filter((t) => t.title)
-        .map((title) => ({
-          title: title.title,
-          language: iso31661ToIso6391(title.iso_3166_1) || undefined,
-        }));
     }
+
+    const data = TVAlternativeTitlesSchema.parse(json);
+    return data.results
+      .filter((t) => t.title)
+      .map((title) => ({
+        title: title.title,
+        language: iso31661ToIso6391(title.iso_3166_1) || undefined,
+      }));
   }
 
-  private async fetchTranslatedTitles(
-    url: URL,
-    mediaType: string
-  ): Promise<MetadataTitle[]> {
+  private async fetchTranslatedTitles(url: URL): Promise<MetadataTitle[]> {
     const response = await makeRequest(url.toString(), {
       timeout: 5000,
       headers: this.getHeaders(),
@@ -330,7 +332,10 @@ export class TMDBMetadata {
       throw new Error(`Failed to fetch translations: ${response.statusText}`);
     }
 
-    const json = await response.json();
+    return this.parseTranslatedTitles(await response.json());
+  }
+
+  private parseTranslatedTitles(json: unknown): MetadataTitle[] {
     const data = TranslationsSchema.parse(json);
     return data.translations
       .map((translation) => {
@@ -379,6 +384,13 @@ export class TMDBMetadata {
           : TV_DETAILS_PATH) +
         `/${tmdbId}`
     );
+    // TMDB documents append_to_response as the preferred way to combine
+    // related subresources. Keep the individual endpoint fallbacks below for
+    // deployments/proxies that omit one of the appended blocks.
+    detailsUrl.searchParams.set(
+      'append_to_response',
+      'alternative_titles,translations'
+    );
     this.addSearchParams(detailsUrl);
     const detailsResponse = await makeRequest(detailsUrl.toString(), {
       timeout: 5000,
@@ -389,7 +401,7 @@ export class TMDBMetadata {
       throw new Error(`Failed to fetch details: ${detailsResponse.statusText}`);
     }
 
-    const detailsJson = await detailsResponse.json();
+    const detailsJson: unknown = await detailsResponse.json();
 
     // Parse and extract data based on media type
     let primaryTitle: string;
@@ -460,7 +472,36 @@ export class TMDBMetadata {
 
     const year = this.parseReleaseDate(releaseDate);
 
-    // Fetch alternative titles and translations in parallel
+    // Prefer appended title/translation blocks from the details response.
+    // Older proxies or partial API responses may omit either block, so only
+    // the missing subresource is fetched separately.
+    const detailsObject =
+      detailsJson && typeof detailsJson === 'object'
+        ? (detailsJson as Record<string, unknown>)
+        : {};
+    let appendedAlternativeTitles: MetadataTitle[] | undefined;
+    let appendedTranslations: MetadataTitle[] | undefined;
+    try {
+      if (detailsObject.alternative_titles !== undefined) {
+        appendedAlternativeTitles = this.parseAlternativeTitles(
+          detailsObject.alternative_titles,
+          parsedId.mediaType
+        );
+      }
+    } catch {
+      // Fall back to the dedicated endpoint below.
+    }
+    try {
+      if (detailsObject.translations !== undefined) {
+        appendedTranslations = this.parseTranslatedTitles(
+          detailsObject.translations
+        );
+      }
+    } catch {
+      // Fall back to the dedicated endpoint below.
+    }
+
+    // Fetch only missing title/translation blocks in parallel.
     const altTitlesUrl = new URL(
       API_BASE_URL +
         (parsedId.mediaType === 'movie'
@@ -479,8 +520,9 @@ export class TMDBMetadata {
     this.addSearchParams(translatedTitlesUrl);
 
     const [altTitlesResult, translationsResult] = await Promise.allSettled([
-      this.fetchAlternativeTitles(altTitlesUrl, parsedId.mediaType),
-      this.fetchTranslatedTitles(translatedTitlesUrl, parsedId.mediaType),
+      appendedAlternativeTitles ??
+        this.fetchAlternativeTitles(altTitlesUrl, parsedId.mediaType),
+      appendedTranslations ?? this.fetchTranslatedTitles(translatedTitlesUrl),
     ]);
 
     if (altTitlesResult.status === 'fulfilled') {
