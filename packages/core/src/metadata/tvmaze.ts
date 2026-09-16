@@ -74,64 +74,67 @@ async function lookupShow(
   const parsed = id.match(/^(tt\d+|tmdb[:\-]\d+|tvdb[:\-]\d+)/i);
   const lookupKey =
     parsed?.[1].toLowerCase() ?? `name:${normalise(meta.name ?? '')}`;
-  return showLookupCache.wrap(
-    async () => {
-      try {
-        let show: TvMazeShow | null = null;
-        if (/^tt\d+$/i.test(lookupKey) || /^tvdb[:\-]\d+$/i.test(lookupKey)) {
-          const parameter = /^tt/i.test(lookupKey) ? 'imdb' : 'thetvdb';
-          const value = lookupKey.match(/\d+$/)?.[0];
-          const response = await makeRequest(
-            `${TVMAZE_BASE}/lookup/shows?${parameter}=${value}`,
-            {
-              method: 'GET',
-              timeout: REQUEST_TIMEOUT_MS,
-              headers: { 'User-Agent': appConfig.http.defaultUserAgent },
-            }
-          );
-          if (response.ok) show = (await response.json()) as TvMazeShow;
-        }
+  // Do not treat a transient provider timeout as a 24-hour answer. Older
+  // versions used Cache.wrap(), which persisted null and made an IMDb lookup
+  // stay empty until its negative TTL expired even after TVMaze recovered.
+  const cached = await showLookupCache.get(lookupKey);
+  if (cached) return cached;
 
-        if (!show && meta.name) {
-          const response = await makeRequest(
-            `${TVMAZE_BASE}/search/shows?q=${encodeURIComponent(meta.name)}`,
-            {
-              method: 'GET',
-              timeout: REQUEST_TIMEOUT_MS,
-              headers: { 'User-Agent': appConfig.http.defaultUserAgent },
-            }
-          );
-          if (response.ok) {
-            const results = (await response.json()) as Array<{
-              show?: TvMazeShow;
-            }>;
-            const wantedName = normalise(meta.name);
-            const wantedYear = releaseYear(meta);
-            const exactMatches = results
-              .map((result) => result.show)
-              .filter(
-                (candidate): candidate is TvMazeShow =>
-                  !!candidate && normalise(candidate.name) === wantedName
-              );
-            show =
-              exactMatches.find(
-                (candidate) =>
-                  !!wantedYear &&
-                  candidate.premiered?.startsWith(String(wantedYear))
-              ) ??
-              exactMatches[0] ??
-              null;
-          }
+  try {
+    let show: TvMazeShow | null = null;
+    if (/^tt\d+$/i.test(lookupKey) || /^tvdb[:\-]\d+$/i.test(lookupKey)) {
+      const parameter = /^tt/i.test(lookupKey) ? 'imdb' : 'thetvdb';
+      const value = lookupKey.match(/\d+$/)?.[0];
+      const response = await makeRequest(
+        `${TVMAZE_BASE}/lookup/shows?${parameter}=${value}`,
+        {
+          method: 'GET',
+          timeout: REQUEST_TIMEOUT_MS,
+          headers: { 'User-Agent': appConfig.http.defaultUserAgent },
         }
-        return show;
-      } catch (error) {
-        logger.debug(`TVMaze show lookup failed for ${id}: ${error}`);
-        return null;
+      );
+      if (response.ok) show = (await response.json()) as TvMazeShow;
+    }
+
+    if (!show && meta.name) {
+      const response = await makeRequest(
+        `${TVMAZE_BASE}/search/shows?q=${encodeURIComponent(meta.name)}`,
+        {
+          method: 'GET',
+          timeout: REQUEST_TIMEOUT_MS,
+          headers: { 'User-Agent': appConfig.http.defaultUserAgent },
+        }
+      );
+      if (response.ok) {
+        const results = (await response.json()) as Array<{
+          show?: TvMazeShow;
+        }>;
+        const wantedName = normalise(meta.name);
+        const wantedYear = releaseYear(meta);
+        const exactMatches = results
+          .map((result) => result.show)
+          .filter(
+            (candidate): candidate is TvMazeShow =>
+              !!candidate && normalise(candidate.name) === wantedName
+          );
+        show =
+          exactMatches.find(
+            (candidate) =>
+              !!wantedYear &&
+              candidate.premiered?.startsWith(String(wantedYear))
+          ) ??
+          exactMatches[0] ??
+          null;
       }
-    },
-    lookupKey,
-    LOOKUP_TTL_SECONDS
-  );
+    }
+    // Only successful matches are cached. A null result is intentionally
+    // retryable so a temporary TVMaze/network failure self-heals quickly.
+    if (show) await showLookupCache.set(lookupKey, show, LOOKUP_TTL_SECONDS);
+    return show;
+  } catch (error) {
+    logger.debug(`TVMaze show lookup failed for ${id}: ${error}`);
+    return null;
+  }
 }
 
 async function getEpisodes(showId: number): Promise<TvMazeEpisode[]> {
