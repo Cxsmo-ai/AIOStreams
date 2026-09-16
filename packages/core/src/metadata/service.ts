@@ -36,6 +36,7 @@ import {
 import { SceneMappingDataset } from './scene-mappings.js';
 import { IdMappingDataset } from './id-mappings.js';
 import { SkyhookMetadata } from './skyhook.js';
+import { getTvMazeMetadata } from './tvmaze.js';
 
 const logger = createLogger('metadata-service');
 
@@ -205,6 +206,15 @@ export class MetadataService {
               promises.push(Promise.resolve(undefined));
             }
 
+            // TVMaze is a keyless, public fallback for series facts. It is
+            // queried only when a stable IMDb/TVDB identity is available, so
+            // title-only requests never fan out to an unbounded search API.
+            if (type === 'series' && (imdbId || tvdbId)) {
+              promises.push(getTvMazeMetadata(id.fullId));
+            } else {
+              promises.push(Promise.resolve(undefined));
+            }
+
             // Execute all promises in parallel
             const [
               tmdbResult,
@@ -213,11 +223,13 @@ export class MetadataService {
               imdbResult,
               imdbSuggestionResult,
               skyhookResult,
+              tvmazeResult,
             ] = (await Promise.allSettled(promises)) as [
               PromiseSettledResult<(Metadata & { tmdbId: string }) | undefined>,
               PromiseSettledResult<(Metadata & { tvdbId: number }) | undefined>,
               PromiseSettledResult<MetadataTitle[] | undefined>,
               PromiseSettledResult<Meta | undefined>,
+              PromiseSettledResult<Metadata | undefined>,
               PromiseSettledResult<Metadata | undefined>,
               PromiseSettledResult<Metadata | undefined>,
             ];
@@ -431,6 +443,26 @@ export class MetadataService {
             } else {
               logger.warn(
                 `Failed to fetch IMDb suggestion data for ${imdbId}: ${imdbSuggestionResult.status === 'rejected' ? imdbSuggestionResult.reason : 'no data'}`
+              );
+            }
+
+            if (tvmazeResult.status === 'fulfilled' && tvmazeResult.value) {
+              const tvmaze = tvmazeResult.value;
+              contributions.tvmaze = {
+                primaryTitle: tvmaze.title,
+                aliases: tvmaze.titles,
+                year: tvmaze.year,
+                yearEnd: tvmaze.yearEnd,
+                originalLanguage: tvmaze.originalLanguage,
+                country: tvmaze.country,
+                runtime: tvmaze.runtime,
+                genres: tvmaze.genres,
+                firstAiredDate: tvmaze.firstAiredDate,
+                lastAiredDate: tvmaze.lastAiredDate,
+              };
+            } else if (tvmazeResult.status === 'rejected') {
+              logger.debug(
+                `Failed to fetch TVMaze metadata for ${id.fullId}: ${tvmazeResult.reason}`
               );
             }
 

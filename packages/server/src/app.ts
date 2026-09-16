@@ -18,7 +18,6 @@ import {
   authApi,
   dashboardApi,
   usenetApi,
-  floatplaneApi,
 } from './routes/api/index.js';
 import {
   configure,
@@ -57,7 +56,6 @@ import {
   easynews,
   library,
   kurato,
-  floatplane,
 } from './routes/builtins/index.js';
 import {
   ipMiddleware,
@@ -189,7 +187,6 @@ apiRouter.use('/sync', syncApi);
 apiRouter.use('/auth', authApi);
 apiRouter.use('/dashboard', dashboardApi);
 apiRouter.use('/usenet', usenetApi);
-apiRouter.use('/floatplane', floatplaneApi);
 apiRouter.use('/sabnzbd', sabnzbdRouter);
 apiRouter.use('/newznab', createNabRouter('newznab'));
 apiRouter.use('/torznab', createNabRouter('torznab'));
@@ -271,7 +268,6 @@ builtinsRouter.use('/seadex', seadex);
 builtinsRouter.use('/easynews', easynews);
 builtinsRouter.use('/library', library);
 builtinsRouter.use('/kurato', kurato);
-builtinsRouter.use('/floatplane', floatplane);
 app.use('/builtins', builtinsRouter);
 
 app.use('/blocklist', publicBlocklistRouter);

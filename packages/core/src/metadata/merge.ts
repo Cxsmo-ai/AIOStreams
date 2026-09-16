@@ -8,6 +8,7 @@ export type MetadataSource =
   | 'tmdb'
   | 'tvdb'
   | 'skyhook'
+  | 'tvmaze'
   | 'trakt'
   | 'cinemeta'
   | 'imdbSuggestion'
@@ -66,27 +67,35 @@ type PickedField = keyof typeof FIELD_PRIORITY;
  * ordered here but resolved jointly (see resolveYears).
  */
 const FIELD_PRIORITY = {
-  year: ['tvdb', 'tmdb', 'anime', 'skyhook', 'cinemeta', 'imdbSuggestion'],
-  yearEnd: ['tvdb', 'tmdb', 'cinemeta', 'imdbSuggestion'],
-  originalLanguage: ['tmdb', 'tvdb', 'skyhook'],
-  country: ['tvdb', 'tmdb', 'skyhook'],
+  year: [
+    'tvdb',
+    'tmdb',
+    'anime',
+    'skyhook',
+    'tvmaze',
+    'cinemeta',
+    'imdbSuggestion',
+  ],
+  yearEnd: ['tvdb', 'tmdb', 'tvmaze', 'cinemeta', 'imdbSuggestion'],
+  originalLanguage: ['tmdb', 'tvdb', 'skyhook', 'tvmaze'],
+  country: ['tvdb', 'tmdb', 'skyhook', 'tvmaze'],
   releaseDate: ['tmdb', 'cinemeta'],
-  runtime: ['tmdb', 'tvdb', 'skyhook', 'cinemeta'],
-  seasons: ['cinemeta', 'tmdb', 'skyhook'],
+  runtime: ['tmdb', 'tvdb', 'skyhook', 'tvmaze', 'cinemeta'],
+  seasons: ['cinemeta', 'tmdb', 'skyhook', 'tvmaze'],
   nextAirDate: ['tvdb', 'tmdbEpisode'],
-  firstAiredDate: ['tvdb', 'skyhook', 'tmdb'],
-  lastAiredDate: ['tvdb', 'skyhook', 'tmdb'],
+  firstAiredDate: ['tvdb', 'skyhook', 'tvmaze', 'tmdb'],
+  lastAiredDate: ['tvdb', 'skyhook', 'tvmaze', 'tmdb'],
   tmdbId: ['tmdb', 'request', 'skyhook'],
   tvdbId: ['tvdb', 'request', 'skyhook'],
 } as const satisfies Partial<Record<keyof SourceContribution, SourcePriority>>;
 
 /** Genres accumulate across these sources instead of one winning outright. */
-const GENRE_SOURCES: SourcePriority = ['tmdb', 'skyhook', 'cinemeta'];
+const GENRE_SOURCES: SourcePriority = ['tmdb', 'skyhook', 'tvmaze', 'cinemeta'];
 
 /** Which source's canonical title becomes `metadata.title`. */
 const PRIMARY_TITLE_PRIORITY: SourcePriority = {
   movie: ['tmdb', 'tvdb', 'skyhook', 'cinemeta', 'imdbSuggestion'],
-  series: ['tvdb', 'skyhook', 'tmdb', 'cinemeta', 'imdbSuggestion'],
+  series: ['tvdb', 'skyhook', 'tmdb', 'tvmaze', 'cinemeta', 'imdbSuggestion'],
 };
 
 /**
@@ -101,6 +110,7 @@ const TITLE_ORDER: readonly {
   { source: 'cinemeta', kind: 'primary' },
   { source: 'tvdb', kind: 'primary' },
   { source: 'tmdb', kind: 'primary' },
+  { source: 'tvmaze', kind: 'primary' },
   { source: 'anime', kind: 'aliases' },
   { source: 'tmdb', kind: 'aliases' },
   { source: 'tvdb', kind: 'aliases' },

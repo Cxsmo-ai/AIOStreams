@@ -8,18 +8,14 @@ import MarkdownLite from '../../../shared/markdown-lite';
 import { PlusIcon } from 'lucide-react';
 import * as constants from '../../../../../../core/src/utils/constants';
 
-const FLOATPLANE_LOGO_PATH = '/assets/floatplane-icon.png';
-
 function AddonLogo({ preset }: { preset: any }) {
-  const fallback =
-    preset.ID === 'floatplane' ? FLOATPLANE_LOGO_PATH : undefined;
-  const [src, setSrc] = useState<string | undefined>(preset.LOGO || fallback);
+  const [src, setSrc] = useState<string | undefined>(preset.LOGO);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    setSrc(preset.LOGO || fallback);
+    setSrc(preset.LOGO);
     setFailed(false);
-  }, [fallback, preset.LOGO]);
+  }, [preset.LOGO]);
 
   if (!src || failed) {
     return (
@@ -36,8 +32,7 @@ function AddonLogo({ preset }: { preset: any }) {
         alt={preset.NAME}
         className="w-full h-full object-contain p-1"
         onError={() => {
-          if (fallback && src !== fallback) setSrc(fallback);
-          else setFailed(true);
+          setFailed(true);
         }}
       />
     </div>

@@ -10,6 +10,7 @@ import { Wrapper } from './wrapper.js';
 import { createPosterService } from '../poster/index.js';
 import { getAddonName } from '../utils/general.js';
 import { IdParser } from '../utils/id-parser.js';
+import { normaliseTitle } from '../parser/utils.js';
 import type {
   MetaPreview,
   MergedCatalog,
@@ -68,7 +69,15 @@ function mergeCatalogPreview(
   primary: MetaPreview,
   fallback: MetaPreview
 ): MetaPreview {
-  const merged = { ...fallback, ...primary };
+  const primaryScore = catalogPreviewRichness(primary);
+  const fallbackScore = catalogPreviewRichness(fallback);
+  const preferred = canonicalCatalogPreview(
+    primary,
+    fallback,
+    primaryScore >= fallbackScore
+  );
+  const secondary = preferred === primary ? fallback : primary;
+  const merged = { ...secondary, ...preferred };
 
   // Prefer a populated value, while allowing a root preview to replace a
   // season-only placeholder. This keeps one stable poster and useful text.
@@ -80,8 +89,8 @@ function mergeCatalogPreview(
     'imdbRating',
     'releaseInfo',
   ] as const) {
-    if (!hasCatalogValue(primary[key]) && hasCatalogValue(fallback[key])) {
-      (merged as any)[key] = fallback[key];
+    if (!hasCatalogValue(preferred[key]) && hasCatalogValue(secondary[key])) {
+      (merged as any)[key] = secondary[key];
     }
   }
 
@@ -90,19 +99,105 @@ function mergeCatalogPreview(
       ...new Set([...(fallback.genres ?? []), ...(primary.genres ?? [])]),
     ];
   }
+  merged.links = mergeCatalogLinks(primary.links, fallback.links);
+  merged.trailers = mergeCatalogTrailers(primary.trailers, fallback.trailers);
+
+  const primaryRating = Number(primary.imdbRating);
+  const fallbackRating = Number(fallback.imdbRating);
   if (
-    (!primary.links || primary.links.length === 0) &&
-    fallback.links?.length
+    Number.isFinite(primaryRating) &&
+    Number.isFinite(fallbackRating) &&
+    fallbackRating > primaryRating
   ) {
-    merged.links = fallback.links;
-  }
-  if (
-    (!primary.trailers || primary.trailers.length === 0) &&
-    fallback.trailers?.length
-  ) {
-    merged.trailers = fallback.trailers;
+    merged.imdbRating = fallback.imdbRating;
   }
   return merged;
+}
+
+function catalogPreviewRichness(item: MetaPreview): number {
+  let score = 0;
+  if (hasCatalogValue(item.poster)) score += 3;
+  if (hasCatalogValue(item.description)) score += 2;
+  if (hasCatalogValue(item.releaseInfo)) score += 1;
+  if (hasCatalogValue(item.imdbRating)) score += 1;
+  if (item.genres?.length) score += 1;
+  if (item.links?.length) score += 1;
+  if (item.trailers?.length) score += 1;
+  for (const key of [
+    'imdb_id',
+    'imdbId',
+    'tmdb_id',
+    'tmdbId',
+    'tvdb_id',
+    'tvdbId',
+  ]) {
+    if (hasCatalogValue((item as any)[key])) score += 2;
+  }
+  return score;
+}
+
+function catalogIdentityRank(item: MetaPreview): number {
+  const id = String(item.id || '').toLowerCase();
+  if (/^tt\d+(?::\d+:\d+)?$/.test(id)) return 3;
+  if (/^tmdb[:-]\d+(?::\d+:\d+)?$/.test(id)) return 2;
+  if (/^tvdb[:-]\d+(?::\d+:\d+)?$/.test(id)) return 1;
+  if (
+    hasCatalogValue((item as any).imdb_id) ||
+    hasCatalogValue((item as any).imdbId)
+  )
+    return 3;
+  if (
+    hasCatalogValue((item as any).tmdb_id) ||
+    hasCatalogValue((item as any).tmdbId)
+  )
+    return 2;
+  if (
+    hasCatalogValue((item as any).tvdb_id) ||
+    hasCatalogValue((item as any).tvdbId)
+  )
+    return 1;
+  return 0;
+}
+
+function canonicalCatalogPreview(
+  primary: MetaPreview,
+  fallback: MetaPreview,
+  preferPrimary: boolean
+): MetaPreview {
+  const primaryRank = catalogIdentityRank(primary);
+  const fallbackRank = catalogIdentityRank(fallback);
+  if (primaryRank !== fallbackRank) {
+    return primaryRank > fallbackRank ? primary : fallback;
+  }
+  return preferPrimary ? primary : fallback;
+}
+
+function mergeCatalogLinks(
+  primary: MetaPreview['links'],
+  fallback: MetaPreview['links']
+): MetaPreview['links'] {
+  const links = [...(primary ?? []), ...(fallback ?? [])];
+  const seen = new Set<string>();
+  return links.filter((link) => {
+    const key = `${link.name}\u0000${link.category}\u0000${link.url}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeCatalogTrailers(
+  primary: MetaPreview['trailers'],
+  fallback: MetaPreview['trailers']
+): MetaPreview['trailers'] {
+  const trailers = [...(primary ?? []), ...(fallback ?? [])];
+  const seen = new Set<string>();
+  return trailers.filter((trailer) => {
+    const key = `${trailer.source}\u0000${trailer.type}\u0000${trailer.video_id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
@@ -282,6 +377,7 @@ export async function fetchRawCatalogItems(
     }
 
     catalog = normalizeSeriesCatalogItems(catalog, actualType);
+    catalog = deduplicateCatalogItems(catalog, ['id', 'title'], actualType);
 
     logger.debug(
       {
@@ -526,34 +622,148 @@ function applyMergeMethod(
   }
 }
 
-function deduplicateMergedCatalog(
-  items: MetaPreview[],
-  methods?: ('id' | 'title')[]
-): MetaPreview[] {
-  if (!methods || methods.length === 0) {
-    return items;
+function catalogYear(item: MetaPreview): number | undefined {
+  const year = extractYear(item.releaseInfo);
+  return year > 0 ? year : undefined;
+}
+
+function catalogCountry(item: MetaPreview): string | undefined {
+  const country = (item as any).country ?? (item as any).origin_country;
+  if (Array.isArray(country))
+    return country[0] ? String(country[0]).toLowerCase() : undefined;
+  return hasCatalogValue(country) ? String(country).toLowerCase() : undefined;
+}
+
+function catalogTitle(item: MetaPreview): string {
+  return normaliseTitle(
+    String(item.name ?? '')
+      .replace(/\s*\((?:19|20)\d{2}\)\s*$/i, '')
+      .replace(/\s*[-:|]?\s*(?:season|series)\s*\d+\s*$/i, '')
+      .replace(/\s*[-:|]?\s*s\d{1,2}(?:e\d{1,4})?\s*$/i, '')
+  );
+}
+
+function catalogIdentityKeys(item: MetaPreview, type: string): string[] {
+  const keys: string[] = [];
+  const add = (namespace: string, value: unknown) => {
+    if (value === undefined || value === null || value === '') return;
+    const normalized = String(value).trim().toLowerCase();
+    if (normalized) keys.push(`${namespace}:${normalized}`);
+  };
+
+  for (const [namespace, names] of [
+    ['imdb', ['imdb_id', 'imdbId']],
+    ['tmdb', ['tmdb_id', 'tmdbId']],
+    ['tvdb', ['tvdb_id', 'tvdbId']],
+  ] as const) {
+    for (const name of names) add(namespace, (item as any)[name]);
   }
 
-  const seenIds = new Set<string>();
-  const seenTitles = new Set<string>();
+  const parsed = IdParser.parse(item.id, type);
+  if (parsed) {
+    const namespace =
+      parsed.type === 'imdbId'
+        ? 'imdb'
+        : parsed.type === 'themoviedbId'
+          ? 'tmdb'
+          : parsed.type === 'thetvdbId'
+            ? 'tvdb'
+            : undefined;
+    if (namespace) add(namespace, parsed.value);
+  }
+  return [...new Set(keys)];
+}
 
-  return items.filter((item) => {
-    const itemIds = [item.id, (item as any).imdb_id].filter(Boolean);
-    const title = (item.name || item.id).toLowerCase();
+interface CatalogDedupGroup {
+  item: MetaPreview;
+  identityKeys: Set<string>;
+  title: string;
+  year?: number;
+  country?: string;
+}
 
-    const isDuplicateById =
-      methods.includes('id') && itemIds.some((id) => seenIds.has(id));
-    const isDuplicateByTitle =
-      methods.includes('title') && seenTitles.has(title);
+function catalogIdentityNamespaces(keys: Iterable<string>): Set<string> {
+  return new Set(
+    [...keys].map((key) => key.slice(0, key.indexOf(':'))).filter(Boolean)
+  );
+}
 
-    if (isDuplicateById || isDuplicateByTitle) {
-      return false;
+function sameCatalogTitle(
+  group: CatalogDedupGroup,
+  item: MetaPreview,
+  itemIdentityKeys: Set<string>
+): boolean {
+  const title = catalogTitle(item);
+  if (!title || !group.title || title !== group.title) return false;
+  const groupNamespaces = catalogIdentityNamespaces(group.identityKeys);
+  const itemNamespaces = catalogIdentityNamespaces(itemIdentityKeys);
+  const sharedNamespace = [...groupNamespaces].some((namespace) =>
+    itemNamespaces.has(namespace)
+  );
+  if (
+    sharedNamespace &&
+    ![...itemIdentityKeys].some((key) => group.identityKeys.has(key))
+  ) {
+    return false;
+  }
+  const year = catalogYear(item);
+  if (group.year !== undefined && year !== undefined && group.year !== year) {
+    return false;
+  }
+  const country = catalogCountry(item);
+  return !(group.country && country && group.country !== country);
+}
+
+/**
+ * Deduplicate catalog records from different providers without collapsing
+ * same-title reboots. Provider IDs are the strongest key; title matching is
+ * only allowed when normalized titles agree and available years/countries do
+ * not conflict. Duplicate records are merged so artwork, links, ratings, and
+ * descriptions are retained instead of silently dropping the later source.
+ */
+export function deduplicateCatalogItems(
+  items: MetaPreview[],
+  methods: ('id' | 'title')[] = ['id', 'title'],
+  type = 'series'
+): MetaPreview[] {
+  if (methods.length === 0 || items.length < 2) return items;
+
+  const groups: CatalogDedupGroup[] = [];
+
+  for (const item of items) {
+    const identityKeys = new Set(catalogIdentityKeys(item, type));
+    const matches = groups.filter((group) => {
+      const identityMatch =
+        methods.includes('id') &&
+        [...identityKeys].some((key) => group.identityKeys.has(key));
+      const titleMatch =
+        methods.includes('title') &&
+        sameCatalogTitle(group, item, identityKeys);
+      return identityMatch || titleMatch;
+    });
+
+    if (matches.length === 0) {
+      groups.push({
+        item,
+        identityKeys,
+        title: catalogTitle(item),
+        year: catalogYear(item),
+        country: catalogCountry(item),
+      });
+      continue;
     }
 
-    itemIds.forEach((id) => seenIds.add(id));
-    seenTitles.add(title);
-    return true;
-  });
+    const target = matches[0]!;
+    target.item = mergeCatalogPreview(target.item, item);
+    for (const key of identityKeys) target.identityKeys.add(key);
+    // Keep the blocking facts in sync with the enriched canonical record. This
+    // prevents a sparse first record from becoming a bridge that incorrectly
+    // merges a later reboot with a different year or country.
+    target.title = catalogTitle(target.item);
+    target.year = catalogYear(target.item);
+    target.country = catalogCountry(target.item);
+  }
+  return groups.map((group) => group.item);
 }
 
 export async function getMergedCatalog(
@@ -604,11 +814,15 @@ export async function getMergedCatalog(
   const extrasForCacheKey = new ExtrasParser(extras);
   extrasForCacheKey.skip = undefined;
   const extrasCacheKeyPart = extrasForCacheKey.toString();
+  const deduplicationMethods = mergedCatalog.deduplicationMethods ?? [
+    'id',
+    'title',
+  ];
 
   const configHash = getSimpleTextHash(
     JSON.stringify({
       catalogIds: mergedCatalog.catalogIds,
-      deduplicationMethods: mergedCatalog.deduplicationMethods,
+      deduplicationMethods,
       mergeMethod: mergedCatalog.mergeMethod,
     })
   );
@@ -862,10 +1076,7 @@ export async function getMergedCatalog(
     'merged catalog items before deduplication'
   );
 
-  allItems = deduplicateMergedCatalog(
-    allItems,
-    mergedCatalog.deduplicationMethods
-  );
+  allItems = deduplicateCatalogItems(allItems, deduplicationMethods, type);
 
   const shuffleCacheKey = `${baseCacheKey}-skip=${requestedSkip}-shuffle`;
 
@@ -942,7 +1153,11 @@ export async function getCatalog(
   );
 
   // If this is the watchlist catalog, normalize any single-season/episode entries to the whole series
-  if (result.success && (actualCatalogId.includes('watchlist') || actualCatalogId.includes('tc-watchlist'))) {
+  if (
+    result.success &&
+    (actualCatalogId.includes('watchlist') ||
+      actualCatalogId.includes('tc-watchlist'))
+  ) {
     result.items = result.items.map((item) => {
       if (item.type === 'series' && item.id && item.id.includes(':')) {
         const rootId = item.id.split(':')[0];

@@ -3,6 +3,7 @@ import { appConfig } from '../utils/index.js';
 import { makeRequest } from '../utils/http.js';
 import { createLogger } from '../logging/logger.js';
 import type { ParsedMeta } from '../db/schemas.js';
+import type { Metadata } from './utils.js';
 
 const logger = createLogger('tvmaze');
 const TVMAZE_BASE = 'https://api.tvmaze.com';
@@ -15,6 +16,11 @@ interface TvMazeShow {
   id: number;
   name: string;
   premiered?: string | null;
+  ended?: string | null;
+  language?: string | null;
+  genres?: string[] | null;
+  runtime?: number | null;
+  country?: { code?: string | null } | null;
 }
 
 interface TvMazeEpisode {
@@ -228,5 +234,36 @@ export async function supplementSeriesMetaWithTvMaze(
         Number(a.season ?? 0) - Number(b.season ?? 0) ||
         Number(a.episode ?? 0) - Number(b.episode ?? 0)
     ),
+  };
+}
+
+/**
+ * Return the keyless TVMaze portion of the federated metadata record. This is
+ * deliberately limited to show-level facts; episode artwork and numbering are
+ * supplied by supplementSeriesMetaWithTvMaze so a stream metadata request does
+ * not fetch the full episode list unnecessarily.
+ */
+export async function getTvMazeMetadata(
+  id: string
+): Promise<Metadata | undefined> {
+  if (!isSupportedSeriesId(id)) return undefined;
+  const show = await lookupShow(id, { type: 'series' } as ParsedMeta);
+  if (!show) return undefined;
+
+  const year = show.premiered
+    ? new Date(show.premiered).getFullYear()
+    : undefined;
+  const yearEnd = show.ended ? new Date(show.ended).getFullYear() : undefined;
+  return {
+    title: show.name,
+    titles: [{ title: show.name, language: 'en' }],
+    year: year && !Number.isNaN(year) ? year : undefined,
+    yearEnd: yearEnd && !Number.isNaN(yearEnd) ? yearEnd : undefined,
+    originalLanguage: show.language ?? undefined,
+    country: show.country?.code ?? undefined,
+    runtime: show.runtime ?? undefined,
+    genres: show.genres ?? undefined,
+    firstAiredDate: show.premiered ?? undefined,
+    lastAiredDate: show.ended ?? undefined,
   };
 }

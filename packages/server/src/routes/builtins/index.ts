@@ -17,4 +17,3 @@ export { default as kurato } from './kurato.js';
 export { default as deepbridSubtitles } from './deepbrid-subtitles.js';
 
 export { default as harbrr } from './harbrr.js';
-export { default as floatplane } from './floatplane.js';

@@ -9,6 +9,9 @@ import {
   isTrustedTorrentClawUrl,
   isUnsafeTorrentClawStream,
   matchTorrentClawTorrent,
+  isRetryableTorrentClawStatus,
+  parseTorrentClawSearchResponse,
+  torrentClawRetryDelayMs,
   type TorrentClawApiTorrent,
 } from './torrentclaw-api.js';
 import { TorrentClawStreamParser } from './torrentclaw.js';
@@ -196,4 +199,34 @@ test('sends service auth only to trusted TorrentClaw HTTPS manifests', () => {
     isTrustedTorrentClawUrl('https://torrentclaw.com.evil.test'),
     false
   );
+});
+
+test('keeps future TorrentClaw metadata fields and ignores malformed entries', () => {
+  const parsed = parseTorrentClawSearchResponse(
+    {
+      results: [
+        {
+          imdbId: 'tt123',
+          torrents: [
+            { rawTitle: 'Future release', futureVerification: { score: 99 } },
+            null,
+            'not a torrent',
+          ],
+        },
+      ],
+    },
+    'tt123'
+  );
+  assert.equal(parsed.length, 1);
+  assert.deepEqual(parsed[0].futureVerification, { score: 99 });
+  assert.deepEqual(parseTorrentClawSearchResponse(null, 'tt123'), []);
+});
+
+test('retries only transient TorrentClaw statuses with bounded delays', () => {
+  assert.equal(isRetryableTorrentClawStatus(503), true);
+  assert.equal(isRetryableTorrentClawStatus(404), false);
+  assert.equal(torrentClawRetryDelayMs(503, null, 1), 200);
+  assert.equal(torrentClawRetryDelayMs(503, '0.5', 1), 500);
+  assert.equal(torrentClawRetryDelayMs(503, '10', 1), 1500);
+  assert.equal(torrentClawRetryDelayMs(429, null, 3), undefined);
 });

@@ -87,7 +87,6 @@ import { HdHubPreset } from './hdhub.js';
 import { KuratoPreset } from './kurato.js';
 import { BaguettioPreset } from './baguettio.js';
 import { Preset } from './index.js';
-import { FloatplanePreset } from './floatplane.js';
 
 let PRESET_LIST: string[] = [
   'custom',
@@ -175,7 +174,6 @@ let PRESET_LIST: string[] = [
   'more-like-this',
   'content-deep-dive',
   'kurato',
-  'floatplane',
 ].filter(Boolean);
 
 export class PresetManager {
@@ -317,8 +315,6 @@ export class PresetManager {
         return AICompanionPreset;
       case 'stremio-gdrive':
         return GDrivePreset;
-      case 'floatplane':
-        return FloatplanePreset;
       case 'torbox-search':
         return TorBoxSearchPreset;
       case 'torznab':

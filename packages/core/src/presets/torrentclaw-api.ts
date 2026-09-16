@@ -10,6 +10,8 @@ const API_BASE_URL = 'https://torrentclaw.com';
 const LIVE_TTL_MS = 90_000;
 const STATIC_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 1_000;
+const TORRENTCLAW_MAX_ATTEMPTS = 3;
+const TORRENTCLAW_MAX_RETRY_DELAY_MS = 1_500;
 const logger = createLogger('torrentclaw-api');
 
 export type TorrentClawApiTorrent = {
@@ -41,6 +43,8 @@ export type TorrentClawApiTorrent = {
   season?: number | null;
   episode?: number | null;
   subtitleLanguages?: string[] | null;
+  /** Forward-compatible fields from the TorrentClaw API. */
+  [key: string]: unknown;
 };
 
 export type TorrentClawServiceConfig = {
@@ -179,6 +183,72 @@ export function torrentClawAuthScope(apiKey?: string): string {
   return apiKey ? getSimpleTextHash(apiKey).slice(0, 16) : 'anonymous';
 }
 
+const RETRYABLE_TORRENTCLAW_STATUSES = new Set([429, 502, 503, 504]);
+
+export function isRetryableTorrentClawStatus(status: number): boolean {
+  return RETRYABLE_TORRENTCLAW_STATUSES.has(status);
+}
+
+function retryAfterMs(
+  value: string | null,
+  now = Date.now()
+): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1_000;
+  }
+  const date = Date.parse(value);
+  if (!Number.isFinite(date)) return undefined;
+  return Math.max(0, date - now);
+}
+
+/**
+ * Keep transient TorrentClaw failures from turning into missing enrichment,
+ * while bounding the extra latency added to a stream request.
+ */
+export function torrentClawRetryDelayMs(
+  status: number,
+  retryAfter: string | null,
+  attempt: number,
+  now = Date.now()
+): number | undefined {
+  if (
+    !isRetryableTorrentClawStatus(status) ||
+    attempt >= TORRENTCLAW_MAX_ATTEMPTS
+  ) {
+    return undefined;
+  }
+  const serverDelay = retryAfterMs(retryAfter, now);
+  const backoff = 200 * 2 ** Math.max(0, attempt - 1);
+  return Math.min(
+    TORRENTCLAW_MAX_RETRY_DELAY_MS,
+    Math.max(0, serverDelay ?? backoff)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse the public search envelope defensively while retaining fields added by
+ * newer TorrentClaw API versions for downstream formatting and diagnostics.
+ */
+export function parseTorrentClawSearchResponse(
+  value: unknown,
+  requestedImdbId: string
+): TorrentClawApiTorrent[] {
+  if (!isRecord(value) || !Array.isArray(value.results)) return [];
+  const requested = requestedImdbId.toLowerCase();
+  const result = value.results.find(
+    (item) =>
+      isRecord(item) && String(item.imdbId || '').toLowerCase() === requested
+  );
+  if (!isRecord(result) || !Array.isArray(result.torrents)) return [];
+  return result.torrents.filter(isRecord) as TorrentClawApiTorrent[];
+}
+
 function streamText(stream: Stream): string {
   return [stream.name, stream.title, stream.description]
     .filter(Boolean)
@@ -295,28 +365,37 @@ async function requestTorrentClawTorrents(options: {
   if (options.type === 'series' && parts[2]) {
     url.searchParams.set('episode', parts[2]);
   }
-  const response = await makeRequest(url.toString(), {
-    timeout: options.timeout,
-    headers: {
-      Accept: 'application/json',
-      'User-Agent': 'AIOStreams TorrentClaw metadata enrichment',
-      'X-Search-Source': 'aiostreams',
-      ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`TorrentClaw enrichment failed (${response.status})`);
-  }
-  const payload = (await response.json()) as {
-    results?: Array<{ imdbId?: string | null; torrents?: unknown }>;
-  };
   const requestedId = parts[0].toLowerCase();
-  const result = (payload.results || []).find(
-    (item) => String(item.imdbId || '').toLowerCase() === requestedId
-  );
-  return Array.isArray(result?.torrents)
-    ? (result.torrents as TorrentClawApiTorrent[])
-    : [];
+  for (let attempt = 1; attempt <= TORRENTCLAW_MAX_ATTEMPTS; attempt += 1) {
+    const response = await makeRequest(url.toString(), {
+      timeout: options.timeout,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'AIOStreams TorrentClaw metadata enrichment',
+        'X-Search-Source': 'aiostreams',
+        ...(options.apiKey
+          ? { Authorization: `Bearer ${options.apiKey}` }
+          : {}),
+      },
+    });
+    if (response.ok) {
+      return parseTorrentClawSearchResponse(await response.json(), requestedId);
+    }
+    const delay = torrentClawRetryDelayMs(
+      response.status,
+      response.headers.get('Retry-After'),
+      attempt
+    );
+    if (delay === undefined) {
+      throw new Error(`TorrentClaw enrichment failed (${response.status})`);
+    }
+    logger.debug(
+      { attempt, status: response.status, delay },
+      'Retrying transient TorrentClaw enrichment failure'
+    );
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+  return [];
 }
 
 export async function getTorrentClawTorrents(options: {

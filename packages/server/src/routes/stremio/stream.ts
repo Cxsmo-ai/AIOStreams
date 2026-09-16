@@ -42,7 +42,7 @@ router.get(
 
     // Some clients and reverse proxies cache the ordinary Stremio JSON
     // response even though its stream URLs may be short-lived signed CDN
-    // URLs. Always force a fresh stream request, especially for Floatplane.
+    // URLs. Always force a fresh stream request when the source requires it.
     res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
 

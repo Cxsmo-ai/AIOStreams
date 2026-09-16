@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   isNsfwContent,
   filterNsfwCatalogItems,
+  deduplicateCatalogItems,
   normalizeSeriesCatalogItems,
 } from './catalog.js';
 import type { MetaPreview } from '../db/schemas.js';
@@ -119,4 +120,114 @@ test('series normalization supports TVDB and TMDB without changing movies', () =
     { id: 'tt1234567:1:1', type: 'movie', name: 'Movie', poster: 'movie.jpg' },
   ];
   assert.deepEqual(normalizeSeriesCatalogItems(movies, 'movie'), movies);
+});
+
+test('catalog dedup merges provider variants and keeps the richest fields', () => {
+  const result = deduplicateCatalogItems([
+    {
+      id: 'tvdb:81189',
+      type: 'series',
+      name: 'Kitchen Nightmares (2007)',
+      releaseInfo: '2007-',
+      poster: null,
+      description: 'A cooking show.',
+      country: 'US',
+    },
+    {
+      id: 'tt0988818',
+      type: 'series',
+      name: 'Kitchen Nightmares',
+      releaseInfo: 2007,
+      poster: 'https://img.example/kitchen.jpg',
+      description: 'Gordon Ramsay visits struggling restaurants.',
+      genres: ['Reality'],
+      trailers: [{ source: 'yt', type: 'Trailer', video_id: 'abc' }],
+      imdb_id: 'tt0988818',
+      country: 'US',
+    },
+  ] as MetaPreview[]);
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, 'tt0988818');
+  assert.equal(result[0].poster, 'https://img.example/kitchen.jpg');
+  assert.equal(
+    result[0].description,
+    'Gordon Ramsay visits struggling restaurants.'
+  );
+  assert.deepEqual(result[0].genres, ['Reality']);
+  assert.equal(result[0].trailers?.length, 1);
+});
+
+test('catalog dedup does not merge same-title reboots with conflicting identity facts', () => {
+  const result = deduplicateCatalogItems([
+    {
+      id: 'tt1111111',
+      type: 'series',
+      name: 'The Office',
+      releaseInfo: 2001,
+      country: 'GB',
+    },
+    {
+      id: 'tt2222222',
+      type: 'series',
+      name: 'The Office',
+      releaseInfo: 2005,
+      country: 'US',
+    },
+  ] as MetaPreview[]);
+
+  assert.deepEqual(
+    result.map((item) => item.id),
+    ['tt1111111', 'tt2222222']
+  );
+});
+
+test('catalog dedup does not merge distinct records from one provider in the same year', () => {
+  const result = deduplicateCatalogItems([
+    { id: 'tmdb:101', type: 'series', name: 'The Bridge', releaseInfo: 2013 },
+    { id: 'tmdb:202', type: 'series', name: 'The Bridge', releaseInfo: 2013 },
+  ] as MetaPreview[]);
+
+  assert.deepEqual(
+    result.map((item) => item.id),
+    ['tmdb:101', 'tmdb:202']
+  );
+});
+
+test('catalog dedup does not let a sparse record bridge conflicting reboots', () => {
+  const result = deduplicateCatalogItems([
+    { id: 'tvdb:301', type: 'series', name: 'The Bridge' },
+    { id: 'tt3010001', type: 'series', name: 'The Bridge', releaseInfo: 2013 },
+    { id: 'tt3010002', type: 'series', name: 'The Bridge', releaseInfo: 2024 },
+  ] as MetaPreview[]);
+
+  assert.deepEqual(
+    result.map((item) => item.id),
+    ['tt3010001', 'tt3010002']
+  );
+  assert.equal(result[0]?.releaseInfo, 2013);
+});
+
+test('catalog dedup uses explicit cross-provider IDs when titles differ', () => {
+  const result = deduplicateCatalogItems([
+    {
+      id: 'tmdb:123',
+      type: 'series',
+      name: 'The Great Kitchen Rescue',
+      tmdb_id: 123,
+      poster: 'tmdb.jpg',
+    },
+    {
+      id: 'tvdb:456',
+      type: 'series',
+      name: 'Kitchen Rescue',
+      tvdb_id: 456,
+      tmdb_id: 123,
+      description: 'Long description',
+    },
+  ] as MetaPreview[]);
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].tmdb_id, 123);
+  assert.equal(result[0].description, 'Long description');
 });
