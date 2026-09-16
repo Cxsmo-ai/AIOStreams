@@ -9,6 +9,7 @@ import {
 import { Wrapper } from './wrapper.js';
 import { createPosterService } from '../poster/index.js';
 import { getAddonName } from '../utils/general.js';
+import { IdParser } from '../utils/id-parser.js';
 import type {
   MetaPreview,
   MergedCatalog,
@@ -24,6 +25,128 @@ import {
 } from './caches.js';
 
 const logger = createLogger('core');
+
+function hasCatalogValue(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function rootSeriesCatalogId(id: string): string {
+  const parsed = IdParser.parse(id, 'series');
+  if (!parsed || (!parsed.season && !parsed.episode)) return id;
+
+  // Catalog providers occasionally expose one preview per season/episode using
+  // the Stremio playback-ID suffix. A series catalog must point at the root
+  // series ID so the client opens one show with its complete season list.
+  const suffix =
+    parsed.season && parsed.episode
+      ? `:${parsed.season}:${parsed.episode}`
+      : `:${parsed.episode}`;
+  return id.endsWith(suffix) ? id.slice(0, -suffix.length) : id;
+}
+
+function seriesTitleWithoutSeasonSuffix(name: string): string {
+  return name
+    .replace(/\s*[-:|]?\s*(?:season|series)\s*\d+\s*$/i, '')
+    .replace(/\s*[-:|]?\s*s\d{1,2}(?:e\d{1,4})?\s*$/i, '')
+    .trim();
+}
+
+function withoutSeriesEpisodeFields(
+  item: MetaPreview,
+  id: string
+): MetaPreview {
+  const normalized = { ...item, id } as MetaPreview & {
+    season?: unknown;
+    episode?: unknown;
+  };
+  delete normalized.season;
+  delete normalized.episode;
+  return normalized;
+}
+
+function mergeCatalogPreview(
+  primary: MetaPreview,
+  fallback: MetaPreview
+): MetaPreview {
+  const merged = { ...fallback, ...primary };
+
+  // Prefer a populated value, while allowing a root preview to replace a
+  // season-only placeholder. This keeps one stable poster and useful text.
+  for (const key of [
+    'name',
+    'poster',
+    'posterShape',
+    'description',
+    'imdbRating',
+    'releaseInfo',
+  ] as const) {
+    if (!hasCatalogValue(primary[key]) && hasCatalogValue(fallback[key])) {
+      (merged as any)[key] = fallback[key];
+    }
+  }
+
+  if (primary.genres || fallback.genres) {
+    merged.genres = [
+      ...new Set([...(fallback.genres ?? []), ...(primary.genres ?? [])]),
+    ];
+  }
+  if (
+    (!primary.links || primary.links.length === 0) &&
+    fallback.links?.length
+  ) {
+    merged.links = fallback.links;
+  }
+  if (
+    (!primary.trailers || primary.trailers.length === 0) &&
+    fallback.trailers?.length
+  ) {
+    merged.trailers = fallback.trailers;
+  }
+  return merged;
+}
+
+/**
+ * Catalog providers sometimes return a series once for every season or first
+ * episode (for example `tt1234567:1:1` through `tt1234567:10:1`). Those are
+ * playback IDs, not distinct catalog titles. Canonicalize only recognized
+ * series IDs and merge the previews so Stremio shows one poster/card for the
+ * complete series. Movies and unknown/provider-specific IDs are unchanged.
+ */
+export function normalizeSeriesCatalogItems(
+  items: MetaPreview[],
+  type: string
+): MetaPreview[] {
+  if (type !== 'series' || items.length === 0) return items;
+
+  const grouped = new Map<string, { item: MetaPreview; root: boolean }>();
+  for (const item of items) {
+    const rootId = rootSeriesCatalogId(item.id);
+    const root = rootId === item.id;
+    const normalized = withoutSeriesEpisodeFields(item, rootId);
+    if (!root && typeof normalized.name === 'string') {
+      const canonicalTitle = seriesTitleWithoutSeasonSuffix(normalized.name);
+      if (canonicalTitle) normalized.name = canonicalTitle;
+    }
+    const existing = grouped.get(rootId);
+
+    if (!existing) {
+      grouped.set(rootId, { item: normalized, root });
+      continue;
+    }
+
+    // A true root preview is more authoritative than a season-generated one,
+    // but retain useful poster/text fields from both entries.
+    if (root && !existing.root) {
+      grouped.set(rootId, {
+        item: mergeCatalogPreview(normalized, existing.item),
+        root: true,
+      });
+    } else {
+      existing.item = mergeCatalogPreview(existing.item, normalized);
+    }
+  }
+  return [...grouped.values()].map(({ item }) => item);
+}
 
 export function convertDiscoverDeepLinks(
   ctx: Pick<AIOStreamsContext, 'addons' | 'manifestUrl'>,
@@ -157,6 +280,8 @@ export async function fetchRawCatalogItems(
         }
       } catch {}
     }
+
+    catalog = normalizeSeriesCatalogItems(catalog, actualType);
 
     logger.debug(
       {
