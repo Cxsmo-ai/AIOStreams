@@ -57,6 +57,7 @@ import {
   type AnalyticsServiceBreakdown,
 } from '../analytics/index.js';
 import type { AddonDispositionMap } from '../streams/fetcher.js';
+import { supplementSeriesMetaWithTvMaze } from '../metadata/tvmaze.js';
 
 const logger = createLogger('core');
 
@@ -1135,7 +1136,7 @@ export async function getMeta(
       'trying addon for meta resource'
     );
     try {
-      const meta = await new Wrapper(candidate.addon).getMeta(type, id);
+      let meta = await new Wrapper(candidate.addon).getMeta(type, id);
       logger.debug(
         { addon: candidate.addon.name, instanceId: candidate.instanceId },
         'successfully got meta from addon'
@@ -1144,6 +1145,7 @@ export async function getMeta(
         logger.warn({ id, name: meta.name }, 'meta is NSFW, filtering out');
         return { success: false, data: null, errors: [] };
       }
+      meta = await supplementSeriesMetaWithTvMaze(id, meta);
       if (!meta.poster && /^tt\d+/i.test(id)) {
         meta.poster = `https://images.metahub.space/poster/medium/${id}/img.jpg`;
       }
