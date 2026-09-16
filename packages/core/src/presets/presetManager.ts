@@ -34,6 +34,7 @@ import { DebridioIC4APreset } from './debridioIc4a.js';
 import { TorrentCatalogsPreset } from './torrentCatalogs.js';
 import { StreamingCatalogsPreset } from './streamingCatalogs.js';
 import { AnimeCatalogsPreset } from './animeCatalogs.js';
+import { CinemetaCatalogsPreset } from './cinemetaCatalogs.js';
 import { DoctorWhoUniversePreset } from './doctorWhoUniverse.js';
 import { WebStreamrPreset } from './webstreamr.js';
 import { TMDBAddonPreset } from './tmdb.js';
@@ -154,6 +155,7 @@ let PRESET_LIST: string[] = [
   'debridio-ic4a',
   'streaming-catalogs',
   'anime-catalogs',
+  'cinemeta-catalogs',
   'torrent-catalogs',
   'rpdb-catalogs',
   'tmdb-collections',
@@ -267,6 +269,8 @@ export class PresetManager {
         return StreamingCatalogsPreset;
       case 'anime-catalogs':
         return AnimeCatalogsPreset;
+      case 'cinemeta-catalogs':
+        return CinemetaCatalogsPreset;
       case 'torrent-catalogs':
         return TorrentCatalogsPreset;
       case 'rpdb-catalogs':

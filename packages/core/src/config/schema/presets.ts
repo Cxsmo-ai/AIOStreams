@@ -456,6 +456,13 @@ export const presetsSchema = {
     timeoutEnv: 'DEFAULT_ANIME_CATALOGS_TIMEOUT',
     userAgentEnv: 'DEFAULT_ANIME_CATALOGS_USER_AGENT',
   }),
+  cinemetaCatalogs: basicPreset({
+    label: 'Cinemeta Catalogs',
+    default: ['https://v3-cinemeta.strem.io'],
+    envBase: 'CINEMETA_CATALOGS_URL',
+    timeoutEnv: 'DEFAULT_CINEMETA_CATALOGS_TIMEOUT',
+    userAgentEnv: 'DEFAULT_CINEMETA_CATALOGS_USER_AGENT',
+  }),
   doctorWhoUniverse: basicPreset({
     label: 'Doctor Who Universe',
     default: ['https://new-who.onrender.com'],
