@@ -180,6 +180,34 @@ test('migrates legacy Unarr credentials into the TorrentClaw service', () => {
   assert.equal('apiUrl' in options, false);
 });
 
+test('drops retired services without invalidating the rest of a configuration', () => {
+  const migrated = applyMigrations({
+    services: [
+      {
+        id: 'floatplane',
+        enabled: true,
+        credentials: { token: 'legacy-value' },
+      },
+      {
+        id: constants.TORRENTCLAW_SERVICE,
+        enabled: true,
+        credentials: { apiKey: 'tc_test-key' },
+      },
+    ],
+    serviceWrap: {
+      services: ['floatplane', constants.TORRENTCLAW_SERVICE],
+    },
+  });
+
+  assert.deepEqual(
+    migrated.services?.map((service) => service.id),
+    [constants.TORRENTCLAW_SERVICE]
+  );
+  assert.deepEqual(migrated.serviceWrap?.services, [
+    constants.TORRENTCLAW_SERVICE,
+  ]);
+});
+
 test('sends service auth only to trusted TorrentClaw HTTPS manifests', () => {
   const official = buildTorrentClawHeaders({
     manifestUrl: 'https://torrentclaw.com/api/stremio/manifest.json',

@@ -515,6 +515,40 @@ function removeInvalidPresetReferences(config: UserData) {
 }
 
 export function applyMigrations(config: any): UserData {
+  // Services can be removed from the product while older saved configurations
+  // still contain them.  Do not let one retired service make the entire
+  // configuration (and therefore every catalog/metadata endpoint) invalid.
+  // Keep malformed entries in place so the normal schema can still report a
+  // useful validation error; only discard well-formed, unsupported IDs.
+  if (Array.isArray(config?.services)) {
+    const supportedServiceIds = new Set<string>(constants.SERVICES);
+    const removedServiceIds = config.services
+      .map((service: any) => service?.id)
+      .filter(
+        (id: unknown): id is string =>
+          typeof id === 'string' && !supportedServiceIds.has(id)
+      );
+
+    if (removedServiceIds.length > 0) {
+      config.services = config.services.filter(
+        (service: any) =>
+          typeof service?.id !== 'string' ||
+          supportedServiceIds.has(service.id)
+      );
+
+      if (config.serviceWrap?.services) {
+        config.serviceWrap.services = config.serviceWrap.services.filter(
+          (id: string) => supportedServiceIds.has(id)
+        );
+      }
+
+      logger.warn(
+        { services: [...new Set(removedServiceIds)] },
+        'removed unsupported legacy services from saved configuration'
+      );
+    }
+  }
+
   // TorrentClaw authentication now has one source of truth in Services. Move
   // legacy Unarr per-addon credentials there and remove them from preset data.
   if (Array.isArray(config?.presets)) {
