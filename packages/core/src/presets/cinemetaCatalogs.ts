@@ -65,6 +65,7 @@ export class CinemetaCatalogsPreset extends Preset {
         manifestUrl,
         enabled: true,
         library: false,
+        pinPosition: 'top',
         resources: options.resources || this.METADATA.SUPPORTED_RESOURCES,
         timeout: options.timeout || this.METADATA.TIMEOUT,
         preset: {

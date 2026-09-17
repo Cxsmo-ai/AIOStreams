@@ -515,6 +515,28 @@ function removeInvalidPresetReferences(config: UserData) {
 }
 
 export function applyMigrations(config: any): UserData {
+  // Keep the public Cinemeta catalogs available for every existing profile.
+  // This is deliberately done as a migration rather than by changing the
+  // persisted config: older profiles get the source on every load, while
+  // profiles created before this feature do not need a manual re-save.
+  if (Array.isArray(config?.presets)) {
+    const cinemetaPresets = config.presets.filter(
+      (preset: any) => preset?.type === 'cinemeta-catalogs'
+    );
+    if (cinemetaPresets.length === 0) {
+      config.presets.push({
+        type: 'cinemeta-catalogs',
+        instanceId: 'cinemeta',
+        enabled: true,
+        options: {},
+      });
+    } else {
+      // The user requested Cinemeta to remain on; re-enable legacy disabled
+      // instances without changing their custom URL/options.
+      for (const preset of cinemetaPresets) preset.enabled = true;
+    }
+  }
+
   // Services can be removed from the product while older saved configurations
   // still contain them.  Do not let one retired service make the entire
   // configuration (and therefore every catalog/metadata endpoint) invalid.

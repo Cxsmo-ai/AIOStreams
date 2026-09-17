@@ -208,6 +208,29 @@ test('drops retired services without invalidating the rest of a configuration', 
   ]);
 });
 
+test('keeps Cinemeta enabled for existing profiles and adds it to older profiles', () => {
+  const older = applyMigrations({ presets: [] });
+  const added = older.presets?.find(
+    (preset) => preset.type === 'cinemeta-catalogs'
+  );
+  assert.equal(added?.instanceId, 'cinemeta');
+  assert.equal(added?.enabled, true);
+
+  const existing = applyMigrations({
+    presets: [
+      {
+        type: 'cinemeta-catalogs',
+        instanceId: 'my-cinemeta',
+        enabled: false,
+        options: { url: 'https://v3-cinemeta.strem.io' },
+      },
+    ],
+  });
+  assert.equal(existing.presets?.length, 1);
+  assert.equal(existing.presets?.[0]?.enabled, true);
+  assert.equal(existing.presets?.[0]?.options.url, 'https://v3-cinemeta.strem.io');
+});
+
 test('sends service auth only to trusted TorrentClaw HTTPS manifests', () => {
   const official = buildTorrentClawHeaders({
     manifestUrl: 'https://torrentclaw.com/api/stremio/manifest.json',

@@ -391,6 +391,8 @@ function buildMergedCatalogExtras(
 }
 
 export function buildResources(ctx: AIOStreamsContext): void {
+  const cinemetaCatalogKeys = new Set<string>();
+
   for (const [instanceId, manifest] of Object.entries(ctx.manifests)) {
     if (!manifest) continue;
 
@@ -440,6 +442,8 @@ export function buildResources(ctx: AIOStreamsContext): void {
       logger.error({ instanceId }, 'addon not found during resource build');
       continue;
     }
+
+    const isCinemetaAddon = addon.preset.type === 'cinemeta-catalogs';
 
     // Filter and merge resources
     for (const resource of addonResources) {
@@ -520,6 +524,8 @@ export function buildResources(ctx: AIOStreamsContext): void {
             });
           }
         } else {
+          const catalogKey = `${addon.instanceId}.${catalog.id}-${catalog.type}`;
+          if (isCinemetaAddon) cinemetaCatalogKeys.add(catalogKey);
           ctx.finalCatalogs.push({
             ...catalog,
             id: `${addon.instanceId}.${catalog.id}`,
@@ -603,6 +609,11 @@ export function buildResources(ctx: AIOStreamsContext): void {
   if (ctx.userData.catalogModifications) {
     ctx.finalCatalogs = ctx.finalCatalogs
       .sort((a, b) => {
+        const aIsCinemeta = cinemetaCatalogKeys.has(`${a.id}-${a.type}`);
+        const bIsCinemeta = cinemetaCatalogKeys.has(`${b.id}-${b.type}`);
+        if (aIsCinemeta && !bIsCinemeta) return -1;
+        if (!aIsCinemeta && bIsCinemeta) return 1;
+
         // "What you guys should watch" / tc-watchlist always floats to the very top
         const aIsWatchlist = a.id.includes('tc-watchlist') || a.name === 'What you guys should watch';
         const bIsWatchlist = b.id.includes('tc-watchlist') || b.name === 'What you guys should watch';
@@ -633,6 +644,11 @@ export function buildResources(ctx: AIOStreamsContext): void {
         }
 
         const key = `${catalog.id}-${catalog.type}`;
+        if (cinemetaCatalogKeys.has(key)) {
+          // Cinemeta is the built-in baseline catalog source. Keep it visible
+          // even when an older catalog-modification list marked it disabled.
+          return true;
+        }
         if (catalogsInMergedCatalogs.has(key)) {
           logger.debug(
             { id: catalog.id, type: catalog.type },
@@ -695,6 +711,25 @@ export function buildResources(ctx: AIOStreamsContext): void {
         }
         return catalog;
       });
+  } else if (cinemetaCatalogKeys.size > 0) {
+    // Without explicit catalog modifications, preserve every catalog's
+    // natural order but move Cinemeta catalogs as one stable block to the top.
+    const originalOrder = new Map(
+      ctx.finalCatalogs.map((catalog, index) => [
+        `${catalog.id}-${catalog.type}`,
+        index,
+      ])
+    );
+    ctx.finalCatalogs.sort((a, b) => {
+      const aIsCinemeta = cinemetaCatalogKeys.has(`${a.id}-${a.type}`);
+      const bIsCinemeta = cinemetaCatalogKeys.has(`${b.id}-${b.type}`);
+      if (aIsCinemeta && !bIsCinemeta) return -1;
+      if (!aIsCinemeta && bIsCinemeta) return 1;
+      return (
+        (originalOrder.get(`${a.id}-${a.type}`) ?? 0) -
+        (originalOrder.get(`${b.id}-${b.type}`) ?? 0)
+      );
+    });
   }
 }
 
