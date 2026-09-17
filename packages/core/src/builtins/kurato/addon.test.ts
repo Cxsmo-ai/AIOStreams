@@ -178,6 +178,15 @@ test('Kurato can omit watchlist catalogs without affecting personalized catalogs
   assert.deepEqual(manifest.resources, ['catalog', 'meta']);
 });
 
+test('Kurato marks its catalogs as optional-search catalogs for Stremio clients', () => {
+  const manifest = new KuratoAddon(config, mockFetch().fetchFn).getManifest();
+  for (const catalog of manifest.catalogs ?? []) {
+    const search = catalog.extra?.find((extra) => extra.name === 'search');
+    if (catalog.id.includes('watchlist')) continue;
+    assert.deepEqual(search, { name: 'search', isRequired: false });
+  }
+});
+
 test('Kurato exposes collection contents and generated recommendation catalogs', async () => {
   const addon = new KuratoAddon(config, mockFetch().fetchFn);
   const generated = await addon.getCatalog('movie', 'kurato-generated-movie');

@@ -245,16 +245,16 @@ export class KuratoAddon {
       // try an installed ID-matching provider first, while retaining Kurato
       // as a safe fallback when no other provider can answer the request.
       catalogs: [
-        { type: 'movie', id: 'kurato-for-you-movie', name: 'Kurato · For You Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
-        { type: 'series', id: 'kurato-for-you-series', name: 'Kurato · For You Series', extra: [{ name: 'search' }, { name: 'skip' }] },
-        { type: 'movie', id: 'kurato-ai-discover-movie', name: 'Kurato · AI Discover Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
-        { type: 'series', id: 'kurato-ai-discover-series', name: 'Kurato · AI Discover Series', extra: [{ name: 'search' }, { name: 'skip' }] },
+        { type: 'movie', id: 'kurato-for-you-movie', name: 'Kurato · For You Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
+        { type: 'series', id: 'kurato-for-you-series', name: 'Kurato · For You Series', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
+        { type: 'movie', id: 'kurato-ai-discover-movie', name: 'Kurato · AI Discover Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
+        { type: 'series', id: 'kurato-ai-discover-series', name: 'Kurato · AI Discover Series', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
         { type: 'movie', id: 'kurato-watchlist-movie', name: 'Kurato · Watchlist Movies', extra: [{ name: 'skip' }] },
         { type: 'series', id: 'kurato-watchlist-series', name: 'Kurato · Watchlist Series', extra: [{ name: 'skip' }] },
-        { type: 'movie', id: 'kurato-collections-movie', name: 'Kurato · Collections Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
-        { type: 'series', id: 'kurato-collections-series', name: 'Kurato · Collections Series', extra: [{ name: 'search' }, { name: 'skip' }] },
-        { type: 'movie', id: 'kurato-generated-movie', name: 'Kurato · Generated Recommendations Movies', extra: [{ name: 'search' }, { name: 'skip' }] },
-        { type: 'series', id: 'kurato-generated-series', name: 'Kurato · Generated Recommendations Series', extra: [{ name: 'search' }, { name: 'skip' }] },
+        { type: 'movie', id: 'kurato-collections-movie', name: 'Kurato · Collections Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
+        { type: 'series', id: 'kurato-collections-series', name: 'Kurato · Collections Series', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
+        { type: 'movie', id: 'kurato-generated-movie', name: 'Kurato · Generated Recommendations Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
+        { type: 'series', id: 'kurato-generated-series', name: 'Kurato · Generated Recommendations Series', extra: [{ name: 'search', isRequired: false }, { name: 'skip' }] },
       ],
       behaviorHints: { adult: false, configurable: true, configurationRequired: true },
     };
