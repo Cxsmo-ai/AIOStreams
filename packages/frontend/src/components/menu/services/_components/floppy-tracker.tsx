@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useUserData } from '@/context/userData';
-import { Alert } from '../../../ui/alert';
-import { Button } from '../../../ui/button';
+import { Alert } from '@aiostreams/ui/alert';
+import { Button } from '@aiostreams/ui/button';
 
 type ApiResult = {
   success?: boolean;

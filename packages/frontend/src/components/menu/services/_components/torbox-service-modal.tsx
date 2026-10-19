@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { LANGUAGES } from '../../../../../../core/src/utils/constants';
-import { Alert } from '../../../ui/alert';
-import { Button } from '../../../ui/button';
+import { Alert } from '@aiostreams/ui/alert';
+import { Button } from '@aiostreams/ui/button';
 import { Modal } from '../../../ui/modal';
 import { Switch } from '../../../ui/switch';
 import TemplateOption from '../../../shared/template-option';
