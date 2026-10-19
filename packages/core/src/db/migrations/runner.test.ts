@@ -60,8 +60,10 @@ test('upgrades the fork migration history without reusing upstream migration IDs
     assert.equal(pending.length, 0);
     assert.ok(applied.some((migration) => migration.name === 'anime_database'));
     assert.equal(
-      await db.maybeOne('SELECT id FROM _migrations WHERE id = 900012'),
-      null
+      (await db.maybeOne<{ name: string }>(
+        'SELECT name FROM _migrations WHERE id = 20'
+      ))?.name,
+      'addon_performance'
     );
     assert.equal(
       (await db.maybeOne<{ id: number }>(
