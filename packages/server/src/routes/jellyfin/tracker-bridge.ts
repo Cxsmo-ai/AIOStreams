@@ -30,6 +30,14 @@ const logger = createLogger('jellyfin-tracker-bridge');
 const BRIDGE_PROVIDER_ID = 'jellyfin-watch-state-bridge';
 const BATCH_SIZE = 5000;
 
+function isTrackerBridgeEnabled(): boolean {
+  try {
+    return appConfig.jellyfin?.trackerBridgeEnabled !== false;
+  } catch {
+    return true;
+  }
+}
+
 export function trackerRecordToWatchIdentity(
   record: TrackerRecord
 ): WatchIdentity | null {
@@ -99,7 +107,7 @@ export async function syncTrackerRecordsToWatchState(
   scope: WatchScope,
   db: DbDriver = getDb()
 ): Promise<{ imported: number; skipped: number }> {
-  if (appConfig.jellyfin.trackerBridgeEnabled === false) {
+  if (!isTrackerBridgeEnabled()) {
     return { imported: 0, skipped: 0 };
   }
 
@@ -257,7 +265,7 @@ export async function reportPlaybackToMergedTracker(
     sessionStartedAt?: number;
   } = {}
 ): Promise<void> {
-  if (appConfig.jellyfin.trackerBridgeEnabled === false) return;
+  if (!isTrackerBridgeEnabled()) return;
 
   const userUuid = ctx.uuid;
   const now = Date.now();
@@ -402,7 +410,7 @@ export async function reportRatingToMergedTracker(
   rating: number | null,
   item?: JellyfinItem | null
 ): Promise<void> {
-  if (appConfig.jellyfin.trackerBridgeEnabled === false) return;
+  if (!isTrackerBridgeEnabled()) return;
 
   const userUuid = ctx.uuid;
   const now = Date.now();
@@ -500,7 +508,7 @@ export async function reportListChangeToMergedTracker(
   ref: ContentRef,
   item?: JellyfinItem | null
 ): Promise<void> {
-  if (appConfig.jellyfin.trackerBridgeEnabled === false) return;
+  if (!isTrackerBridgeEnabled()) return;
   if (ref.kind === 'episode') return;
 
   const userUuid = ctx.uuid;
