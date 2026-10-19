@@ -1,0 +1,874 @@
+import type { Manifest, Meta, MetaPreview, ParsedMeta } from '../db/schemas.js';
+import type { WatchStateRow } from '../db/repositories/watch-state.js';
+import { IdParser } from '../utils/id-parser.js';
+import {
+  genresFrom,
+  imdbRatingOf,
+  parseRuntimeMs,
+  parseYear,
+  readEnrichment,
+  readVideoEnrichment,
+  toIso,
+  type EnrichedPerson,
+  type Enrichment,
+} from './enrichment.js';
+import {
+  encodeItemId,
+  genreId,
+  personId,
+  resolveMarkerId,
+  sharedEpisodeId,
+  studioId,
+  viewId,
+} from './ids.js';
+import { imageTagsFor, rememberImages } from './images.js';
+import { listPlaceholderSources, msToTicks } from './media.js';
+import { getSimpleTextHash } from '../utils/crypto.js';
+import { decodeEntities } from '../utils/entities.js';
+import type {
+  ContentDescriptor,
+  ItemImages,
+  JellyfinDescriptor,
+  JellyfinItem,
+  PersonDescriptor,
+  QueryResult,
+  UserItemDataDto,
+} from './types.js';
+
+export type Catalog = NonNullable<Manifest['catalogs']>[number];
+export type CollectionType = 'movies' | 'tvshows' | 'boxsets';
+
+export interface ItemBuildContext {
+  serverId: string;
+  userId: string;
+  uuid: string;
+  /** Whether list rows advertise placeholder versions, see `listPlaceholderSources`. */
+  listVersions: boolean;
+  markUnaired: boolean;
+}
+
+type AnyMeta = (MetaPreview | Meta) & Record<string, unknown>;
+
+const EPOCH_DATE = '2020-01-01T00:00:00.0000000Z';
+
+const DTO_VERSION = 1;
+
+function etagFor(id: string): string {
+  return getSimpleTextHash(`${DTO_VERSION}|${id}`).slice(0, 32);
+}
+
+/** Addon text can carry HTML entities, which plain-text clients print as written. */
+function overviewText(text: string | null | undefined): string | undefined {
+  return text == null ? undefined : decodeEntities(text);
+}
+
+export function listResult<T>(
+  items: T[],
+  total?: number,
+  startIndex = 0
+): QueryResult<T> {
+  return {
+    Items: items,
+    TotalRecordCount: total ?? startIndex + items.length,
+    StartIndex: startIndex,
+  };
+}
+
+export function stripInternal(item: JellyfinItem): JellyfinItem {
+  const { _aio, ...rest } = item as JellyfinItem & { _aio?: unknown };
+  return rest as JellyfinItem;
+}
+
+export function descriptorOf(
+  item: JellyfinItem
+): JellyfinDescriptor | undefined {
+  return (item as { _aio?: { descriptor?: JellyfinDescriptor } })._aio
+    ?.descriptor;
+}
+
+/** Set even when the episode is not sent as `Virtual`. */
+export function isUnairedEpisode(item: JellyfinItem): boolean {
+  return !!(item as { _aio?: { unaired?: boolean } })._aio?.unaired;
+}
+
+export function isUnairedVideo(video: SeasonGroup['videos'][number]): boolean {
+  const premiere = toIso(video.released);
+  return (
+    (video as { available?: unknown }).available === false ||
+    (premiere ? new Date(premiere).getTime() > Date.now() : false)
+  );
+}
+
+/**
+ * A video timed by a tracker. It airs at the later of the two times, so neither
+ * a fallback time in the meta nor a stale tracker airs it early, and the time
+ * then decides whether it has aired.
+ */
+export function withTrackerAirTime<V extends SeasonGroup['videos'][number]>(
+  video: V,
+  trackerAt: number
+): V {
+  const own = video.released ? Date.parse(video.released) : NaN;
+  const at = Number.isFinite(own) ? Math.max(own, trackerAt) : trackerAt;
+  const { available: _, ...rest } = video as V & { available?: unknown };
+  return { ...rest, released: new Date(at).toISOString() } as V;
+}
+
+export function defaultUserData(itemId: string): UserItemDataDto {
+  return {
+    PlaybackPositionTicks: 0,
+    PlayCount: 0,
+    IsFavorite: false,
+    Played: false,
+    Key: itemId,
+    ItemId: itemId,
+  };
+}
+
+/** Unaired episodes never count towards a played state, as in Jellyfin. */
+export function hasAired(
+  video: { released?: string | null },
+  now: number
+): boolean {
+  const at = video.released ? Date.parse(video.released) : NaN;
+  return !(at > now);
+}
+
+/** An empty count is not played: every episode is still to air. */
+export function withPlayedCounts(
+  base: UserItemDataDto,
+  played: number,
+  total: number
+): UserItemDataDto {
+  return {
+    ...base,
+    Played: total > 0 && played >= total,
+    UnplayedItemCount: total - played,
+    PlayedPercentage: total > 0 ? (played / total) * 100 : 0,
+  };
+}
+
+/** Jellyfin reads a rating from 6.5 up as a like. */
+const MIN_LIKE_RATING = 6.5;
+
+export function ratingUserData(
+  row: Pick<WatchStateRow, 'dropped' | 'likes' | 'rating'>
+): Pick<UserItemDataDto, 'Likes' | 'Rating'> {
+  const out: Pick<UserItemDataDto, 'Likes' | 'Rating'> = {};
+  if (row.rating != null) out.Rating = row.rating;
+  if (row.dropped) out.Likes = false;
+  else if (row.likes != null) out.Likes = row.likes;
+  else if (row.rating != null) out.Likes = row.rating >= MIN_LIKE_RATING;
+  return out;
+}
+
+export function userDataFromRow(
+  itemId: string,
+  row: WatchStateRow | undefined,
+  runtimeMs?: number
+): UserItemDataDto {
+  if (!row) return defaultUserData(itemId);
+  const duration = runtimeMs || row.durationMs;
+  const ud: UserItemDataDto = {
+    PlaybackPositionTicks: msToTicks(row.positionMs),
+    PlayCount: row.playCount,
+    IsFavorite: row.favorite,
+    Played: row.played,
+    Key: itemId,
+    ItemId: itemId,
+  };
+  Object.assign(ud, ratingUserData(row));
+  if (row.lastPlayedAt)
+    ud.LastPlayedDate = new Date(row.lastPlayedAt).toISOString();
+  if (duration > 0 && row.positionMs > 0) {
+    ud.PlayedPercentage = Math.min(100, (row.positionMs / duration) * 100);
+  }
+  return ud;
+}
+
+/** Stremio type -> the Jellyfin id-type parsed from the meta id. */
+export function providerIdsFor(
+  meta: { id: string; type: string },
+  enrichment?: Enrichment
+) {
+  const out: Record<string, string> = { ...(enrichment?.providerIds ?? {}) };
+  const parsed = IdParser.parse(meta.id, meta.type);
+  if (parsed && !parsed.season && !parsed.episode) {
+    const v = String(parsed.value);
+    const map: Record<string, string> = {
+      imdbId: 'Imdb',
+      themoviedbId: 'Tmdb',
+      thetvdbId: 'Tvdb',
+      kitsuId: 'Kitsu',
+      malId: 'MyAnimeList',
+      anilistId: 'AniList',
+      anidbId: 'AniDB',
+      simklId: 'Simkl',
+    };
+    const key = map[parsed.type];
+    if (key && !out[key])
+      out[key] = key === 'Imdb' && !v.startsWith('tt') ? `tt${v}` : v;
+  }
+  return out;
+}
+
+function externalUrls(
+  providerIds: Record<string, string>,
+  kind: 'movie' | 'series' | 'season' | 'episode'
+) {
+  const urls: { Name: string; Url: string }[] = [];
+  if (providerIds.Imdb)
+    urls.push({
+      Name: 'IMDb',
+      Url: `https://www.imdb.com/title/${providerIds.Imdb}`,
+    });
+  // TMDB, TVDB and Trakt ids name a movie or a show, not its parts.
+  if (kind === 'movie' || kind === 'series') {
+    const show = kind === 'series';
+    if (providerIds.Tmdb)
+      urls.push({
+        Name: 'TMDB',
+        Url: `https://www.themoviedb.org/${show ? 'tv' : 'movie'}/${providerIds.Tmdb}`,
+      });
+    if (providerIds.Tvdb)
+      urls.push({
+        Name: 'TheTVDB',
+        Url: `https://thetvdb.com/dereferrer/${show ? 'series' : 'movie'}/${providerIds.Tvdb}`,
+      });
+    if (providerIds.Trakt)
+      urls.push({
+        Name: 'Trakt',
+        Url: `https://trakt.tv/${show ? 'shows' : 'movies'}/${providerIds.Trakt}`,
+      });
+  }
+  if (providerIds.AniDB)
+    urls.push({
+      Name: 'AniDB',
+      Url: `https://anidb.net/anime/${providerIds.AniDB}`,
+    });
+  if (providerIds.MyAnimeList)
+    urls.push({
+      Name: 'MyAnimeList',
+      Url: `https://myanimelist.net/anime/${providerIds.MyAnimeList}`,
+    });
+  if (providerIds.AniList)
+    urls.push({
+      Name: 'AniList',
+      Url: `https://anilist.co/anime/${providerIds.AniList}`,
+    });
+  if (providerIds.Kitsu)
+    urls.push({
+      Name: 'Kitsu',
+      Url: `https://kitsu.app/anime/${providerIds.Kitsu}`,
+    });
+  return urls;
+}
+
+export function sortNameFor(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .replace(/\d+/g, (digits) => digits.padStart(10, '0'));
+}
+
+function peopleDtos(people: EnrichedPerson[]) {
+  return people.map((p) => {
+    const pid = personId(personDescriptorOf(p));
+    if (p.photo) rememberImages(pid, { Primary: p.photo });
+    return {
+      Name: p.name,
+      Id: pid,
+      Type: p.type,
+      Role: p.role,
+      PrimaryImageTag: p.photo
+        ? imageTagsFor({ Primary: p.photo }).ImageTags.Primary
+        : undefined,
+    };
+  });
+}
+
+function aspectRatioFor(shape: unknown): number {
+  return shape === 'landscape' ? 1.7777 : shape === 'square' ? 1 : 0.6666;
+}
+
+function baseItem(
+  ctx: ItemBuildContext,
+  id: string,
+  name: string,
+  type: string,
+  folder: boolean
+): JellyfinItem {
+  return {
+    Id: id,
+    Name: name,
+    ServerId: ctx.serverId,
+    Type: type,
+    IsFolder: folder,
+    Etag: etagFor(id),
+    DateCreated: EPOCH_DATE,
+    CanDelete: false,
+    CanDownload: false,
+    LocationType: 'FileSystem',
+    PlayAccess: 'Full',
+    SortName: sortNameFor(name),
+    Genres: [],
+    GenreItems: [],
+    People: [],
+    Studios: [],
+    Tags: [],
+    Taglines: [],
+    ProviderIds: {},
+    ExternalUrls: [],
+    RemoteTrailers: [],
+    ImageTags: {},
+    BackdropImageTags: [],
+    LockedFields: [],
+    LockData: false,
+    UserData: defaultUserData(id),
+  };
+}
+
+export function requiresGenre(c: Catalog): boolean {
+  return !!c.extra?.some((e) => e.name === 'genre' && e.isRequired);
+}
+
+export function buildView(
+  ctx: ItemBuildContext,
+  catalog: Catalog,
+  collectionType?: CollectionType
+): JellyfinItem {
+  const id = viewId(catalog.type, catalog.id);
+  const item = baseItem(ctx, id, catalog.name, 'CollectionFolder', true);
+  const images: ItemImages = {};
+  if (catalog.poster) images.Primary = catalog.poster;
+  if (catalog.background) images.Backdrop = catalog.background;
+  rememberImages(id, images);
+  return {
+    ...item,
+    ...imageTagsFor(images),
+    ...(collectionType ? { CollectionType: collectionType } : {}),
+    DisplayPreferencesId: id,
+    ChildCount: 0,
+    Path: `/aiostreams/${catalog.type}/${catalog.id}`,
+    PrimaryImageAspectRatio: 1.7777,
+    ...(requiresGenre(catalog) && { aiostreams: { genreRequired: true } }),
+    _aio: { descriptor: { k: 'view', t: catalog.type, c: catalog.id } },
+  };
+}
+
+export function buildGenre(
+  ctx: ItemBuildContext,
+  type: string,
+  catalogId: string,
+  genre: string
+): JellyfinItem {
+  const id = genreId(type, catalogId, genre);
+  return {
+    ...baseItem(ctx, id, genre, 'Genre', true),
+    _aio: { descriptor: { k: 'genre', t: type, c: catalogId, g: genre } },
+  };
+}
+
+function personDescriptorOf(p: EnrichedPerson): PersonDescriptor {
+  return { k: 'person', n: p.name, ...(p.id && { i: p.id }) };
+}
+
+export function buildPerson(
+  ctx: ItemBuildContext,
+  d: PersonDescriptor,
+  photo?: string
+): JellyfinItem {
+  const id = personId(d);
+  const item = baseItem(ctx, id, d.n, 'Person', false);
+  if (photo) {
+    item.ImageTags = imageTagsFor({ Primary: photo }).ImageTags;
+    rememberImages(id, { Primary: photo });
+    item.PrimaryImageAspectRatio = 0.6666;
+  }
+  return { ...item, _aio: { descriptor: d } };
+}
+
+export interface ContentBuildOptions {
+  parentId?: string;
+  playstate?: WatchStateRow;
+  /** Emit as a BoxSet root instead of a Movie (movie-type meta with videos). */
+  boxset?: boolean;
+  childCount?: number;
+  /** Which catalog's genre ids to point genre chips at. */
+  genreCatalog?: { type: string; id: string };
+  /** Plays on its own rather than opening a video list. */
+  leaf?: boolean;
+}
+
+export function defaultVideoIdOf(entry: unknown): string | undefined {
+  const hints = (entry as { behaviorHints?: { defaultVideoId?: unknown } })
+    ?.behaviorHints;
+  const id = hints?.defaultVideoId;
+  return typeof id === 'string' && id ? id : undefined;
+}
+
+/**
+ * Videos that are a broadcast schedule rather than episodes. Not the
+ * `hasScheduledVideos` hint, which ordinary shows with dated episodes set too.
+ */
+export function hasProgrammeVideos(
+  meta: Pick<Meta, 'videos'> | null | undefined
+): boolean {
+  const videos = meta?.videos ?? [];
+  return videos.length > 0 && videos.every((v) => !!v.startTime);
+}
+
+/** What a request knows about which types play on their own. */
+export interface LeafEvidence {
+  /** Types a sweep has decided, whichever way it decided them. */
+  decided: ReadonlySet<string>;
+  /** Of those, the ones that play. */
+  leaves: ReadonlySet<string>;
+  /** Stands in until a sweep decides. */
+  guess?: (entry: { id: string; type: string }) => boolean;
+}
+
+/**
+ * Whether an entry plays on its own, the way Stremio decides it: the
+ * `defaultVideoId` hint wins, then a meta with no videos is itself the video.
+ * A list only has previews, so the evidence answers that second question.
+ */
+export function isLeafEntry(
+  entry: { id: string; type: string; collection?: unknown },
+  evidence?: LeafEvidence
+): boolean {
+  if (entry.collection) return false;
+  if (entry.type === 'movie') return true;
+  if (defaultVideoIdOf(entry)) return true;
+  if (evidence?.decided.has(entry.type)) return evidence.leaves.has(entry.type);
+  return evidence?.guess?.(entry) ?? false;
+}
+
+export function contentDescriptor(
+  meta: { id: string; type: string },
+  boxset = false,
+  leaf = meta.type === 'movie'
+): ContentDescriptor {
+  if (boxset) return { k: 'boxset', t: meta.type, i: meta.id };
+  return leaf
+    ? { k: 'movie', t: meta.type, i: meta.id }
+    : { k: 'series', t: meta.type, i: meta.id };
+}
+
+/** The `Type` a catalog entry carries as a list item. */
+export function contentItemType(
+  type: string,
+  boxset = false,
+  leaf = type === 'movie'
+): 'Movie' | 'Series' | 'BoxSet' {
+  if (boxset) return 'BoxSet';
+  return leaf ? 'Movie' : 'Series';
+}
+
+/**
+ * Extension for a playable item's synthetic path.
+ */
+const PLAYABLE_EXT = '.mkv';
+
+/** Movie, Series or BoxSet root from a catalog entry or a full meta. */
+export function buildContentItem(
+  ctx: ItemBuildContext,
+  input: MetaPreview | Meta,
+  opts: ContentBuildOptions = {}
+): JellyfinItem {
+  const meta = input as AnyMeta;
+  const leaf = opts.leaf ?? meta.type === 'movie';
+  const descriptor = contentDescriptor(
+    { id: meta.id, type: meta.type },
+    opts.boxset,
+    leaf
+  );
+  const id = encodeItemId(descriptor);
+  const enrichment = readEnrichment(input);
+  const jellyfinType = contentItemType(
+    meta.type,
+    descriptor.k === 'boxset',
+    leaf
+  );
+  const folder = jellyfinType !== 'Movie';
+  const name = (meta.name as string | undefined) ?? meta.id;
+  const genres = genresFrom(input);
+  const providerIds = providerIdsFor(
+    { id: meta.id, type: meta.type },
+    enrichment
+  );
+  const runtimeMs = enrichment.runtimeMs ?? parseRuntimeMs(meta.runtime);
+  const premiere = enrichment.premiere ?? toIso(meta.released);
+  const year = enrichment.year ?? parseYear(meta.releaseInfo);
+
+  const images: ItemImages = {};
+  if (typeof meta.poster === 'string') images.Primary = meta.poster;
+  if (typeof meta.background === 'string') images.Backdrop = meta.background;
+  if (enrichment.logo) images.Logo = enrichment.logo;
+  if (enrichment.thumb) images.Thumb = enrichment.thumb;
+  rememberImages(id, images);
+
+  const genreCatalog = opts.genreCatalog;
+  const item: JellyfinItem = {
+    ...baseItem(ctx, id, name, jellyfinType, folder),
+    OriginalTitle: enrichment.originalTitle ?? name,
+    MediaType: jellyfinType === 'Movie' ? 'Video' : undefined,
+    DateCreated: premiere ?? EPOCH_DATE,
+    CanDownload: jellyfinType === 'Movie',
+    Overview: overviewText(meta.description as string | undefined),
+    Taglines: enrichment.tagline ? [enrichment.tagline] : [],
+    ProductionYear: year,
+    PremiereDate: premiere,
+    EndDate: jellyfinType === 'Movie' ? undefined : enrichment.endDate,
+    CommunityRating: imdbRatingOf(input),
+    CriticRating: enrichment.criticRating,
+    OfficialRating: enrichment.certification,
+    CustomRating: enrichment.customRating,
+    RunTimeTicks: runtimeMs ? msToTicks(runtimeMs) : undefined,
+    Genres: genres,
+    GenreItems: genres.map((g) => {
+      const target =
+        enrichment.genreTargets.get(g) ??
+        (genreCatalog
+          ? { type: genreCatalog.type, catalogId: genreCatalog.id }
+          : undefined);
+      return {
+        Name: g,
+        Id: target
+          ? genreId(target.type, target.catalogId, g)
+          : genreId(meta.type, '', g),
+      };
+    }),
+    People: peopleDtos(enrichment.people),
+    Studios: enrichment.studios.map((s) => ({ Name: s, Id: studioId(s) })),
+    Tags: enrichment.tags,
+    ProviderIds: providerIds,
+    ExternalUrls: externalUrls(
+      providerIds,
+      jellyfinType === 'Movie' ? 'movie' : 'series'
+    ),
+    RemoteTrailers: enrichment.trailers,
+    ...imageTagsFor(images),
+    ParentId: opts.parentId,
+    PrimaryImageAspectRatio: aspectRatioFor(meta.posterShape),
+    VideoType: jellyfinType === 'Movie' ? 'VideoFile' : undefined,
+    Status: jellyfinType === 'Series' ? enrichment.status : undefined,
+    ChildCount: folder ? opts.childCount : undefined,
+    RecursiveItemCount: folder ? opts.childCount : undefined,
+    UserData: userDataFromRow(id, opts.playstate, runtimeMs),
+    Path: `/aiostreams/${meta.type}/${meta.id}/${name}${folder ? '' : PLAYABLE_EXT}`,
+    ProductionLocations: enrichment.countries,
+    _aio: { descriptor, enrichment },
+  };
+  if (jellyfinType === 'Series') {
+    if (enrichment.airDays.length) item.AirDays = enrichment.airDays;
+    if (enrichment.airTime) item.AirTime = enrichment.airTime;
+  }
+  if (typeof meta.language === 'string')
+    item.PreferredMetadataLanguage = meta.language;
+  if (typeof meta.website === 'string') item.HomePageUrl = meta.website;
+  if (
+    typeof meta.animatedPoster === 'string' &&
+    /^https?:\/\//i.test(meta.animatedPoster)
+  )
+    item.aiostreams = { animatedPoster: meta.animatedPoster };
+  if (jellyfinType === 'Movie' && ctx.listVersions) {
+    item.EnableMediaSourceDisplay = true;
+    item.MediaSources = listPlaceholderSources(
+      id,
+      resolveMarkerId(ctx.uuid, id),
+      name,
+      item.Path as string
+    );
+  }
+  return item;
+}
+
+export interface SeasonGroup {
+  season: number;
+  name: string;
+  videos: NonNullable<ParsedMeta['videos']>;
+}
+
+/** Groups `videos[]` by season; unnumbered videos become episode 1..n of season 1. */
+export function groupSeasons(
+  meta: ParsedMeta,
+  /** Stand in for a meta with no videos, whose id is its own video. */
+  synthesise = false
+): SeasonGroup[] {
+  const videos = [...(meta.videos ?? [])];
+  if (!videos.length && synthesise)
+    videos.push({
+      id: defaultVideoIdOf(meta) ?? meta.id,
+      title: meta.name ?? meta.id,
+    });
+  const groups = new Map<number, SeasonGroup>();
+  const numbered = videos.some((v) => typeof v.episode === 'number');
+  videos.forEach((v, idx) => {
+    const season = typeof v.season === 'number' ? v.season : 1;
+    const episode =
+      typeof v.episode === 'number' && numbered ? v.episode : idx + 1;
+    const copy = { ...v, season, episode };
+    let g = groups.get(season);
+    if (!g) {
+      g = {
+        season,
+        name: season === 0 ? 'Specials' : `Season ${season}`,
+        videos: [],
+      };
+      groups.set(season, g);
+    }
+    g.videos.push(copy);
+  });
+  for (const g of groups.values())
+    g.videos.sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0));
+  return [...groups.values()].sort((a, b) => {
+    if (a.season === 0) return 1;
+    if (b.season === 0) return -1;
+    return a.season - b.season;
+  });
+}
+
+export function episodeDescriptor(
+  meta: ParsedMeta,
+  group: SeasonGroup,
+  video: SeasonGroup['videos'][number]
+): ContentDescriptor {
+  return {
+    k: 'episode',
+    t: meta.type,
+    i: meta.id,
+    s: group.season,
+    e: video.episode ?? 0,
+    v: video.id,
+  };
+}
+
+function seasonDetailsOf(seriesItem: JellyfinItem, season: number) {
+  return (
+    seriesItem as { _aio?: { enrichment?: Enrichment } }
+  )._aio?.enrichment?.seasons.get(season);
+}
+
+export function buildSeason(
+  ctx: ItemBuildContext,
+  meta: ParsedMeta,
+  seriesItem: JellyfinItem,
+  group: SeasonGroup,
+  playstates?: Map<string, WatchStateRow>,
+  episodeKeyOf?: (video: SeasonGroup['videos'][number]) => string,
+  own: { row?: WatchStateRow; providerIds?: Record<string, string> } = {}
+): JellyfinItem {
+  const id = encodeItemId({
+    k: 'season',
+    t: meta.type,
+    i: meta.id,
+    s: group.season,
+  });
+  const details = seasonDetailsOf(seriesItem, group.season);
+  const images: ItemImages = {};
+  if (details?.poster) images.Primary = details.poster;
+  else if (typeof meta.poster === 'string') images.Primary = meta.poster;
+  if (typeof meta.background === 'string') images.Backdrop = meta.background;
+  rememberImages(id, images);
+
+  const now = Date.now();
+  let played = 0;
+  let counted = 0;
+  for (const v of group.videos) {
+    if (!hasAired(v, now)) continue;
+    counted++;
+    const row =
+      playstates && episodeKeyOf ? playstates.get(episodeKeyOf(v)) : undefined;
+    if (row?.played) played++;
+  }
+  const total = group.videos.length;
+  const seriesTags = seriesItem.ImageTags as Record<string, string>;
+  return {
+    ...baseItem(ctx, id, details?.name ?? group.name, 'Season', true),
+    SortName: String(group.season).padStart(4, '0'),
+    IndexNumber: group.season,
+    Overview: overviewText(details?.overview),
+    PremiereDate: details?.premiere,
+    SeriesId: seriesItem.Id,
+    SeriesName: seriesItem.Name,
+    ParentId: seriesItem.Id,
+    ChildCount: total,
+    RecursiveItemCount: total,
+    ...imageTagsFor(images),
+    ParentBackdropItemId: images.Backdrop ? seriesItem.Id : undefined,
+    ParentBackdropImageTags: seriesItem.BackdropImageTags,
+    SeriesPrimaryImageTag: seriesTags?.Primary,
+    ParentLogoItemId: seriesTags?.Logo ? seriesItem.Id : undefined,
+    ParentLogoImageTag: seriesTags?.Logo,
+    PrimaryImageAspectRatio: 0.6666,
+    ProductionYear: seriesItem.ProductionYear,
+    UserData: {
+      ...withPlayedCounts(defaultUserData(id), played, counted),
+      ...(own.row ? ratingUserData(own.row) : {}),
+    },
+    ...(own.providerIds
+      ? {
+          ProviderIds: own.providerIds,
+          ExternalUrls: externalUrls(own.providerIds, 'season'),
+        }
+      : {}),
+    Path: `/aiostreams/${meta.type}/${meta.id}/${group.name}`,
+    _aio: {
+      descriptor: { k: 'season', t: meta.type, i: meta.id, s: group.season },
+    },
+  };
+}
+
+export function buildEpisode(
+  ctx: ItemBuildContext,
+  meta: ParsedMeta,
+  seriesItem: JellyfinItem,
+  group: SeasonGroup,
+  video: SeasonGroup['videos'][number],
+  playstate?: WatchStateRow
+): JellyfinItem {
+  const descriptor = episodeDescriptor(meta, group, video);
+  const id = encodeItemId(descriptor);
+  const seasonId = encodeItemId({
+    k: 'season',
+    t: meta.type,
+    i: meta.id,
+    s: group.season,
+  });
+  const images: ItemImages = {};
+  if (typeof video.thumbnail === 'string') images.Primary = video.thumbnail;
+  if (typeof meta.background === 'string') images.Backdrop = meta.background;
+  rememberImages(id, images);
+
+  const extra = readVideoEnrichment(video);
+  const sharedId = sharedEpisodeId(descriptor);
+  const runtimeMs = extra.runtimeMs ?? parseRuntimeMs(meta.runtime);
+  const premiere = toIso(video.released);
+  const unaired = isUnairedVideo(video);
+  const missing = unaired && ctx.markUnaired;
+  const title = video.title ?? video.name ?? `Episode ${video.episode}`;
+  const path = `/aiostreams/${meta.type}/${meta.id}/${group.name}/${title}${PLAYABLE_EXT}`;
+  const seriesTags = seriesItem.ImageTags as Record<string, string>;
+  return {
+    ...baseItem(ctx, id, title, 'Episode', false),
+    SortName: `${String(group.season).padStart(4, '0')}-${String(video.episode ?? 0).padStart(4, '0')}`,
+    MediaType: 'Video',
+    VideoType: 'VideoFile',
+    LocationType: missing ? 'Virtual' : 'FileSystem',
+    CanDownload: !missing,
+    IndexNumber: video.episode,
+    ParentIndexNumber: group.season,
+    SeriesId: seriesItem.Id,
+    SeriesName: seriesItem.Name,
+    SeasonId: seasonId,
+    SeasonName: seasonDetailsOf(seriesItem, group.season)?.name ?? group.name,
+    ParentId: seasonId,
+    Overview: overviewText(video.overview),
+    PremiereDate: premiere,
+    DateCreated: premiere ?? EPOCH_DATE,
+    ProductionYear: premiere
+      ? new Date(premiere).getUTCFullYear()
+      : seriesItem.ProductionYear,
+    RunTimeTicks: runtimeMs ? msToTicks(runtimeMs) : undefined,
+    ...imageTagsFor({ Primary: images.Primary }),
+    ParentBackdropItemId: images.Backdrop ? seriesItem.Id : undefined,
+    ParentBackdropImageTags: seriesItem.BackdropImageTags,
+    SeriesPrimaryImageTag: seriesTags?.Primary,
+    ParentLogoItemId: seriesTags?.Logo ? seriesItem.Id : undefined,
+    ParentLogoImageTag: seriesTags?.Logo,
+    ParentThumbItemId: seriesTags?.Thumb ? seriesItem.Id : undefined,
+    ParentThumbImageTag: seriesTags?.Thumb,
+    PrimaryImageAspectRatio: 1.7777,
+    Genres: seriesItem.Genres,
+    GenreItems: seriesItem.GenreItems,
+    CommunityRating: extra.rating,
+    OfficialRating: seriesItem.OfficialRating,
+    People: peopleDtos(extra.people),
+    ProviderIds: extra.providerIds,
+    ExternalUrls: externalUrls(extra.providerIds, 'episode'),
+    UserData: userDataFromRow(id, playstate, runtimeMs),
+    Path: path,
+    ...((extra.filler || extra.recap || sharedId) && {
+      aiostreams: {
+        ...(extra.filler && { filler: true }),
+        ...(extra.recap && { recap: true }),
+        ...(sharedId && { sharedId }),
+      },
+    }),
+    ...(missing || !ctx.listVersions
+      ? {}
+      : {
+          EnableMediaSourceDisplay: true,
+          MediaSources: listPlaceholderSources(
+            id,
+            resolveMarkerId(ctx.uuid, id),
+            title,
+            path
+          ),
+        }),
+    _aio: { descriptor, ...(unaired ? { unaired: true } : {}) },
+  };
+}
+
+/** A movie inside a collection (movie-type meta with `videos`). */
+export function buildBoxSetChild(
+  ctx: ItemBuildContext,
+  boxset: JellyfinItem,
+  meta: ParsedMeta,
+  video: NonNullable<ParsedMeta['videos']>[number],
+  index: number,
+  playstate?: WatchStateRow
+): JellyfinItem {
+  const descriptor: ContentDescriptor = {
+    k: 'movie',
+    t: meta.type,
+    i: video.id,
+    p: meta.id,
+  };
+  const id = encodeItemId(descriptor);
+  const v = video as typeof video & Record<string, unknown>;
+  const images: ItemImages = {};
+  if (typeof video.thumbnail === 'string') images.Primary = video.thumbnail;
+  rememberImages(id, images);
+  const title = video.title ?? video.name ?? `Part ${index + 1}`;
+  const premiere = toIso(video.released);
+  const runtimeMs = parseRuntimeMs(v.runtime);
+  const providerIds = providerIdsFor({ id: video.id, type: meta.type });
+  const path = `/aiostreams/${meta.type}/${video.id}/${title}${PLAYABLE_EXT}`;
+  return {
+    ...baseItem(ctx, id, title, 'Movie', false),
+    MediaType: 'Video',
+    VideoType: 'VideoFile',
+    CanDownload: true,
+    IndexNumber: index + 1,
+    ParentId: boxset.Id,
+    Overview: overviewText(video.overview),
+    PremiereDate: premiere,
+    DateCreated: premiere ?? EPOCH_DATE,
+    ProductionYear: premiere ? new Date(premiere).getUTCFullYear() : undefined,
+    RunTimeTicks: runtimeMs ? msToTicks(runtimeMs) : undefined,
+    ProviderIds: providerIds,
+    ExternalUrls: externalUrls(providerIds, 'movie'),
+    ...imageTagsFor(images),
+    PrimaryImageAspectRatio: images.Primary ? 1.7777 : 0.6666,
+    Genres: boxset.Genres,
+    GenreItems: boxset.GenreItems,
+    UserData: userDataFromRow(id, playstate, runtimeMs),
+    Path: path,
+    ...(ctx.listVersions
+      ? {
+          EnableMediaSourceDisplay: true,
+          MediaSources: listPlaceholderSources(
+            id,
+            resolveMarkerId(ctx.uuid, id),
+            title,
+            path
+          ),
+        }
+      : {}),
+    _aio: { descriptor },
+  };
+}

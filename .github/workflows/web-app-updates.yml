@@ -1,0 +1,92 @@
+name: Web App Updates
+
+# The web app's commits count towards AIOStreams' releases, not the apps' that
+# bundle it. For each app this keeps a pull request open that moves its
+# web-app.lock forward with their conventional commits in its message, so merging
+# it lets release-please cut an app release that lists them.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/web/**'
+      - 'packages/ui/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: web-app-updates
+  cancel-in-progress: true
+
+jobs:
+  pull-request:
+    name: pull request (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: desktop
+            label: desktop
+          - app: smart-tv
+            label: TV
+          - app: android
+            label: Android
+    env:
+      # A token of its own lets the pull request run CI, as release-please's do.
+      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+      APP: ${{ matrix.app }}
+      BRANCH: ${{ matrix.app }}/web-app
+      LOCK: packages/${{ matrix.app }}/web-app.lock
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+
+      - name: List the web app's changes
+        id: changes
+        run: |
+          # Since the last merged update, or the app's last release if that is newer.
+          base=$(git log -1 --format=%H -- "$LOCK")
+          tag=$(git describe --tags --abbrev=0 --match "$APP-v*" 2>/dev/null || true)
+          if [ -n "$tag" ] && git merge-base --is-ancestor "$base" "$tag"; then
+            base=$tag
+          fi
+          # A commit that also touched the app already counts towards its release.
+          # packages/jellyfin-web is where the web app lived before it was renamed.
+          for commit in $(git log --reverse --format=%H "$base..HEAD" -- packages/web packages/jellyfin-web packages/ui); do
+            git diff-tree --no-commit-id --name-only -r "$commit" | grep -q "^packages/$APP/" && continue
+            git log -1 --format=%s "$commit"
+          done | grep -E '^[a-z]+(\([^)]*\))?!?: ' >changes.txt || true
+          echo "count=$(wc -l <changes.txt)" >>"$GITHUB_OUTPUT"
+          cat changes.txt
+
+      - name: Open or update the pull request
+        if: steps.changes.outputs.count != '0'
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          title="chore($APP): update the web app"
+          {
+            echo "The web app's changes since the $LABEL app last took it, for the $LABEL changelog."
+            echo
+            # release-please reads each of these as a commit of its own.
+            sed 's/$/\n/' changes.txt
+          } >message.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C "$BRANCH"
+          head -2 "$LOCK" >lock.tmp
+          git rev-parse HEAD >>lock.tmp
+          mv lock.tmp "$LOCK"
+          git commit -q -F <(printf '%s\n\n' "$title"; cat message.txt) -- "$LOCK"
+          git push -q --force origin "$BRANCH"
+          if gh pr view "$BRANCH" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$BRANCH" --title "$title" --body-file message.txt
+          else
+            gh pr create --base main --head "$BRANCH" --title "$title" --body-file message.txt
+          fi

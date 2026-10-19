@@ -1,12 +1,14 @@
 import * as React from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Tabs, TabsList, TabsTrigger } from '../ui/tabs';
+import { useMediaQuery } from '@aiostreams/ui/hooks/media-query';
+import { cn } from '@aiostreams/ui/core/styling';
+import { Tabs, TabsList, TabsTrigger } from '@aiostreams/ui/tabs';
 import {
   Accordion,
   AccordionItem,
   AccordionTrigger,
   AccordionContent,
-} from '../ui/accordion';
+} from '@aiostreams/ui/accordion';
 
 export interface MenuTabItem {
   value: string;
@@ -26,15 +28,13 @@ interface MenuTabsProps {
    * visible (only when it fits on screen).
    */
   revealOnChange?: boolean;
+  /** Passed to the tab bar; off inside a modal, which moves as it resizes. */
+  animated?: boolean;
 }
 
-const COLS_CLASS: Record<number, string> = {
-  1: 'grid-cols-1',
-  2: 'grid-cols-2',
-  3: 'grid-cols-3',
-  4: 'grid-cols-4',
-  5: 'grid-cols-5',
-};
+/** Clipping, not hidden overflow: a scroll container would stop sticky content sticking. */
+const STICKY_SAFE_CLIP =
+  'overflow-hidden supports-[overflow:clip]:overflow-clip';
 
 // Direction-aware slide: entering panel comes in from the side you're heading
 // towards, the exiting one leaves the opposite way. `custom` carries the sign.
@@ -50,8 +50,9 @@ export function MenuTabs({
   onTabChange,
   defaultMobileOpen = '',
   revealOnChange = false,
+  animated = true,
 }: MenuTabsProps) {
-  const n = tabs.length;
+  const isDesktop = useMediaQuery('(min-width: 640px)');
   const currentIndex = tabs.findIndex((t) => t.value === activeTab);
   const activeContent = currentIndex >= 0 ? tabs[currentIndex].content : null;
 
@@ -106,10 +107,10 @@ export function MenuTabs({
     if (value) onTabChange(value);
   };
 
-  return (
-    <>
-      {/* Mobile: Accordion */}
-      <div className="sm:hidden space-y-2">
+  // A CSS-hidden copy of the other layout would still render the active tab.
+  if (!isDesktop) {
+    return (
+      <div className="space-y-2">
         <Accordion
           type="single"
           collapsible
@@ -120,7 +121,10 @@ export function MenuTabs({
             <AccordionItem
               key={tab.value}
               value={tab.value}
-              className="border border-[--border] rounded-[--radius-md] overflow-hidden mb-2"
+              className={cn(
+                'border border-[--border] rounded-[--radius-md] mb-2',
+                STICKY_SAFE_CLIP
+              )}
             >
               <AccordionTrigger>
                 <span className="flex items-center gap-2 text-sm font-medium">
@@ -128,7 +132,7 @@ export function MenuTabs({
                   {tab.label}
                 </span>
               </AccordionTrigger>
-              <AccordionContent>
+              <AccordionContent contentContainerClass={STICKY_SAFE_CLIP}>
                 <div
                   ref={(el) => {
                     if (el) el.inert = mobileOpen !== tab.value;
@@ -142,45 +146,49 @@ export function MenuTabs({
           ))}
         </Accordion>
       </div>
+    );
+  }
 
-      {/* Desktop: Tab bar + animated content panel */}
-      <div className="hidden sm:block">
-        <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
-          <TabsList
-            className={`grid w-full border-b border-[--border] ${COLS_CLASS[n] ?? 'grid-cols-4'}`}
-          >
-            {tabs.map((tab) => (
-              <TabsTrigger
-                key={tab.value}
-                value={tab.value}
-                className="flex items-center gap-1.5"
-              >
-                {tab.icon}
-                {tab.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-        {/* Only the active tab is mounted; it slides in as the previous one
-            slides out (popLayout keeps the entrant in flow, so the region
-            takes each tab's natural height instead of the tallest tab's). */}
-        <div ref={panelRef} className="relative mt-4 overflow-hidden">
-          <AnimatePresence mode="popLayout" initial={false} custom={direction}>
-            <motion.div
-              key={activeTab}
-              custom={direction}
-              variants={panelVariants}
-              initial="enter"
-              animate="center"
-              exit="exit"
-              transition={{ duration: 0.3, ease: [0.32, 0.72, 0, 1] }}
-              className="space-y-4 p-1"
+  return (
+    <div>
+      <Tabs
+        value={activeTab}
+        onValueChange={onTabChange}
+        animated={animated}
+        className="w-full"
+      >
+        <TabsList className="flex w-full border-b border-[--border] overflow-x-auto">
+          {tabs.map((tab) => (
+            <TabsTrigger
+              key={tab.value}
+              value={tab.value}
+              className="flex flex-1 basis-0 items-center gap-1.5"
             >
-              {activeContent}
-            </motion.div>
-          </AnimatePresence>
-        </div>
+              {tab.icon}
+              {tab.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+      {/* Only the active tab is mounted; it slides in as the previous one
+          slides out (popLayout keeps the entrant in flow, so the region
+          takes each tab's natural height instead of the tallest tab's). */}
+      <div ref={panelRef} className="relative mt-4 overflow-x-clip">
+        <AnimatePresence mode="popLayout" initial={false} custom={direction}>
+          <motion.div
+            key={activeTab}
+            custom={direction}
+            variants={panelVariants}
+            initial="enter"
+            animate="center"
+            exit="exit"
+            transition={{ duration: 0.3, ease: [0.32, 0.72, 0, 1] }}
+            className="space-y-4 p-1"
+          >
+            {activeContent}
+          </motion.div>
+        </AnimatePresence>
       </div>
-    </>
+    </div>
   );
 }

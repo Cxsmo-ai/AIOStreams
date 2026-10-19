@@ -20,6 +20,11 @@ import {
   resolveGlobalDeepbridNzbs,
   resolveServiceWrappedStreams,
 } from './serviceWrapper.js';
+import { resolveRemuxDbMediaInfo } from '../remuxdb/wrap.js';
+import { resolveStoredMediaInfo } from '../media-info/lookup.js';
+import { idsFromVideoId, onPreloadRedirect } from '../media-info/play.js';
+import { PLAYBACK_PATH_PREFIX, withPlayPath } from '../debrid/utils.js';
+import type { ContributionIds } from '../media-info/contribute.js';
 import {
   isNonFatalDeepbridUsenetError,
   isTransientRateLimitError,
@@ -48,6 +53,7 @@ import {
   applyPosterModifications,
   convertDiscoverDeepLinks,
   isNsfwContent,
+  withQualifiedCollection,
 } from './catalog.js';
 import {
   hmac,
@@ -82,18 +88,25 @@ const pipelineResultCache = Cache.getInstance<string, StreamsResponse>(
   appConfig.bootstrap.redisUri ? undefined : 'memory'
 );
 
-async function pingStream(stream: ParsedStream, timeoutMs = PING_TIMEOUT_MS) {
-  if (!stream.url) {
+async function pingStream(
+  stream: ParsedStream,
+  timeoutMs = PING_TIMEOUT_MS,
+  url = stream.url
+) {
+  if (!url) {
     throw new Error('pingStream: stream has no URL');
   }
   const wrapper = new Wrapper(stream.addon);
-  return wrapper.makeRequest(stream.url, {
+  return wrapper.makeRequest(url, {
     timeout: timeoutMs,
     rawOptions: { redirect: 'manual' },
   });
 }
 
-async function pingStreamUrls(streams: ParsedStream[]): Promise<void> {
+async function pingStreamUrls(
+  streams: ParsedStream[],
+  play: { path: 'stremio' | 'jellyfin'; ids: ContributionIds }
+): Promise<void> {
   const eligible = streams.filter((s) => s.url);
   if (eligible.length === 0) {
     logger.debug('No streams to ping');
@@ -105,8 +118,16 @@ async function pingStreamUrls(streams: ParsedStream[]): Promise<void> {
     eligible.map((stream) =>
       limit(async () => {
         try {
-          const response = await pingStream(stream);
+          const response = await pingStream(
+            stream,
+            PING_TIMEOUT_MS,
+            withPlayPath(stream.url!, play.path)
+          );
           response.body?.cancel().catch(() => undefined);
+          const location = response.headers.get('location');
+          if (location && !stream.url!.includes(PLAYBACK_PATH_PREFIX)) {
+            onPreloadRedirect(play.path, stream, location, play.ids);
+          }
           logger.debug('Ping request sent', {
             url: makeUrlLogSafe(stream.url!),
             status: response.status,
@@ -166,7 +187,7 @@ function getAddonsForResource(
  *  1. Addons with a matching idPrefix (tried first, errors are reported)
  *  2. Addons with general type support and no idPrefixes (fallback, errors are silently skipped)
  */
-function getMetaCandidates(
+export function getMetaCandidates(
   ctx: Pick<AIOStreamsContext, 'supportedResources' | 'addons'>,
   type: string,
   id: string
@@ -261,6 +282,7 @@ export async function processStreams(
     includeExternalFailover?: boolean;
     sameReleaseLimit: number;
     duplicateStaggerMs: number;
+    onlySameReleaseFailover: boolean;
   }
 ): Promise<{
   streams: ParsedStream[];
@@ -269,6 +291,7 @@ export async function processStreams(
     metaFilterMs: number;
     serviceWrapMs: number;
     serviceWrapTimings?: Record<string, ServiceWrapServiceTiming>;
+    mediaInfoMs: number;
     filterMs: number;
     deduplicationMs: number;
     precomputeMs: number;
@@ -285,6 +308,7 @@ export async function processStreams(
   let metaFilterMs = 0;
   let serviceWrapMs = 0;
   let serviceWrapTimings: Record<string, ServiceWrapServiceTiming> | undefined;
+  let mediaInfoMs = 0;
   let filterMs = 0;
   let deduplicationMs = 0;
   let precomputeMs = 0;
@@ -293,8 +317,16 @@ export async function processStreams(
   let limitMs = 0;
   let selMs = 0;
 
+  const withMediaInfo = async (streams: ParsedStream[]) => {
+    const start = Date.now();
+    await resolveStoredMediaInfo(streams, context);
+    await resolveRemuxDbMediaInfo(streams, context, ctx.userData);
+    mediaInfoMs += Date.now() - start;
+  };
+
   if (isMeta) {
     await ctx.precomputer.precomputeSeaDexOnly(processedStreams, context);
+    await withMediaInfo(processedStreams);
     const metaFilterStart = Date.now();
     processedStreams = await ctx.filterer.filter(processedStreams, context);
     metaFilterMs = Date.now() - metaFilterStart;
@@ -334,6 +366,9 @@ export async function processStreams(
   }
 
   if (resolvedResults.hasNewStreams) {
+    await withMediaInfo(
+      processedStreams.filter((s) => !preServiceWrapIds.has(s.id))
+    );
     const filterStart = Date.now();
     processedStreams = await ctx.filterer.filter(processedStreams, context);
     filterMs = Date.now() - filterStart;
@@ -381,6 +416,7 @@ export async function processStreams(
         includeExternal: failoverOpts.includeExternalFailover,
         sameReleaseLimit: failoverOpts.sameReleaseLimit,
         duplicateStaggerMs: failoverOpts.duplicateStaggerMs,
+        onlySameReleaseFailover: failoverOpts.onlySameReleaseFailover,
       },
       userScopeKey(ctx.userData)
     ).catch((error) => {
@@ -416,6 +452,7 @@ export async function processStreams(
         includeExternal: failoverOpts.includeExternalFailover,
         sameReleaseLimit: failoverOpts.sameReleaseLimit,
         duplicateStaggerMs: failoverOpts.duplicateStaggerMs,
+        onlySameReleaseFailover: failoverOpts.onlySameReleaseFailover,
       },
       userScopeKey(ctx.userData)
     ).catch((error) => {
@@ -449,6 +486,7 @@ export async function processStreams(
           includeExternal: failoverOpts.includeExternalFailover,
           sameReleaseLimit: failoverOpts.sameReleaseLimit,
           duplicateStaggerMs: failoverOpts.duplicateStaggerMs,
+          onlySameReleaseFailover: failoverOpts.onlySameReleaseFailover,
         },
         userScopeKey(ctx.userData)
       ).catch((error) => {
@@ -509,6 +547,7 @@ export async function processStreams(
       metaFilterMs,
       serviceWrapMs,
       serviceWrapTimings,
+      mediaInfoMs,
       filterMs,
       deduplicationMs,
       precomputeMs,
@@ -623,7 +662,10 @@ async function precacheNextEpisode(
     appConfig.resources.precache.nextEpisodeMinInterval
   );
 
-  await pingStreamUrls(streamsToCache);
+  await pingStreamUrls(streamsToCache, {
+    path: ctx.options?.path ?? 'stremio',
+    ids: idsFromVideoId(precacheId),
+  });
 
   logger.debug(
     { count: streamsToCache.length, id, type },
@@ -744,7 +786,7 @@ export async function getStreams(
     'found addons for stream resource'
   );
 
-  const context = StreamContext.create(type, id, ctx.userData);
+  const context = await StreamContext.create(type, id, ctx.userData);
   ctx.streamContext = context;
 
   const pipelineTtl = appConfig.resources.cache.pipeline.ttl;
@@ -783,6 +825,7 @@ export async function getStreams(
     errors,
     statistics: addonStatistics,
     dispositions,
+    mediaInfoMs: fetcherMediaInfoMs,
   } = await ctx.fetcher.fetch(
     supportedAddons,
     context,
@@ -877,11 +920,15 @@ export async function getStreams(
           duplicateStaggerMs:
             ctx.userData.failover.duplicateStaggerMs ??
             constants.DEFAULT_FAILOVER_DUPLICATE_STAGGER_MS,
+          onlySameReleaseFailover:
+            ctx.userData.failover.onlySameReleaseFailover ??
+            constants.DEFAULT_FAILOVER_ONLY_SAME_RELEASE,
         }
       : undefined
   );
   let finalStreams = processResults.streams;
   const pipelineTimings = processResults.timings;
+  pipelineTimings.mediaInfoMs += fetcherMediaInfoMs;
   errors.push(...processResults.errors);
 
   if (FeatureControl.disabledStreamTypes.size > 0) {
@@ -999,7 +1046,10 @@ export async function getStreams(
           }
         }
         setImmediate(() => {
-          pingStreamUrls(streamsToPreload).catch((error) => {
+          pingStreamUrls(streamsToPreload, {
+            path: ctx.options?.path ?? 'stremio',
+            ids: idsFromVideoId(id),
+          }).catch((error) => {
             logger.error('Error during stream preloading:', {
               error: error instanceof Error ? error.message : String(error),
               type,
@@ -1129,7 +1179,11 @@ export async function getMeta(
       'trying addon for meta resource'
     );
     try {
-      const meta = await new Wrapper(candidate.addon).getMeta(type, id);
+      const meta = withQualifiedCollection(
+        ctx,
+        candidate.instanceId,
+        await new Wrapper(candidate.addon).getMeta(type, id)
+      );
       logger.debug(
         { addon: candidate.addon.name, instanceId: candidate.instanceId },
         'successfully got meta from addon'
@@ -1147,13 +1201,14 @@ export async function getMeta(
       if (!meta.logo && /^tt\d+/i.test(id)) {
         meta.logo = `https://images.metahub.space/logo/medium/${id}/img.png`;
       }
-      if (ctx.userData.usePosterServiceForMeta) {
+      // Poster services know titles, not people.
+      if (ctx.userData.usePosterServiceForMeta && type !== 'person') {
         await applyPosterModifications(ctx, [meta], type, true);
       } else {
         meta.links = convertDiscoverDeepLinks(ctx, meta.links);
       }
       if (meta.videos) {
-        const context = StreamContext.create(type, id, ctx.userData);
+        const context = await StreamContext.create(type, id, ctx.userData);
         ctx.streamContext = context;
         meta.videos = await Promise.all(
           meta.videos.map(async (video) => {

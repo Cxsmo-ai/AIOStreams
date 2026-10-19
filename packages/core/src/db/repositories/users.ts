@@ -1,4 +1,4 @@
-import { UserData } from '../schemas.js';
+import { UserData, isPersonaLockHash } from '../schemas.js';
 import { getDb } from '../db.js';
 import { sql } from '../sql.js';
 import { config as appConfig } from '../../config/index.js';
@@ -20,6 +20,9 @@ import {
   assertConfigAccessKey,
 } from '../../utils/index.js';
 import { ConfigProfileRepository } from './config-profiles.js';
+import { ConfigSessionRepository } from './config-sessions.js';
+import { JellyfinAddressRepository } from './jellyfin-addresses.js';
+import { LinkedAccountRepository } from './linked-accounts.js';
 
 const APIError = constants.APIError;
 const logger = createLogger('users');
@@ -53,15 +56,15 @@ interface ConfigKeyEntry {
   key: string;
 }
 
-const CONFIG_KEY_CACHE_TTL = 30 * 60;
+const CONFIG_KEY_CACHE_TTL = 24 * 60 * 60;
 
-const configKeyCache = Cache.getInstance<string, string>('config-key', 5000);
+const configKeyCache = Cache.getInstance<string, string>('config-key', 50000);
 
 let trustedUuidsSource: string | null | undefined;
 let trustedUuidPatterns: RegExp[] = [];
 
 /** Recompiles only when the configured list changes, not per request. */
-function isTrustedUuid(uuid: string): boolean {
+export function isTrustedUuid(uuid: string): boolean {
   const source = appConfig.userLimits.trusted.uuids;
   if (source !== trustedUuidsSource) {
     trustedUuidsSource = source;
@@ -84,6 +87,9 @@ export class UserRepository {
     config.trusted = false;
     config.ip = undefined;
     config.activeVariants = undefined;
+    config.autoVariants = undefined;
+    config.healthResults = undefined;
+    config.variantSelectorLocation = undefined;
 
     let configToValidate: UserData = config;
     if (config.parentConfig?.uuid) {
@@ -144,6 +150,12 @@ export class UserRepository {
           sql`INSERT INTO users (uuid, password_hash, config, config_salt)
               VALUES (${uuid}, ${hashedPassword}, ${encryptedConfig}, ${configSalt})`
         );
+        await JellyfinAddressRepository.syncForUuid(
+          tx,
+          uuid,
+          encryptedPassword,
+          validatedConfig.jellyfin?.personas ?? []
+        );
       });
       logger.info(`Created a new user with UUID: ${uuid}`);
       return { uuid, encryptedPassword };
@@ -196,6 +208,9 @@ export class UserRepository {
             config.parentConfig.password
           );
           config = mergeConfigs(parent, config);
+          // mergeConfigs starts from the child, so trust has to be carried
+          // over by hand, the way both save paths already do it.
+          config.trusted = parent.trusted || config.trusted;
           logger.info(
             `Merged parent config ${config.parentConfig!.uuid} for user ${uuid}`
           );
@@ -233,7 +248,9 @@ export class UserRepository {
     const key = await this.resolveConfigKey(uuid, password, row);
 
     await db.exec(
-      sql`UPDATE users SET accessed_at = CURRENT_TIMESTAMP WHERE uuid = ${uuid}`
+      sql`UPDATE users SET accessed_at = CURRENT_TIMESTAMP
+           WHERE uuid = ${uuid}
+             AND (accessed_at IS NULL OR accessed_at < ${db.intervalAgo(1, 'hours')})`
     );
 
     const decryptedConfig = this.decryptConfigWithKey(row.config, key);
@@ -242,6 +259,9 @@ export class UserRepository {
     decryptedConfig.uuid = uuid;
     decryptedConfig.ip = undefined;
     decryptedConfig.activeVariants = undefined;
+    decryptedConfig.autoVariants = undefined;
+    decryptedConfig.healthResults = undefined;
+    decryptedConfig.variantSelectorLocation = undefined;
     return applyMigrations(decryptedConfig);
   }
 
@@ -358,6 +378,9 @@ export class UserRepository {
     config.trusted = isTrustedUuid(uuid);
     config.ip = undefined;
     config.activeVariants = undefined;
+    config.autoVariants = undefined;
+    config.healthResults = undefined;
+    config.variantSelectorLocation = undefined;
 
     const db = getDb();
     const current = await db.maybeOne<UserRow>(
@@ -408,10 +431,21 @@ export class UserRepository {
       current.config_salt
     );
 
+    const encryptedPassword = encryptString(password);
+    if (!encryptedPassword.success) {
+      throw new APIError(constants.ErrorCode.ENCRYPTION_ERROR);
+    }
+
     try {
       await db.tx(async (tx) => {
         await tx.exec(
           sql`UPDATE users SET config = ${encryptedConfig}, updated_at = CURRENT_TIMESTAMP WHERE uuid = ${uuid}`
+        );
+        await JellyfinAddressRepository.syncForUuid(
+          tx,
+          uuid,
+          encryptedPassword.data,
+          validatedConfig.jellyfin?.personas ?? []
         );
       });
       logger.info(`Updated user ${uuid} with an updated configuration`);
@@ -537,6 +571,18 @@ export class UserRepository {
           uuid,
           newEncryptedPasswordToken
         );
+        await LinkedAccountRepository.rewriteManifestUrlsForUuid(
+          tx,
+          uuid,
+          newEncryptedPasswordToken
+        );
+        await JellyfinAddressRepository.reencryptForUuid(
+          tx,
+          uuid,
+          newEncryptedPasswordToken
+        );
+        // Not rotated like the above: a password change ends them everywhere.
+        await ConfigSessionRepository.deleteAllForUuid(uuid, tx);
       });
       logger.info(`Changed password for user ${uuid}`);
       return { encryptedPassword: newEncryptedPasswordToken };
@@ -554,6 +600,14 @@ export class UserRepository {
     password: string,
     salt?: string
   ): Promise<{ encryptedConfig: string; salt: string }> {
+    // Every stored config passes here, so a PIN is never kept plain.
+    for (const user of [
+      config.jellyfin?.primary,
+      ...(config.jellyfin?.personas ?? []),
+    ]) {
+      if (user?.lock && !isPersonaLockHash(user.lock))
+        user.lock = await getTextHash(user.lock);
+    }
     const { key, salt: saltUsed } = await deriveKey(
       `${password}:${appConfig.bootstrap.secretKey}`,
       salt

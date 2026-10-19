@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useUserData } from '@/context/userData';
 import { useStatus } from '@/context/status';
 import { SettingsCard } from '../../../../shared/settings-card';
-import { Button, IconButton } from '@/components/ui/button';
-import { TextInput } from '@/components/ui/text-input';
-import { Switch } from '@/components/ui/switch';
-import { Alert } from '@/components/ui/alert';
-import { Modal } from '@/components/ui/modal';
+import { Button, IconButton } from '@aiostreams/ui/button';
+import { TextInput } from '@aiostreams/ui/text-input';
+import { Switch } from '@aiostreams/ui/switch';
+import { Alert } from '@aiostreams/ui/alert';
+import { Modal } from '@aiostreams/ui/modal';
 import { UserDataDiffViewer } from '@/components/shared/userdata-diff-viewer';
 import { toast } from 'sonner';
 import { FiEye, FiPlus, FiTrash2 } from 'react-icons/fi';
@@ -17,10 +17,16 @@ import {
   type CelLimits,
 } from '../../../../../../../core/src/variants/language';
 import { CelEditor } from './cel-editor';
+import { ConditionTester } from './condition-tester';
 
 type Variant = NonNullable<UserData['variants']>[number];
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+const CONDITION_HELP =
+  'Optional. A true/false expression that makes this variant apply on its own, without ?v= in the URL. ' +
+  "Available: userAgent, resource, type, id, query('name'), header('name'), health('id'), " +
+  "includes(a, b) and matches(value, 'regex'). Selecting the variant in the URL still applies it either way.";
 
 function nextVariantId(existing: Variant[]): string {
   if (!existing.some((v) => v.id === 'variant')) return 'variant';
@@ -39,7 +45,7 @@ export function Variants() {
   const limits: CelLimits = useMemo(
     () => ({
       maxScriptLength: settings?.maxScriptLength ?? 4000,
-      maxInstructions: settings?.maxInstructions ?? 100,
+      maxTotalInstructions: settings?.maxTotalInstructions ?? 5000,
       maxValueDepth: settings?.maxValueDepth ?? 10,
       maxPathSegments: settings?.maxPathSegments ?? 12,
       maxPathMatches: settings?.maxPathMatches ?? 200,
@@ -78,6 +84,16 @@ export function Variants() {
     );
   }
 
+  if (settings?.access === 'trusted' && !userData.trusted) {
+    return (
+      <Alert
+        intent="info-basic"
+        title="Variants are limited to trusted users"
+        description="This instance only lets trusted users define config variants. Ask the instance owner to add you."
+      />
+    );
+  }
+
   return (
     <div className="space-y-4" id="variants">
       <div className="space-y-3">
@@ -87,9 +103,9 @@ export function Variants() {
           <code className="text-xs px-1 py-0.5 rounded bg-[--subtle]">
             ?v=&lt;id&gt;
           </code>{' '}
-          to your manifest URL and your client treats it as a separate addon. Use it
-          for a second formatter, a different debrid account, or a tighter
-          filter set without maintaining a second config.{' '}
+          to your manifest URL and your client treats it as a separate addon.
+          Use it for a second formatter, a different debrid account, or a
+          tighter filter set without maintaining a second config.{' '}
           <a
             href="https://docs.aiostreams.viren070.me/reference/config-expressions"
             target="_blank"
@@ -136,6 +152,13 @@ export function Variants() {
           intent="info-basic"
           title="No variants yet"
           description="Add one to serve a second, adjusted version of this configuration from the same UUID."
+        />
+      )}
+
+      {variants.length > 0 && (
+        <ConditionTester
+          variants={variants}
+          healthChecks={userData.healthChecks}
         />
       )}
 
@@ -222,6 +245,14 @@ function VariantCard({
           onValueChange={(value) => onChange({ name: value || undefined })}
         />
       </div>
+
+      <TextInput
+        label="Activate when"
+        help={CONDITION_HELP}
+        placeholder="includes(userAgent, 'android')"
+        value={variant.when ?? ''}
+        onValueChange={(value) => onChange({ when: value || undefined })}
+      />
 
       <CelEditor
         value={variant.script}

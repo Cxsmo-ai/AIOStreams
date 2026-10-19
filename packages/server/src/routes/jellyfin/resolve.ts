@@ -1,0 +1,488 @@
+import {
+  addonSubtitleTracks,
+  applyStoredMediaInfo,
+  idsFromVideoId,
+  config as appConfig,
+  constants,
+  createFormatter,
+  createLogger,
+  DistributedLock,
+  hasProgrammeVideos,
+  encodeItemId,
+  FULL_SUPPORT,
+  requestLockType,
+  isPlayable,
+  resolveMarkerId as markerIdFor,
+  newPlaySessionId,
+  noticeRecordFrom,
+  parseRuntimeMs,
+  playableSources,
+  rememberShowEpisodes,
+  requestTitleMetadata,
+  labelFrom,
+  isMemoFresh,
+  resolveByItem,
+  sourceIdentities,
+  sourceRecordFrom,
+  generateBingeGroup,
+  writePlaybackMemo,
+  type ContentDescriptor,
+  type MediaSourceRecord,
+  type ParsedMeta,
+  type ParsedStream,
+  type PlaybackMemo,
+  type SubtitleTrack,
+} from '@aiostreams/core';
+import type { JellyfinRequestContext } from './context.js';
+
+const logger = createLogger('jellyfin');
+
+export function getMeta(
+  ctx: JellyfinRequestContext,
+  type: string,
+  id: string
+): Promise<ParsedMeta | null> {
+  const key = `${type}|${id}`;
+  let pending = ctx.metas.get(key);
+  if (!pending) {
+    pending = fetchMeta(ctx, type, id);
+    ctx.metas.set(key, pending);
+  }
+  return pending;
+}
+
+async function fetchMeta(
+  ctx: JellyfinRequestContext,
+  type: string,
+  id: string
+): Promise<ParsedMeta | null> {
+  const engine = await ctx.engine();
+  try {
+    const res = await engine.getMeta(type, id);
+    if (!res.data) return null;
+    if (
+      type !== 'movie' &&
+      res.data.videos?.length &&
+      !hasProgrammeVideos(res.data)
+    ) {
+      rememberShowEpisodes(ctx.scope(), type, id, res.data);
+    }
+    return res.data;
+  } catch (error) {
+    logger.debug(
+      { type, id, err: error instanceof Error ? error.message : String(error) },
+      'meta failed'
+    );
+    return null;
+  }
+}
+
+export interface PlayTarget {
+  type: string;
+  videoId: string;
+  runtimeMs?: number;
+  streams?: ParsedStream[];
+}
+
+type MetaVideo = NonNullable<ParsedMeta['videos']>[number] &
+  Record<string, unknown>;
+
+/**
+ * Stream requests use the root type and the video's id; a movie may name its
+ * playable id in `defaultVideoId`.
+ */
+export async function playTargetFor(
+  ctx: JellyfinRequestContext,
+  d: ContentDescriptor
+): Promise<PlayTarget | null> {
+  if (d.k === 'episode') {
+    const meta = await getMeta(ctx, d.t, d.i).catch(() => null);
+    const video = meta?.videos?.find((v) => v.id === d.v) as
+      | MetaVideo
+      | undefined;
+    return {
+      type: d.t,
+      videoId: d.v,
+      runtimeMs:
+        parseRuntimeMs(video?.runtime) ?? parseRuntimeMs(meta?.runtime),
+      streams: video?.streams ?? undefined,
+    };
+  }
+  if (d.k === 'movie') {
+    // A collection's movie is one of its parent's videos.
+    const meta = await getMeta(ctx, d.t, d.p ?? d.i).catch(() => null);
+    const hinted = d.p ? undefined : meta?.behaviorHints?.defaultVideoId;
+    const videoId = typeof hinted === 'string' && hinted ? hinted : d.i;
+    const video = meta?.videos?.find((v) => v.id === videoId) as
+      | MetaVideo
+      | undefined;
+    const runtimeMs =
+      parseRuntimeMs(video?.runtime) ??
+      (d.p
+        ? parseRuntimeMs(
+            (await getMeta(ctx, d.t, d.i).catch(() => null))?.runtime
+          )
+        : parseRuntimeMs(meta?.runtime));
+    return {
+      type: d.t,
+      videoId,
+      runtimeMs,
+      streams: video?.streams ?? undefined,
+    };
+  }
+  return null;
+}
+
+export function maxVersionsFor(ctx: JellyfinRequestContext): number {
+  const cap = appConfig.jellyfin.maxVersions;
+  const wanted = ctx.userData.jellyfin?.maxVersions ?? cap;
+  return Math.max(1, Math.min(cap, wanted));
+}
+
+const NOTICE_TYPES: string[] = [
+  constants.EXTERNAL_STREAM_TYPE,
+  constants.INFO_STREAM_TYPE,
+];
+
+/**
+ * Streams with nothing to play but something to say. A link that repeats a
+ * stream already in the list is left out; it would only be that stream again.
+ */
+function noticeStreamsOf(
+  all: ParsedStream[],
+  playable: ParsedStream[]
+): ParsedStream[] {
+  const playableUrls = new Set(
+    playable.map((stream) => stream.url).filter(Boolean)
+  );
+  return all.filter(
+    (stream) =>
+      !isPlayable(stream, FULL_SUPPORT) &&
+      NOTICE_TYPES.includes(stream.type) &&
+      !(stream.externalUrl && playableUrls.has(stream.externalUrl))
+  );
+}
+
+/** Clients open this as a link, so nothing but a web page gets through. */
+function webUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const { protocol } = new URL(url);
+    return protocol === 'http:' || protocol === 'https:' ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function showErrors(ctx: JellyfinRequestContext): boolean {
+  return (
+    !ctx.userData.hideErrors &&
+    !ctx.userData.hideErrorsForResources?.includes('stream')
+  );
+}
+
+/**
+ * Runs the stream pipeline once for an item and records everything the
+ * anonymous routes need. Reuses a live memo unless `force` is set.
+ *
+ * Concurrent resolves of one item share a single run, across replicas when
+ * there is Redis: each run writes its own source list, and a client holding
+ * one list's ids must not be served from another's.
+ */
+export async function resolvePlayback(
+  ctx: JellyfinRequestContext,
+  d: ContentDescriptor,
+  opts: { force?: boolean } = {}
+): Promise<PlaybackMemo | null> {
+  const itemId = encodeItemId(d);
+  const scope = ctx.scope();
+  if (!opts.force) {
+    // An empty result is cached too, so a title with nothing available is not
+    // re-resolved on every open; the TTL is what retries it.
+    const existing = await resolveByItem(ctx.uuid, scope, itemId);
+    if (existing && isMemoFresh(existing)) return existing;
+  }
+
+  let ran = false;
+  let resolved: PlaybackMemo | null = null;
+  const run = async () => {
+    ran = true;
+    resolved = await resolveUncached(ctx, d, itemId, scope);
+    return true;
+  };
+  const wait = appConfig.userLimits.timeouts.maxTimeout + 10_000;
+  try {
+    const { cached } = await DistributedLock.getInstance().withLock(
+      `jellyfin-resolve:${ctx.uuid}|${scope}|${itemId}`,
+      run,
+      { type: requestLockType(), timeout: wait, ttl: wait }
+    );
+    if (!cached) return resolved;
+  } catch (error) {
+    if (ran) throw error;
+    // The shared run failed or never reported back, so try it here.
+    return resolveUncached(ctx, d, itemId, scope);
+  }
+  // The memo, not the lock, carries the result, so it is never published.
+  return (await resolveByItem(ctx.uuid, scope, itemId)) ?? null;
+}
+
+/**
+ * A version kept by a new run keeps the subtitles a lookup for its file added:
+ * a player still showing it asks for them by their position in that list.
+ */
+function keepEnrichedSubtitles(
+  memo: PlaybackMemo,
+  previous: PlaybackMemo | null | undefined
+): void {
+  const enriched = new Map(
+    (previous?.sources ?? [])
+      .filter((s) => s.subtitlesEnriched)
+      .map((s) => [s.msid, s])
+  );
+  for (const source of memo.sources) {
+    const before = enriched.get(source.msid);
+    if (!before) continue;
+    source.subtitles = before.subtitles;
+    source.subtitlesEnriched = true;
+  }
+}
+
+/** Live by the content when the url says nothing: a channel, or a schedule. */
+function isLiveContent(type: string, meta: ParsedMeta | null): boolean {
+  return type === 'tv' || type === 'channel' || hasProgrammeVideos(meta);
+}
+
+async function resolveUncached(
+  ctx: JellyfinRequestContext,
+  d: ContentDescriptor,
+  itemId: string,
+  scope: string
+): Promise<PlaybackMemo | null> {
+  const target = await playTargetFor(ctx, d);
+  if (!target) return null;
+
+  const engine = await ctx.engine();
+  const liveContent = isLiveContent(
+    target.type,
+    await getMeta(ctx, d.t, d.k === 'movie' ? (d.p ?? d.i) : d.i).catch(
+      () => null
+    )
+  );
+  /* Copied, not marked in place: the pipeline result is cached and shared. */
+  const asLive = (stream: ParsedStream): ParsedStream =>
+    liveContent && stream.type !== 'live'
+      ? { ...stream, type: constants.LIVE_STREAM_TYPE }
+      : stream;
+  const inline = (target.streams ?? []) as ParsedStream[];
+  const ownPlayable = inline.filter((s) => isPlayable(s, FULL_SUPPORT));
+  const streamsRes = ownPlayable.length
+    ? undefined
+    : await engine.getStreams(target.videoId, target.type);
+  const all = (
+    ownPlayable.length ? inline : (streamsRes?.data?.streams ?? [])
+  ) as ParsedStream[];
+  const playable = all.filter((s) => isPlayable(s, FULL_SUPPORT));
+  const addonSubtitles: SubtitleTrack[] = [];
+
+  const streamContext = engine.getStreamContext();
+  const formatter = streamContext
+    ? createFormatter(streamContext.toFormatterContext(playable))
+    : null;
+  const format = async (stream: ParsedStream) => {
+    const fallback = {
+      name: stream.originalName || stream.addon.name,
+      description: stream.originalDescription || '',
+    };
+    if (!formatter || stream.addon.formatPassthrough) return fallback;
+    try {
+      return await formatter.format(stream);
+    } catch {
+      return fallback;
+    }
+  };
+  // A client that plays only plain URLs is offered its own first `max`.
+  const max = maxVersionsFor(ctx);
+  const plain = new Set(all.filter((s) => isPlayable(s)).slice(0, max));
+  const top = playable.filter((s, i) => i < max || plain.has(s));
+  const identities = sourceIdentities(itemId, top);
+
+  const sources: MediaSourceRecord[] = [];
+  for (const [index, raw] of top.entries()) {
+    const stream = asLive(raw);
+    const formatted = await format(stream);
+    sources.push(
+      sourceRecordFrom(
+        ctx.uuid,
+        identities[index],
+        stream,
+        formatted,
+        labelFrom(formatted, stream),
+        addonSubtitles,
+        generateBingeGroup(stream, index, ctx.userData)
+      )
+    );
+  }
+
+  /* Last and outside the version cap: the first source is what a client plays
+   * when it is given no choice. */
+  const notice = (
+    label: string,
+    type: string,
+    text: { name: string; description: string },
+    extra: { addon?: string; externalUrl?: string } = {}
+  ) =>
+    sources.push(
+      noticeRecordFrom(ctx.uuid, `notice|${itemId}|${sources.length}`, label, {
+        ...text,
+        addon: extra.addon ?? '',
+        externalUrl: extra.externalUrl,
+        type,
+      })
+    );
+
+  for (const stream of noticeStreamsOf(all, playable)) {
+    const formatted = await format(stream);
+    notice(labelFrom(formatted, stream), stream.type, formatted, {
+      addon: stream.addon?.name ?? '',
+      externalUrl: webUrl(stream.externalUrl),
+    });
+  }
+  if (showErrors(ctx)) {
+    for (const error of streamsRes?.errors ?? []) {
+      const text = {
+        name: error.title || appConfig.branding.addonName,
+        description: error.description || 'Unknown error',
+      };
+      notice(labelFrom(text), constants.ERROR_STREAM_TYPE, text);
+    }
+  }
+  for (const statistic of streamsRes?.data?.statistics ?? []) {
+    if (!statistic.forced && !ctx.userData.statistics?.enabled) continue;
+    const text = {
+      name: statistic.title,
+      description: statistic.description,
+    };
+    notice(labelFrom(text), constants.STATISTIC_STREAM_TYPE, text);
+  }
+
+  const memo: PlaybackMemo = {
+    uuid: ctx.uuid,
+    encryptedPassword: ctx.encryptedPassword,
+    itemId,
+    descriptor: d,
+    type: target.type,
+    videoId: target.videoId,
+    psid: newPlaySessionId(),
+    sources,
+    addonSubtitles,
+    titleMetadata: streamContext
+      ? await requestTitleMetadata(streamContext).catch(() => undefined)
+      : undefined,
+    runtimeMs: target.runtimeMs,
+    createdAt: Date.now(),
+  };
+  keepEnrichedSubtitles(memo, await resolveByItem(ctx.uuid, scope, itemId));
+  await writePlaybackMemo(memo, scope, ctx.persona?.id);
+  if (!playableSources(sources).length) {
+    const reason = (streamsRes?.errors ?? [])
+      .map((e) => [e.title, e.description].filter(Boolean).join(': '))
+      .join('; ');
+    logger.info(
+      {
+        uuid: ctx.uuid,
+        itemId,
+        type: target.type,
+        videoId: target.videoId,
+        reason,
+      },
+      'no playable streams'
+    );
+  }
+  return memo;
+}
+
+function fileExtrasFor(record: MediaSourceRecord): string {
+  const parts: string[] = [];
+  if (record.videoHash) parts.push(`videoHash=${record.videoHash}`);
+  if (record.size) parts.push(`videoSize=${record.size}`);
+  if (record.filename)
+    parts.push(`filename=${encodeURIComponent(record.filename)}`);
+  return parts.join('&');
+}
+
+export async function enrichSourceSubtitles(
+  ctx: JellyfinRequestContext,
+  memo: PlaybackMemo,
+  msid?: string
+): Promise<void> {
+  const record = msid
+    ? memo.sources.find((s) => s.msid === msid)
+    : memo.sources[0];
+  if (!record || record.notice || record.subtitlesEnriched) return;
+  const extras = fileExtrasFor(record);
+
+  const engine = await ctx.engine();
+  const res = await engine
+    .getSubtitles(memo.type, memo.videoId, extras || undefined)
+    .catch((error) => {
+      logger.debug(
+        {
+          itemId: memo.itemId,
+          msid: record.msid,
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'file-matched subtitle request failed'
+      );
+      return null;
+    });
+  if (!res) return;
+
+  const seen = new Set(record.subtitles.map((t) => t.url));
+  let added = 0;
+  for (const track of addonSubtitleTracks(res.data ?? [])) {
+    if (!track.url || seen.has(track.url)) continue;
+    seen.add(track.url);
+    record.subtitles.push(track);
+    added++;
+  }
+  record.subtitlesEnriched = true;
+  logger.debug(
+    { itemId: memo.itemId, msid: record.msid, added },
+    'file-matched subtitles merged'
+  );
+  await writePlaybackMemo(memo, ctx.scope(), ctx.persona?.id);
+}
+
+export async function applyProbedMediaInfo(
+  ctx: JellyfinRequestContext,
+  memo: PlaybackMemo,
+  msid?: string,
+  /* A play, rather than a listing, may wait for its version's probe. */
+  opts: { playing?: boolean } = {}
+): Promise<void> {
+  const record = msid
+    ? memo.sources.find((s) => s.msid === msid)
+    : memo.sources[0];
+  if (!record) return;
+  const applied = await applyStoredMediaInfo(record, memo.titleMetadata, {
+    waitMs: opts.playing
+      ? (ctx.userData.jellyfin?.playWait ?? appConfig.mediaInfo.playWait) * 1000
+      : 0,
+    clientIp: ctx.userData.ip,
+    ids: idsFromVideoId(memo.videoId),
+  }).catch(() => false);
+  if (!applied) return;
+  logger.debug(
+    { itemId: memo.itemId, msid: record.msid },
+    'stored media info applied on play'
+  );
+  await writePlaybackMemo(memo, ctx.scope(), ctx.persona?.id);
+}
+
+export function resolveMarkerId(
+  ctx: JellyfinRequestContext,
+  itemId: string
+): string {
+  return markerIdFor(ctx.uuid, itemId);
+}

@@ -15,7 +15,39 @@ export * from './debrid/index.js';
 export * from './usenet/integration/index.js';
 export * from './release-blocklist/index.js';
 export * from './stream-sessions/index.js';
+export * from './shares/index.js';
+export * from './arr/index.js';
 export * from './proxy/index.js';
+export * from './linked-accounts/index.js';
+export * from './community/index.js';
+export * from './app-reports/index.js';
+export * from './watch-state/index.js';
+export * from './jellyfin/index.js';
+export * from './sync/index.js';
+export { requestTitleMetadata } from './media-info/lookup.js';
+export {
+  onPlay,
+  onProxiedPlay,
+  probesOn,
+  idsFromVideoId,
+  type PlaybackPlay,
+} from './media-info/play.js';
+export {
+  mediaInfoProber,
+  type ProbeFinished,
+  type ProbeJob,
+  type ProberSnapshot,
+} from './media-info/probe.js';
+export {
+  mediaInfoFiles,
+  mediaInfoSummary,
+  pruneMediaInfoProbes,
+  type MediaInfoFile,
+  type MediaInfoSummary,
+} from './media-info/summary.js';
+export type { MediaInfoRecord } from './media-info/record.js';
+export { MEDIA_INFO_PROBE_PATHS } from './config/schema/media-info.js';
+export { sharedRows, type SharedRow } from './media-info/remote.js';
 export * from './tracking/wetrakr.js';
 export * from './tracking/wetrakr-sync.js';
 export * from './tracking/trakt.js';
@@ -55,6 +87,9 @@ export {
   HarbrrApi,
   KnabenAddon,
   EztvAddon,
+  TheRARBGAddon,
+  ThePirateBayAddon,
+  TsukihimeAddon,
   TorrentGalaxyAddon,
   SeaDexAddon,
   EasynewsSearchAddon,

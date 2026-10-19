@@ -1,13 +1,13 @@
 import React from 'react';
 import { FiInfo } from 'react-icons/fi';
 import { PageWrapper } from '@/components/shared/page-wrapper';
-import { Card } from '@/components/ui/card';
-import { Modal } from '@/components/ui/modal';
-import { Tooltip } from '@/components/ui/tooltip';
-import { cn } from '@/components/ui/core/styling';
+import { Card } from '@aiostreams/ui/card';
+import { Modal } from '@aiostreams/ui/modal';
+import { Tooltip } from '@aiostreams/ui/tooltip';
+import { cn } from '@aiostreams/ui/core/styling';
 import { DashboardQueryBoundary } from '@/components/shared/dashboard-query-boundary';
-import { AreaChart, BarChart, DonutChart, Stat } from '@/components/ui/charts';
-import { formatBytes, formatCompact } from '@/lib/format';
+import { AreaChart, BarChart, DonutChart, Stat } from '@aiostreams/ui/charts';
+import { formatBytes, formatCompact } from '@aiostreams/ui/core/format';
 
 /**
  * A number shown in compact form (`1.2M`) with the exact value revealed in a
@@ -145,7 +145,7 @@ function UserActivityModal({
       {activity.isLoading ? (
         <p className="text-sm text-[--muted]">Loading…</p>
       ) : activity.isError ? (
-        <p className="text-sm text-red-500">Failed to load user activity.</p>
+        <p className="text-sm text-red-400">Failed to load user activity.</p>
       ) : !d ? null : (
         <div className="space-y-5">
           <div>
@@ -626,7 +626,7 @@ export function AnalyticsPage() {
                           <td
                             className={cn(
                               'py-2 px-3 text-right tabular-nums',
-                              a.errorRate > 10 && 'text-red-500'
+                              a.errorRate > 10 && 'text-red-400'
                             )}
                           >
                             {a.errorRate}%

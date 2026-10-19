@@ -14,8 +14,8 @@ import {
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { Modal } from '../../../ui/modal';
-import { Button } from '../../../ui/button';
+import { Modal } from '@aiostreams/ui/modal';
+import { Button } from '@aiostreams/ui/button';
 import { IoExtensionPuzzle } from 'react-icons/io5';
 import { PlusIcon } from 'lucide-react';
 
@@ -73,6 +73,7 @@ function SortableReorderItem({ item }: { item: ReorderItem }) {
             src={item.logo}
             alt={item.name}
             className="absolute inset-0 w-full h-full object-contain rounded"
+            referrerPolicy="no-referrer"
           />
         ) : item.type === 'custom' ? (
           <PlusIcon className="w-full h-full text-[--brand]" />

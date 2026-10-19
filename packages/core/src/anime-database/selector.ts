@@ -42,14 +42,20 @@ function advertisedSeasonOf(r: AnimeRecord): number {
  *   - season 0: prefer specials/OVA/ONA.
  *   - season >= 1: keep TV, plus non-TV cours advertising a season > 1, plus
  *     non-TV cours advertising exactly the requested season as long as no TV
- *     record claims that season too.
+ *     record claims that season too. IMDb lookups also keep cours mapped to
+ *     that season and drop the show's specials.
  *
  * Returns the original list if filtering would empty it.
  */
 export function filterCandidatesBySeasonType(
   candidates: AnimeRecord[],
-  season?: number
+  season?: number,
+  idType?: IdType
 ): AnimeRecord[] {
+  if (idType === 'imdbId' && season) {
+    const regular = candidates.filter((r) => r.imdb?.fromSeason !== 0);
+    if (regular.length > 0) candidates = regular;
+  }
   if (candidates.length <= 1) return candidates;
   const tvClaimsSeason =
     season !== undefined &&
@@ -62,6 +68,7 @@ export function filterCandidatesBySeasonType(
     if (season === 0) {
       return [AnimeType.SPECIAL, AnimeType.OVA, AnimeType.ONA].includes(r.type);
     }
+    if (idType === 'imdbId' && r.imdb?.fromSeason === season) return true;
     if (r.type !== AnimeType.TV) {
       const advertisedSeason = advertisedSeasonOf(r);
       if (advertisedSeason > 1) return true;
@@ -86,7 +93,15 @@ export function selectBestRecord(
   if (candidates.length === 0) return null;
   if (candidates.length === 1) return candidates[0];
 
-  logger.debug({ candidates, season, episode }, 'selecting best record');
+  logger.debug(
+    {
+      id: `${idType}:${idValue}`,
+      candidates: candidates.map((c) => c.rid),
+      season,
+      episode,
+    },
+    'selecting best record'
+  );
 
   // A season lookup with no concrete episode is treated as a request for the
   // start of that season (episode 1), so the scorer's `episode >= fromEpisode`

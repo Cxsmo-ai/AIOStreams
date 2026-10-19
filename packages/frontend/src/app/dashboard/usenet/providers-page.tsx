@@ -1,4 +1,4 @@
-import { Card } from '@/components/ui/card';
+import { Card } from '@aiostreams/ui/card';
 import { DashboardLoading } from '@/components/shared/dashboard-query-boundary';
 import { ProviderEditor } from './_components/provider-editor';
 import { useUsenetProviders } from './queries';
@@ -12,7 +12,7 @@ export function UsenetProvidersPage() {
   if (providers.isLoading) return <DashboardLoading />;
   if (providers.isError) {
     return (
-      <Card className="p-6 text-sm text-red-500">
+      <Card className="p-6 text-sm text-red-400">
         Failed to load providers.
       </Card>
     );

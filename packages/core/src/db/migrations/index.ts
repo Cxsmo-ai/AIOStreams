@@ -17,6 +17,34 @@ import { usenetIndexerMetrics } from './0016_usenet_indexer_metrics.js';
 import { streamSessions } from './0017_stream_sessions.js';
 import { taskState } from './0018_task_state.js';
 import { configProfiles } from './0019_config_profiles.js';
+import { animeDatabase } from './0020_anime_database.js';
+import { analyticsIndexes } from './0021_analytics_indexes.js';
+import { animeBuildSources } from './0022_anime_build_sources.js';
+import { linkedAccounts } from './0023_linked_accounts.js';
+import { community } from './0024_community.js';
+import { configSessions } from './0025_config_sessions.js';
+import { usenetLibraryArr } from './0026_usenet_library_arr.js';
+import { usenetUndecodable } from './0027_usenet_undecodable.js';
+import { watchState } from './0028_watch_state.js';
+import { playbackHandoff } from './0029_playback_handoff.js';
+import { watchStateRebuild } from './0030_watch_state_rebuild.js';
+import { watchStateScale } from './0031_watch_state_scale.js';
+import { watchStateMatchKey } from './0032_watch_state_match_key.js';
+import { watchDeliveryLanes } from './0033_watch_delivery_lanes.js';
+import { watchSinkLane } from './0034_watch_sink_lane.js';
+import { watchStateWatchlist } from './0035_watch_state_watchlist.js';
+import { watchSessionDevice } from './0036_watch_session_device.js';
+import { watchSinkRetired } from './0037_watch_sink_retired.js';
+import { watchSessionUser } from './0038_watch_session_user.js';
+import { watchStateDropped } from './0039_watch_state_dropped.js';
+import { watchStateRating } from './0040_watch_state_rating.js';
+import { indexTrim } from './0041_index_trim.js';
+import { watchAirTimes } from './0042_watch_air_times.js';
+import { mediaInfo } from './0043_media_info.js';
+import { mediaInfoProbes } from './0044_media_info_probes.js';
+import { mediaInfoSources } from './0045_media_info_sources.js';
+import { jellyfinUserAddresses } from './0046_jellyfin_user_addresses.js';
+import { appReports } from './0047_app_reports.js';
 import { legacyHouseholdActivity } from './900001_legacy_household_activity.js';
 import { legacyVpnManagement } from './900002_legacy_vpn_management.js';
 import { torrentclawNzbQuota } from './900003_torrentclaw_nzb_quota.js';
@@ -61,6 +89,40 @@ export const MIGRATIONS: readonly Migration[] = [
   trackerProviderFacets,
   trackerProviderFacetRetry,
   wetrakrRequestQuota,
+  // The fork has already published id 20 as `addon_performance` and ids
+  // 900001–900011 for its custom schema. Keep those identities untouched;
+  // reserve a monotonic range for upstream migrations while preserving their
+  // original names so databases created by upstream can be recognized.
+  ...[
+    animeDatabase,
+    analyticsIndexes,
+    animeBuildSources,
+    linkedAccounts,
+    community,
+    configSessions,
+    usenetLibraryArr,
+    usenetUndecodable,
+    watchState,
+    playbackHandoff,
+    watchStateRebuild,
+    watchStateScale,
+    watchStateMatchKey,
+    watchDeliveryLanes,
+    watchSinkLane,
+    watchStateWatchlist,
+    watchSessionDevice,
+    watchSinkRetired,
+    watchSessionUser,
+    watchStateDropped,
+    watchStateRating,
+    indexTrim,
+    watchAirTimes,
+    mediaInfo,
+    mediaInfoProbes,
+    mediaInfoSources,
+    jellyfinUserAddresses,
+    appReports,
+  ].map((migration, index) => ({ ...migration, id: 900012 + index })),
 ];
 
 export type { Migration } from './types.js';

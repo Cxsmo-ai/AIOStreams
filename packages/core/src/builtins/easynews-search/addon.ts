@@ -11,7 +11,7 @@ import {
   createLogger,
   getTimeTakenSincePoint,
   normaliseParsedMediaInfo,
-  normaliseAudioTag,
+  normaliseAudioTags,
   normaliseEncode,
   normaliseResolution,
 } from '../../utils/index.js';
@@ -36,7 +36,7 @@ import { BuiltinProxy } from '../../proxy/builtin.js';
 const logger = createLogger('easynews');
 
 function easynewsAudioTag(acodec?: string, title?: string): string | undefined {
-  const tag = normaliseAudioTag(acodec, undefined);
+  const [tag] = normaliseAudioTags(acodec, undefined);
   if (tag === 'DTS' && title && /dts[\s._-]?(hd|x|es)\b/i.test(title)) {
     return undefined;
   }
@@ -201,6 +201,7 @@ export class EasynewsSearchAddon extends BaseDebridAddon<EasynewsSearchAddonConf
 
       const audioTag = easynewsAudioTag(item.acodec, item.title);
       const parsedMediaInfo = normaliseParsedMediaInfo({
+        mediaInfoQuality: 'indexer',
         languages: item.audioLangs,
         subtitles: item.subLangs,
         audioTags: audioTag ? [audioTag] : undefined,

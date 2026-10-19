@@ -1,14 +1,14 @@
 import { z } from 'zod';
+import { createRequire } from 'module';
+import type UserAgentType from 'user-agents';
 import { parseTime } from '../../utils/time.js';
 import { Env } from '../../utils/env.js';
-import UserAgent from 'user-agents';
 
-/**
- * Replace `{version}` / `{random}` placeholders in user-agent strings.
- */
-export const applyUserAgentTemplate = (value: string): string => {
-  const trimmed = value.toLowerCase().trim();
-  if (['false', 'none', ''].includes(trimmed)) return 'false';
+const requireCjs = createRequire(import.meta.url);
+let UserAgent: typeof UserAgentType | undefined;
+
+const randomUserAgent = (): string => {
+  UserAgent ??= requireCjs('user-agents') as typeof UserAgentType;
   const filters =
     typeof process.env.RANDOM_USER_AGENT_FILTERS === 'string'
       ? (() => {
@@ -19,9 +19,18 @@ export const applyUserAgentTemplate = (value: string): string => {
           }
         })()
       : undefined;
+  return new UserAgent(filters).toString();
+};
+
+/**
+ * Replace `{version}` / `{random}` placeholders in user-agent strings.
+ */
+export const applyUserAgentTemplate = (value: string): string => {
+  const trimmed = value.toLowerCase().trim();
+  if (['false', 'none', ''].includes(trimmed)) return 'false';
   return value
     .replace(/{version}/g, Env.VERSION || 'unknown')
-    .replace(/{random}/g, new UserAgent(filters).toString());
+    .replace(/{random}/g, () => randomUserAgent());
 };
 
 /** Resolve function for nullable user-agent strings. */
@@ -55,6 +64,19 @@ export const urlString = z
     }
   })
   .transform(trimTrailingSlash);
+
+/** A URL or null, where an empty env value means null. */
+export const optionalUrlString = z.union([
+  z.null(),
+  z.string().transform((value, ctx) => {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const url = urlString.safeParse(trimmed);
+    if (url.success) return url.data;
+    ctx.addIssue({ code: 'custom', message: `Invalid URL: "${value}"` });
+    return z.NEVER;
+  }),
+]);
 
 /**
  * Accepts a single URL string, an array of URL strings, or a JSON-encoded
@@ -504,15 +526,28 @@ export const seconds = z
  * Accepts either a string array (DB-stored shape) or a comma-separated string
  * (env-supplied shape) and produces a trimmed string array.
  */
+const splitList = (value: string) =>
+  value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
 export const commaSeparatedList = z.union([
   z.array(z.string()),
-  z.string().transform((value) =>
-    value
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0)
-  ),
+  z.string().transform(splitList),
 ]);
+
+export function commaSeparatedEnumList<
+  const T extends readonly [string, ...string[]],
+>(values: T) {
+  return z.union([
+    z.array(z.enum(values)),
+    z
+      .string()
+      .transform(splitList)
+      .pipe(z.array(z.enum(values))),
+  ]);
+}
 
 /**
  * Same as `seconds` but allows -1 as a sentinel (commonly used for "disabled").

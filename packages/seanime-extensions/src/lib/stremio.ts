@@ -210,9 +210,15 @@ export interface Extras {
 
 export class Stremio {
   private readonly baseUrl: string;
+  private readonly manifestQuery: string;
 
   constructor(manifestUrl: string) {
-    this.baseUrl = this.getBaseUrl(manifestUrl);
+    const clean = manifestUrl.trim();
+    const queryStart = clean.indexOf('?');
+    this.manifestQuery = queryStart === -1 ? '' : clean.slice(queryStart);
+    this.baseUrl = this.getBaseUrl(
+      queryStart === -1 ? clean : clean.slice(0, queryStart)
+    );
   }
 
   /**
@@ -317,7 +323,7 @@ export class Stremio {
       ? (endpoint.split(' /') as [StremioMethod, string])
       : (['GET', endpoint.slice(1)] as [StremioMethod, string]);
 
-    const queryString = this.toQueryString(query);
+    const queryString = this.mergeManifestQuery(this.toQueryString(query));
     const url = `${this.baseUrl}/${path}${queryString}`;
 
     const headers: Record<string, string> = {
@@ -354,6 +360,12 @@ export class Stremio {
     }
 
     return (await response.json()) as T;
+  }
+
+  private mergeManifestQuery(queryString: string): string {
+    if (!this.manifestQuery) return queryString;
+    if (!queryString) return this.manifestQuery;
+    return `${this.manifestQuery}&${queryString.slice(1)}`;
   }
 
   private toQueryString(query?: StremioRequestOptions['query']): string {

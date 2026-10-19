@@ -15,6 +15,7 @@ import {
   enrichParsedIdWithAnimeEntry,
   formatZodError,
   fromUrlSafeBase64,
+  getEnrichedImdbId,
   getSimpleTextHash,
   getTimeTakenSincePoint,
   SERVICE_DETAILS,
@@ -38,7 +39,11 @@ import {
   FileInfo,
 } from '../../debrid/index.js';
 import { TorboxRouteSchema } from '../../debrid/torbox-route-schema.js';
-import { processTorrents, processNZBs } from '../utils/debrid.js';
+import {
+  processTorrents,
+  processNZBs,
+  filterUnprocessedTorrentsPreDownload,
+} from '../utils/debrid.js';
 import {
   calculateAbsoluteEpisode,
   isNonAnimeAbsoluteEligible,
@@ -258,8 +263,9 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
       ];
     }
 
-    const torrentsToDownload = torrentResults.filter(
-      (t) => !t.hash && t.downloadUrl
+    const torrentsToDownload = filterUnprocessedTorrentsPreDownload(
+      torrentResults.filter((t) => !t.hash && t.downloadUrl),
+      searchMetadata
     );
     torrentResults = torrentResults.filter((t) => t.hash);
     if (torrentsToDownload.length > 0) {
@@ -294,28 +300,8 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
       torrentResults = [...torrentResults, ...enrichedResults];
     }
 
-    const torrentServices = this.userData.services.filter(
-      (s) =>
-        ![
-          'nzbdav',
-          'altmount',
-          'stremio_nntp',
-          'stremthru_newz',
-          'aiostreams',
-          'deepbrid',
-        ].includes(s.id)
-    );
-    const nzbServices = this.userData.services.filter((s) =>
-      [
-        'nzbdav',
-        'altmount',
-        'torbox',
-        'stremio_nntp',
-        'stremthru_newz',
-        'aiostreams',
-        'deepbrid',
-      ].includes(s.id)
-    );
+    const torrentServices = this.getTorrentServices();
+    const nzbServices = this.getNzbServices();
 
     if (torrentServices.length === 0 && torrentResults.length > 0) {
       errorStreams.push(
@@ -419,8 +405,13 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
       episode: searchMetadata.episode,
       absoluteEpisode: searchMetadata.absoluteEpisode,
       relativeAbsoluteEpisode: searchMetadata.relativeAbsoluteEpisode,
+      tvdbSeason: searchMetadata.tvdbSeason,
+      tvdbEpisode: searchMetadata.tvdbEpisode,
       airDates: searchMetadata.airDates,
       isDateBased: searchMetadata.isDateBased,
+      imdbId: searchMetadata.imdbId,
+      tmdbId: searchMetadata.tmdbId,
+      tvdbId: searchMetadata.tvdbId,
     };
     const metadataId = getSimpleTextHash(JSON.stringify(titleMetadata));
     await metadataStore().set(
@@ -480,6 +471,32 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
     });
 
     return [...resultStreams, ...errorStreams];
+  }
+
+  protected getTorrentServices(): T['services'] {
+    return this.userData.services.filter(
+      (s) =>
+        ![
+          'nzbdav',
+          'altmount',
+          'stremio_nntp',
+          'stremthru_newz',
+          'aiostreams',
+        ].includes(s.id)
+    );
+  }
+
+  protected getNzbServices(): T['services'] {
+    return this.userData.services.filter((s) =>
+      [
+        'nzbdav',
+        'altmount',
+        'torbox',
+        'stremio_nntp',
+        'stremthru_newz',
+        'aiostreams',
+      ].includes(s.id)
+    );
   }
 
   protected buildQueries(
@@ -688,7 +705,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
   ): Promise<SearchMetadata> {
     const start = Date.now();
 
-    const animeEntry = AnimeDatabase.getInstance().getEntryById(
+    const animeEntry = await AnimeDatabase.getInstance().getEntryById(
       parsedId.type,
       parsedId.value,
       parsedId.season ? Number(parsedId.season) : undefined,
@@ -811,7 +828,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
     const imdbId =
       parsedId.type === 'imdbId'
         ? parsedId.value.toString()
-        : animeEntry?.mappings?.imdbId?.toString();
+        : getEnrichedImdbId(parsedId, animeEntry);
     // const tmdbId =
     //   parsedId.type === 'themoviedbId'
     //     ? parsedId.value.toString()
@@ -845,6 +862,8 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
       airDates: metadata.episodeAirDates,
       episodeAirDate: metadata.episodeAirDate,
       resolvedSeasonFirstEpisode: metadata.resolvedSeasonFirstEpisode,
+      tvdbSeason: metadata.tvdbSeason,
+      tvdbEpisode: metadata.tvdbEpisode,
       sceneTitles: metadata.sceneTitles,
       country: metadata.country,
       titleConflicts: metadata.titleConflicts,
@@ -906,6 +925,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
               : undefined,
             quotaReservationKey: torrentOrNzb.quotaReservationKey,
             quotaBytes: torrentOrNzb.quotaBytes,
+            infoUrl: torrentOrNzb.infoUrl,
             index: torrentOrNzb.file.index,
             easynewsUrl:
               torrentOrNzb.service?.id === 'easynews'
@@ -950,7 +970,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
     const name = `${torrentOrNzb.service?.library ? '🗃️ ' : ''}${isPrivate ? '🔑 ' : ''}[${shortCode} ${cacheIndicator}] ${this.name} ${isFreeleech ? 'FREELEECH' : ''} `;
     const description = `${torrentOrNzb.title ? torrentOrNzb.title : ''}\n${torrentOrNzb.file.name ? torrentOrNzb.file.name : ''}\n${
       torrentOrNzb.indexer ? `🔍 ${torrentOrNzb.indexer}` : ''
-    } ${'seeders' in torrentOrNzb && torrentOrNzb.seeders ? `👤 ${torrentOrNzb.seeders}` : ''} ${
+    } ${'seeders' in torrentOrNzb && typeof torrentOrNzb.seeders === 'number' ? `👤 ${torrentOrNzb.seeders}` : ''} ${
       torrentOrNzb.age ? `🕒 ${formatHours(torrentOrNzb.age)}` : ''
     } ${torrentOrNzb.group ? `\n🏷️ ${torrentOrNzb.group}` : ''}`;
 
@@ -974,6 +994,8 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
             )
           : undefined,
       nzbUrl: torrentOrNzb.type === 'usenet' ? torrentOrNzb.nzb : undefined,
+      infoUrl:
+        torrentOrNzb.type === 'usenet' ? torrentOrNzb.infoUrl : undefined,
       releaseKey:
         torrentOrNzb.type === 'usenet' ? torrentOrNzb.releaseKey : undefined,
       idMatched: torrentOrNzb.confirmed === true ? true : undefined,
@@ -998,6 +1020,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
         // add and wait for an NZB when clicked, so valid queued results survive
         // generic "exclude uncached" filters while keeping the ⏳ label.
         aioOnDemandPlayable: onDemandUsenetPlayable || undefined,
+        videoHash: torrentOrNzb.file.videoHash,
       },
       parsedMediaInfo: torrentOrNzb.parsedMediaInfo,
     };

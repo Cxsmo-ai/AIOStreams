@@ -1,0 +1,516 @@
+import { Router, type Request, type Response } from 'express';
+import { z } from 'zod';
+import {
+  accountScope,
+  appReportBodySchema,
+  AppReportsDisabledError,
+  config as appConfig,
+  createLogger,
+  getWatchStateProvider,
+  itemIdForWatchRow,
+  PlaybackHandoffRepository,
+  personaUserId,
+  readToken,
+  submitAppReport,
+  UserRepository,
+  WatchSessionRepository,
+  WatchStateRepository,
+  type JellyfinPersona,
+  type WatchHistoryCursor,
+  type WatchScope,
+  type WatchStateRow,
+} from '@aiostreams/core';
+import {
+  bodyOf,
+  jf,
+  accountLocked,
+  personaById,
+  personaLocked,
+  userUnlocks,
+  personasOf,
+  qi,
+  qs,
+  type JellyfinRequestContext,
+} from './context.js';
+import { summaryItem } from './items.js';
+import { mapLimited, ROW_CONCURRENCY } from './library.js';
+import {
+  authenticationResult,
+  listedFor,
+  sessionFromRow,
+  userDto,
+} from './users.js';
+import {
+  appReportsRateLimiter,
+  jellyfinLoginRateLimiter,
+} from '../../middlewares/ratelimit.js';
+
+/* The server's own web app; an API key is another tool's credential and may not use it. */
+
+const logger = createLogger('jellyfin');
+const router: Router = Router({ mergeParams: true });
+
+const SESSIONS_LIMIT = 50;
+const HISTORY_PAGE = 50;
+const HISTORY_PAGE_MAX = 200;
+const CLEAR_KEYS_MAX = 1000;
+const EXPORT_PAGE = 1000;
+
+function web(
+  handler: (
+    req: Request,
+    res: Response,
+    ctx: JellyfinRequestContext
+  ) => Promise<void>
+) {
+  return jf(async (req, res, ctx) => {
+    if (ctx.apiKey) {
+      res.status(403).json({ Message: 'Not available to API keys' });
+      return;
+    }
+    await handler(req, res, ctx);
+  });
+}
+
+interface WebUser {
+  persona: JellyfinPersona | null;
+  id: string;
+  /** The history this user reads and writes. */
+  scope: WatchScope;
+}
+
+function usersOf(ctx: JellyfinRequestContext): WebUser[] {
+  const account = accountScope(ctx.uuid);
+  return [
+    { persona: null, id: personaUserId(ctx.uuid, ''), scope: account },
+    ...personasOf(ctx.userData).map((p) => ({
+      persona: p,
+      id: personaUserId(ctx.uuid, p.id),
+      scope:
+        p.history === 'shared' ? account : { uuid: ctx.uuid, persona: p.id },
+    })),
+  ];
+}
+
+function ownsScope(user: WebUser): boolean {
+  return user.scope.persona === (user.persona?.id ?? '');
+}
+
+/**
+ * Who the caller may read here: a persona only itself, the configuration's own
+ * user everyone, as it is the one that holds the personas.
+ */
+function visibleUsers(ctx: JellyfinRequestContext): WebUser[] {
+  const users = usersOf(ctx);
+  if (!ctx.persona) return users;
+  return users.filter((u) => u.persona?.id === ctx.persona?.id);
+}
+
+/** A session that began with the configuration password, or is the account itself. */
+function provedPassword(ctx: JellyfinRequestContext): boolean {
+  return !ctx.persona || readToken(ctx.token)?.o === 1;
+}
+
+function isCaller(ctx: JellyfinRequestContext, user: WebUser): boolean {
+  return (user.persona?.id ?? '') === (ctx.persona?.id ?? '');
+}
+
+type Secret = 'pin' | 'password' | 'password-pin';
+
+/** What switching to `user` asks of the caller. */
+function secretFor(ctx: JellyfinRequestContext, user: WebUser): Secret | null {
+  const locked = user.persona
+    ? personaLocked(user.persona)
+    : accountLocked(ctx.userData);
+  // A PIN is asked on every switch, to the signed-in user too, or handing over
+  // a signed-in device would hand over the account.
+  if (isCaller(ctx, user)) return locked ? 'pin' : null;
+  // A persona session may have begun with its PIN alone.
+  if (!provedPassword(ctx) && (!user.persona || !locked)) {
+    return locked ? 'password-pin' : 'password';
+  }
+  return locked ? 'pin' : null;
+}
+
+async function passwordOpens(ctx: JellyfinRequestContext, password: string) {
+  return UserRepository.verifyUser(ctx.uuid, password).then(
+    () => true,
+    () => false
+  );
+}
+
+async function secretOpens(
+  ctx: JellyfinRequestContext,
+  user: WebUser,
+  needs: Secret,
+  secret: string
+): Promise<boolean> {
+  if (needs === 'pin') {
+    return userUnlocks(ctx.uuid, ctx.userData, user.persona, secret);
+  }
+  if (needs === 'password') return passwordOpens(ctx, secret);
+  const slash = secret.lastIndexOf('/');
+  if (slash <= 0) return false;
+  return (
+    (await passwordOpens(ctx, secret.slice(0, slash))) &&
+    userUnlocks(ctx.uuid, ctx.userData, user.persona, secret.slice(slash + 1))
+  );
+}
+
+function avatarOf(ctx: JellyfinRequestContext, user: WebUser): string | null {
+  return (
+    (user.persona
+      ? user.persona.avatar
+      : ctx.userData.jellyfin?.primary?.avatar) ?? null
+  );
+}
+
+function encodeCursor(row: WatchStateRow): string {
+  return Buffer.from(
+    JSON.stringify([row.sortAt, row.persona, row.itemKey])
+  ).toString('base64url');
+}
+
+function decodeCursor(raw: string | undefined): WatchHistoryCursor | undefined {
+  if (!raw) return undefined;
+  try {
+    const [sortAt, persona, itemKey] = JSON.parse(
+      Buffer.from(raw, 'base64url').toString('utf8')
+    );
+    if (
+      typeof sortAt === 'number' &&
+      typeof persona === 'string' &&
+      typeof itemKey === 'string'
+    ) {
+      return { sortAt, persona, itemKey };
+    }
+  } catch {}
+  return undefined;
+}
+
+router.get(
+  '/AIOStreams/Activity',
+  web(async (_req, res, ctx) => {
+    const users = visibleUsers(ctx);
+    const [counts, rows] = await Promise.all([
+      WatchStateRepository.historyCounts(ctx.uuid),
+      ctx.persona
+        ? []
+        : WatchSessionRepository.listForUuid(ctx.uuid, SESSIONS_LIMIT),
+    ]);
+    const idleSince =
+      Date.now() - appConfig.watchState.sessionIdleTimeout * 1000;
+    const sessions = await Promise.all(
+      rows
+        .filter((row) => row.endedAt == null && row.lastCheckinAt >= idleSince)
+        .map((row) => {
+          const key = row.userPersona ?? row.persona;
+          const user = key ? personaById(ctx.userData, key) : null;
+          return key && !user ? null : sessionFromRow(ctx, row, user, null);
+        })
+    );
+    const byScope = new Map(counts.map((c) => [c.persona, c]));
+    const none = {
+      played: 0,
+      movies: 0,
+      episodes: 0,
+      inProgress: 0,
+      favorites: 0,
+      lastAt: null,
+    };
+    res.json({
+      users: users.map((u) => ({
+        user: userDto(ctx.uuid, ctx.userData, u.persona),
+        avatar: avatarOf(ctx, u),
+        hidden: !!u.persona?.hidden,
+        locked: u.persona
+          ? personaLocked(u.persona)
+          : accountLocked(ctx.userData),
+        historyOf: personaUserId(ctx.uuid, u.scope.persona),
+        counts: ownsScope(u) ? (byScope.get(u.scope.persona) ?? none) : null,
+      })),
+      sessions: sessions.filter(Boolean),
+    });
+  })
+);
+
+/** Who the caller may switch to; a separate user is reached only by its own sign-in. */
+function switchable(ctx: JellyfinRequestContext): WebUser[] {
+  return usersOf(ctx).filter((u) =>
+    listedFor(ctx.userData, ctx.persona, u.persona)
+  );
+}
+
+router.get(
+  '/AIOStreams/Users',
+  web(async (_req, res, ctx) => {
+    res.json(
+      switchable(ctx).map((u) => ({
+        user: userDto(ctx.uuid, ctx.userData, u.persona),
+        avatar: avatarOf(ctx, u),
+        hidden: !!u.persona?.hidden,
+        needs: secretFor(ctx, u),
+      }))
+    );
+  })
+);
+
+router.get(
+  '/AIOStreams/History',
+  web(async (req, res, ctx) => {
+    const users = visibleUsers(ctx);
+    const wanted = qs(req, 'userId')?.toLowerCase();
+    const scoped = wanted ? users.find((u) => u.id === wanted) : undefined;
+    if (wanted && !scoped) {
+      res.status(404).json({ Message: 'User not found' });
+      return;
+    }
+    const personas = scoped
+      ? [scoped.scope.persona]
+      : [...new Set(users.filter(ownsScope).map((u) => u.scope.persona))];
+    const limit = Math.min(
+      Math.max(1, qi(req, 'limit', HISTORY_PAGE)),
+      HISTORY_PAGE_MAX
+    );
+    const rows = await WatchStateRepository.listHistory(ctx.uuid, personas, {
+      limit: limit + 1,
+      after: decodeCursor(qs(req, 'cursor')),
+      localOnly: qs(req, 'source') === 'local',
+    });
+    const page = rows.slice(0, limit);
+    const trackers = page.some((r) => r.origin === 'import')
+      ? new Map(
+          (await PlaybackHandoffRepository.listAllSinks(ctx.uuid)).map((s) => [
+            s.id,
+            s.addonName ?? s.addonInstanceId,
+          ])
+        )
+      : new Map<string, string>();
+    const items = await mapLimited(page, ROW_CONCURRENCY, (row) =>
+      summaryItem(ctx, row)
+    );
+    res.json({
+      items: page.map((row, i) => ({
+        userId: personaUserId(ctx.uuid, row.persona),
+        itemKey: row.itemKey,
+        kind: row.kind,
+        played: row.played,
+        playCount: row.playCount,
+        positionMs: row.positionMs,
+        durationMs: row.durationMs,
+        favorite: row.favorite,
+        lastPlayedAt: row.lastPlayedAt,
+        sortAt: row.sortAt,
+        origin: row.origin,
+        tracker: row.sinkId ? (trackers.get(row.sinkId) ?? null) : null,
+        item: items[i] ?? {
+          Id: itemIdForWatchRow(row),
+          Name: row.snapshot?.name ?? row.baseId,
+          SeriesName: row.snapshot?.seriesName,
+          IndexNumber: row.episode ?? undefined,
+          ParentIndexNumber: row.season ?? undefined,
+          Type: row.kind === 'episode' ? 'Episode' : 'Movie',
+        },
+      })),
+      cursor: rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
+    });
+  })
+);
+
+const clearBody = z.object({
+  userId: z.string().min(1),
+  itemKeys: z.array(z.string().min(1)).min(1).max(CLEAR_KEYS_MAX).optional(),
+});
+
+/* Local only: a tracker that still lists a title brings it back on its next sync. */
+router.post(
+  '/AIOStreams/History/Clear',
+  web(async (req, res, ctx) => {
+    const parsed = clearBody.safeParse(bodyOf(req));
+    if (!parsed.success) {
+      res
+        .status(400)
+        .json({ Message: 'userId and optional itemKeys expected' });
+      return;
+    }
+    const user = visibleUsers(ctx).find(
+      (u) => u.id === parsed.data.userId.toLowerCase()
+    );
+    if (!user) {
+      res.status(404).json({ Message: 'User not found' });
+      return;
+    }
+    const cleared = await getWatchStateProvider().clear(
+      user.scope,
+      parsed.data.itemKeys
+    );
+    logger.info(
+      {
+        uuid: ctx.uuid,
+        persona: user.scope.persona,
+        cleared,
+        all: !parsed.data.itemKeys,
+      },
+      'watch history cleared'
+    );
+    res.json({ cleared });
+  })
+);
+
+function iso(ms: number | null): string | null {
+  return ms ? new Date(ms).toISOString() : null;
+}
+
+function exportRow(r: WatchStateRow) {
+  return {
+    persona: r.persona,
+    itemKey: r.itemKey,
+    kind: r.kind,
+    type: r.mediaType,
+    id: r.baseId,
+    season: r.season,
+    episode: r.episode,
+    videoId: r.videoId,
+    played: r.played,
+    playCount: r.playCount,
+    positionMs: r.positionMs,
+    durationMs: r.durationMs,
+    favorite: r.favorite,
+    lastPlayedAt: iso(r.lastPlayedAt),
+    updatedAt: iso(r.updatedAt),
+    origin: r.origin,
+  };
+}
+
+/** Resolves once the chunk is buffered, or the client has gone. */
+function write(res: Response, chunk: string): Promise<void> {
+  if (res.write(chunk)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      res.off('drain', done);
+      res.off('close', done);
+      resolve();
+    };
+    res.once('drain', done);
+    res.once('close', done);
+  });
+}
+
+/* Written a page at a time, so a long history is never held whole. */
+router.get(
+  '/AIOStreams/History/Export',
+  web(async (_req, res, ctx) => {
+    const owners = visibleUsers(ctx).filter(ownsScope);
+    const personas = [...new Set(owners.map((u) => u.scope.persona))];
+    const head = JSON.stringify({
+      exportedAt: new Date().toISOString(),
+      users: owners.map((u) => ({
+        id: u.id,
+        persona: u.scope.persona,
+        name: userDto(ctx.uuid, ctx.userData, u.persona).Name,
+      })),
+    });
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="watch-history-${ctx.uuid.slice(0, 8)}.json"`
+    );
+    res.type('json');
+    let gone = false;
+    res.once('close', () => (gone = true));
+    try {
+      await write(res, `${head.slice(0, -1)},"rows":[`);
+      let after: { persona: string; itemKey: string } | undefined;
+      let first = true;
+      while (!gone) {
+        const page = await WatchStateRepository.listPage(ctx.uuid, personas, {
+          limit: EXPORT_PAGE,
+          after,
+        });
+        if (!page.length) break;
+        const rows = page.map((r) => JSON.stringify(exportRow(r))).join(',');
+        await write(res, first ? rows : `,${rows}`);
+        first = false;
+        if (page.length < EXPORT_PAGE) break;
+        const last = page[page.length - 1];
+        after = { persona: last.persona, itemKey: last.itemKey };
+      }
+      res.end(']}');
+    } catch (error) {
+      logger.warn(
+        {
+          uuid: ctx.uuid,
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'watch history export failed'
+      );
+      res.destroy();
+    }
+  })
+);
+
+/** A report from the apps, kept for this server's admins and passed on to the developer when asked. */
+router.post(
+  '/AIOStreams/Reports',
+  web(async (req, res, ctx) => {
+    const body = bodyOf(req);
+    const parsed = appReportBodySchema.safeParse(body);
+    if (!parsed.success) {
+      res
+        .status(400)
+        .json({ Message: 'A report needs a platform and a summary' });
+      return;
+    }
+    if (!(await appReportsRateLimiter.tryConsume(req))) {
+      res.status(429).json({ Message: 'Too many reports' });
+      return;
+    }
+    try {
+      res.json(
+        await submitAppReport(
+          parsed.data,
+          { uuid: ctx.uuid, persona: ctx.persona?.id ?? null },
+          body.forward === true
+        )
+      );
+    } catch (error) {
+      if (!(error instanceof AppReportsDisabledError)) throw error;
+      res.status(404).json({ Message: 'This server keeps no reports' });
+    }
+  })
+);
+
+router.post(
+  '/AIOStreams/Token',
+  web(async (req, res, ctx) => {
+    const body = bodyOf(req);
+    const wanted = String(body.UserId ?? '').toLowerCase();
+    const secret = String(body.Pw ?? '');
+    const user = switchable(ctx).find((u) => u.id === wanted);
+    if (!user) {
+      res.status(404).json({ Message: 'User not found' });
+      return;
+    }
+    const needs = secretFor(ctx, user);
+    if (needs && !(await jellyfinLoginRateLimiter.tryConsume(req))) {
+      res.status(429).json({ Message: 'Too many attempts' });
+      return;
+    }
+    const allowed = needs ? await secretOpens(ctx, user, needs, secret) : true;
+    if (!allowed) {
+      res.status(401).json({ Message: 'Invalid password' });
+      return;
+    }
+    res.json(
+      await authenticationResult(
+        req,
+        ctx.uuid,
+        ctx.encryptedPassword,
+        ctx.userData,
+        user.persona,
+        { provedPassword: provedPassword(ctx) }
+      )
+    );
+  })
+);
+
+export default router;

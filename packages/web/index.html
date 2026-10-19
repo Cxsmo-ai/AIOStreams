@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>AIOStreams</title>
+    <meta name="apple-mobile-web-app-title" content="AIOStreams" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="theme-color" content="#070707" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="darkreader-lock" />
+    <% if (icons) { %>
+    <link rel="icon" href="<%= root %>favicon.ico" sizes="any" />
+    <link rel="icon" href="<%= root %>icon0.svg" type="image/svg+xml" />
+    <% } else { %>
+    <!-- The apps' web views fetch an icon again on every navigation, and no tab shows it. -->
+    <link rel="icon" href="data:," />
+    <% } %>
+    <link rel="apple-touch-icon" href="<%= root %>apple-icon.png" />
+    <link rel="manifest" href="<%= root %>manifest.json" />
+    <script>
+      // Players drawn beneath the page show through it, which the apps' web
+      // views only render for a page transparent from the start.
+      if (window.jmpInfo || window.aiostreamsApp || window.tizen) {
+        document.documentElement.classList.add('see-through');
+        document.querySelector('meta[name="color-scheme"]').remove();
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

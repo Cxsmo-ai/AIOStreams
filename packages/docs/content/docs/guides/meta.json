@@ -3,11 +3,14 @@
   "pages": [
     "groups",
     "usenet",
+    "private-trackers",
+    "sonarr-radarr",
     "release-blocklist",
     "scored-sorting",
     "seanime",
     "sso",
     "config-profiles",
-    "development"
+    "development",
+    "translating"
   ]
 }

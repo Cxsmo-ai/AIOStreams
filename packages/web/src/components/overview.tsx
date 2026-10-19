@@ -1,0 +1,141 @@
+import { Trans } from '@lingui/react/macro';
+import React from 'react';
+import { Modal } from '@aiostreams/ui/modal';
+import { Popover } from '@aiostreams/ui/popover';
+import { cn } from '@aiostreams/ui/core/styling';
+import { useMediaQuery } from '@aiostreams/ui/hooks/media-query';
+import { Artwork } from './cards';
+
+function Banner({ image }: { image: string[] }) {
+  if (!image.length) return null;
+  return (
+    <div
+      aria-hidden
+      data-ui="overview-banner"
+      className="pointer-events-none absolute inset-x-0 top-0 h-32 overflow-hidden"
+    >
+      <div className="absolute inset-0 opacity-30">
+        <Artwork src={image} alt="" />
+      </div>
+      <div className="absolute inset-0 bg-gradient-to-t from-[--paper] to-transparent" />
+    </div>
+  );
+}
+
+interface OverviewDetails {
+  title: string;
+  line?: React.ReactNode;
+  overview: string | null | undefined;
+  image: string[];
+}
+
+export function OverviewInfo({
+  title,
+  line,
+  overview,
+  image,
+  trigger,
+  open,
+  onOpenChange,
+}: OverviewDetails & {
+  /** Without one, it opens with `open`, as a dialog. */
+  trigger?: React.ReactElement;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  const wide = useMediaQuery('(min-width: 1024px)');
+  const text = (
+    <p
+      data-ui="overview-text"
+      className="select-text whitespace-pre-line text-sm text-gray-300"
+    >
+      {overview}
+    </p>
+  );
+
+  if (wide && trigger) {
+    return (
+      <Popover
+        trigger={trigger}
+        align="end"
+        data-ui="overview-popover"
+        className="relative max-h-[min(32rem,var(--radix-popover-content-available-height))] w-[30rem] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl bg-[--paper] p-0"
+      >
+        <Banner image={image} />
+        <div className="relative space-y-3 p-4 pt-16">
+          <div className="space-y-1">
+            <p className="text-lg font-semibold leading-snug">{title}</p>
+            {line && <p className="text-sm text-[--muted]">{line}</p>}
+          </div>
+          {text}
+        </div>
+      </Popover>
+    );
+  }
+  return (
+    <Modal
+      data-ui="dialog"
+      data-name="overview"
+      trigger={trigger}
+      open={open}
+      onOpenChange={onOpenChange}
+      title={title}
+      description={line}
+      contentClass="overflow-hidden"
+      headerClass="relative z-[1] pt-12 text-start"
+      closeClass="z-[2]"
+    >
+      <Banner image={image} />
+      <div className="relative z-[1]">{text}</div>
+    </Modal>
+  );
+}
+
+export const Overview = React.memo(function Overview({
+  clampClass,
+  className,
+  ...details
+}: OverviewDetails & { clampClass: string; className?: string }) {
+  const ref = React.useRef<HTMLParagraphElement>(null);
+  const [clipped, setClipped] = React.useState(false);
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = () => setClipped(el.scrollHeight > el.clientHeight + 1);
+    check();
+    const observer = new ResizeObserver(check);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [details.overview]);
+  if (!details.overview) return null;
+  // A stretched flex item's height is definite, so the spacer can float More to the last line.
+  // Clamped by height: WebKit lays out line-clamp's -webkit-box as a column and drops the floats.
+  return (
+    <div data-ui="overview" className={cn('flex', className)}>
+      <p
+        ref={ref}
+        className={cn(
+          'min-w-0 select-text overflow-hidden whitespace-pre-line before:float-right rtl:before:float-left before:h-[calc(100%-1lh)]',
+          clampClass
+        )}
+      >
+        {clipped && (
+          <OverviewInfo
+            {...details}
+            trigger={
+              <button
+                type="button"
+                data-ui="overview-more"
+                data-focus="own"
+                className="relative z-[1] clear-both float-right rtl:float-left ps-5 font-medium text-[--muted] transition-[color,box-shadow] hover:text-white focus-visible:text-white focus-visible:underline [[data-tv]_&]:ms-5 [[data-tv]_&]:rounded-full [[data-tv]_&]:px-2 [[data-tv]_&]:focus-visible:shadow-[inset_0_0_0_999px_rgb(255_255_255/0.2)] [[data-tv]_&]:focus-visible:no-underline"
+              >
+                <Trans>More</Trans>
+              </button>
+            }
+          />
+        )}
+        {details.overview}
+      </p>
+    </div>
+  );
+});

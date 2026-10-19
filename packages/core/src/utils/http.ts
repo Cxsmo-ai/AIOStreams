@@ -5,6 +5,8 @@ import {
   Env,
   maskSensitiveInfo,
   redactForLog,
+  formatDurationAsText,
+  getSimpleTextHash,
 } from './index.js';
 import { config as appConfig } from '../config/index.js';
 import {
@@ -15,15 +17,24 @@ import {
   HeadersInit,
   ProxyAgent,
   RequestInit,
+  Response,
 } from 'undici';
 import { socksDispatcher } from 'fetch-socks';
 import { createLogger } from '../logging/logger.js';
 import { resolveHeaderPreset } from './header-presets.js';
 import { isUnsafeRemoteUrl } from '../release-blocklist/url-safety.js';
+import { PrivateAddressError } from './private-addresses.js';
 
 const logger = createLogger('http');
 const urlCount = Cache.getInstance<string, number>(
   'url-count',
+  undefined,
+  'memory'
+);
+const COOLDOWN_BASE_SECONDS = 5;
+const COOLDOWN_CAP_SECONDS = 60;
+const cooldowns = Cache.getInstance<string, { until: number; strikes: number }>(
+  'upstream-cooldown',
   undefined,
   'memory'
 );
@@ -34,6 +45,31 @@ export class PossibleRecursiveRequestError extends Error {
     this.name = 'PossibleRecursiveRequestError';
   }
 }
+
+export class RateLimitedError extends Error {
+  constructor(retryAfterSeconds: number) {
+    super(
+      `Too Many Requests (retry after ${formatDurationAsText(retryAfterSeconds)})`
+    );
+    this.name = 'RateLimitedError';
+  }
+}
+
+// Retry-After header (delay-seconds or HTTP-date) -> delay in seconds.
+export function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  if (/^\d+$/.test(value)) {
+    const seconds = Number(value);
+    return Number.isSafeInteger(seconds) ? seconds : undefined;
+  }
+  // Date.parse is lenient (accepts "+1", "1.5" etc) - real HTTP-dates have letters.
+  if (!/[a-zA-Z]/.test(value)) return undefined;
+  const date = Date.parse(value);
+  return Number.isNaN(date)
+    ? undefined
+    : Math.max(0, Math.ceil((date - Date.now()) / 1000));
+}
+
 export function makeUrlLogSafe(url: string) {
   // Query parameter names are useful for diagnostics, but their values may be
   // provider-specific credentials with short names (for example Newznab `r`)
@@ -81,6 +117,122 @@ export interface RequestOptions {
   forceProxy?: string;
   context?: FetchContext;
   rawOptions?: RequestInit;
+  /** Still arms 429 cooldowns, but is never refused by one. */
+  ignoreCooldown?: boolean;
+}
+
+const CREDENTIAL_PARAM = /apikey|api_key|token|secret|password|passwd|passkey/i;
+const CREDENTIAL_HEADERS = [
+  'proxy-authorization',
+  'x-api-key',
+  'api-key',
+  'apikey',
+  'cookie',
+];
+
+export interface CooldownKey {
+  key: string;
+  anon: boolean;
+}
+
+const INDEXER_CONTEXTS: (FetchContext | undefined)[] = [
+  'newznab',
+  'torznab',
+  'nzb_grabs',
+  'torrent_grabs',
+];
+
+// Upstreams limit a user (forwarded IP or credential) across all paths, and
+// anonymous requests by the address they come from. Indexer managers serve each
+// indexer under its own path with one API key.
+export function cooldownKey(
+  urlObj: URL,
+  headers: Headers,
+  egress: string,
+  context?: FetchContext
+): CooldownKey {
+  const user: string[] = [];
+  const auth =
+    takeBasicAuthFromUrl(new URL(urlObj)) ?? headers.get('authorization');
+  if (auth) user.push(`authorization=${auth}`);
+  for (const name of [...HEADERS_FOR_IP_FORWARDING, ...CREDENTIAL_HEADERS]) {
+    const value = headers.get(name);
+    if (value) user.push(`${name}=${value}`);
+  }
+  for (const [name, value] of urlObj.searchParams) {
+    if (CREDENTIAL_PARAM.test(name)) user.push(`${name}=${value}`);
+  }
+  const { origin, pathname } = urlObj;
+  const scope = INDEXER_CONTEXTS.includes(context)
+    ? origin + pathname.slice(0, pathname.lastIndexOf('/'))
+    : origin;
+  return {
+    key: `${scope}|${getSimpleTextHash([egress, ...user].join('&'))}`,
+    anon: user.length === 0,
+  };
+}
+
+function getEgress(urlObj: URL, options: RequestOptions): string {
+  if (options.forceProxy) return options.forceProxy;
+  const { useProxy, proxyIndex } = shouldProxy(urlObj, options.context);
+  return useProxy ? String(proxyIndex) : '';
+}
+
+async function checkCooldown(
+  urlObj: URL,
+  headers: Headers,
+  options: RequestOptions
+): Promise<CooldownKey> {
+  const cooldown = cooldownKey(
+    urlObj,
+    headers,
+    getEgress(urlObj, options),
+    options.context
+  );
+  if (options.ignoreCooldown) return cooldown;
+  const entry = await cooldowns.get(cooldown.key);
+  const remaining = entry ? entry.until - Date.now() : 0;
+  if (remaining > 0) {
+    logger.debug(
+      { url: makeUrlLogSafe(urlObj.toString()), remaining },
+      'skipping request, upstream cooling down'
+    );
+    throw new RateLimitedError(Math.ceil(remaining / 1000));
+  }
+  return cooldown;
+}
+
+async function recordCooldown(
+  { key, anon }: CooldownKey,
+  sentAt: number,
+  response: Response
+): Promise<void> {
+  if (response.status !== 429 && !response.ok) return;
+  const previous = await cooldowns.get(key);
+  // Responses to requests sent before the cooldown ended belong to its burst.
+  const sameBurst = previous !== undefined && sentAt < previous.until;
+  if (response.ok) {
+    if (previous && !sameBurst) await cooldowns.delete(key);
+    return;
+  }
+
+  const strikes = sameBurst ? previous.strikes : (previous?.strikes ?? 0) + 1;
+  const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+  const seconds =
+    retryAfter !== undefined
+      ? Math.min(Math.max(1, retryAfter), COOLDOWN_CAP_SECONDS)
+      : anon
+        ? COOLDOWN_BASE_SECONDS
+        : Math.min(
+            COOLDOWN_BASE_SECONDS * 2 ** (strikes - 1),
+            COOLDOWN_CAP_SECONDS
+          );
+  const until = Math.max(previous?.until ?? 0, Date.now() + seconds * 1000);
+  await cooldowns.set(
+    key,
+    { until, strikes },
+    Math.ceil((until - Date.now()) / 1000) + 60
+  );
 }
 
 /** Returns private request headers only while targeting the trusted origin. */
@@ -135,9 +287,15 @@ export async function makeRequest(url: string, options: RequestOptions) {
     }
   }
 
+  // Checked before recursion accounting so an active cooldown isn't
+  // misreported as a possible recursive request.
+  let cooldown = await checkCooldown(urlObj, headers, options);
+
   // block recursive requests
   const key = `${urlObj.toString()}-${options.forwardIp}`;
-  const currentCount = (await urlCount.get(key)) ?? 0;
+  const currentCount = options.ignoreRecursion
+    ? 0
+    : ((await urlCount.get(key)) ?? 0);
   if (
     currentCount > appConfig.recursion.thresholdLimit &&
     !options.ignoreRecursion
@@ -150,10 +308,12 @@ export async function makeRequest(url: string, options: RequestOptions) {
       `Possible recursive request to ${makeUrlLogSafe(urlObj.toString())}`
     );
   }
-  if (currentCount > 0) {
-    await urlCount.update(key, currentCount + 1);
-  } else {
-    await urlCount.set(key, 1, appConfig.recursion.thresholdWindow);
+  if (!options.ignoreRecursion) {
+    if (currentCount > 0) {
+      await urlCount.update(key, currentCount + 1);
+    } else {
+      await urlCount.set(key, 1, appConfig.recursion.thresholdWindow);
+    }
   }
 
   // One signal for the whole redirect chain.
@@ -167,6 +327,10 @@ export async function makeRequest(url: string, options: RequestOptions) {
   // Redirects are followed manually so the proxy ruleset, override headers,
   // URL rewrites and internal-secret handling are re-evaluated on every hop.
   for (let redirects = 0; ; redirects++) {
+    if (redirects > 0) {
+      cooldown = await checkCooldown(urlObj, headers, options);
+    }
+
     const { dispatcher, useProxy, proxyIndex } = resolveDispatcher(
       urlObj,
       options.context,
@@ -240,6 +404,7 @@ export async function makeRequest(url: string, options: RequestOptions) {
     );
 
     let response;
+    const sentAt = Date.now();
     try {
       response = await fetch(urlObj.toString(), {
         ...rawOptions,
@@ -251,6 +416,9 @@ export async function makeRequest(url: string, options: RequestOptions) {
         redirect: redirectMode ?? 'manual',
       });
     } catch (err) {
+      if (err instanceof Error && err.cause instanceof PrivateAddressError) {
+        throw err.cause;
+      }
       if (
         err instanceof Error &&
         err.name === 'TypeError' &&
@@ -263,6 +431,8 @@ export async function makeRequest(url: string, options: RequestOptions) {
       }
       throw err;
     }
+
+    await recordCooldown(cooldown, sentAt, response);
 
     // Callers that set rawOptions.redirect handle redirects themselves.
     if (redirectMode) {

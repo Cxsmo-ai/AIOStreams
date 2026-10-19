@@ -77,15 +77,34 @@ export function buildStatistics(
     );
   }
 
+  // Which variants shaped this response. Auto ones are invisible in the URL,
+  // so without this the only record of them is the server log.
+  if (
+    userData.statistics?.enabled &&
+    (userData.activeVariants?.length || userData.autoVariants?.length)
+  ) {
+    const lines = [
+      ...(userData.activeVariants ?? []).map((id) => `🧩 ${id}`),
+      ...(userData.autoVariants ?? []).map((id) => `🧩 ${id} (auto)`),
+    ];
+    statistics.push({
+      title: '🧩 Config Variants',
+      description: lines.join('\n'),
+    });
+  }
+
   // Forced digital release filter info stream - shown regardless of statistics settings
   if (
     (userData.digitalReleaseFilter?.showInfoOnFilter ?? true) &&
     filterStats.removed.noDigitalRelease.total > 0
   ) {
+    const noDigitalReleaseReason = Object.keys(
+      filterStats.removed.noDigitalRelease.details
+    )[0];
     statistics.push({
       title: '📅 Digital Release Filter',
       description: [
-        `⚠️ There is no digital release available for this media yet.`,
+        `⚠️ ${noDigitalReleaseReason ?? 'There is no digital release available for this media yet.'}`,
         finalStreams.length > 0
           ? '🔎 There are still streams present, this may be\ndue to any passthrough that is configured (addon level, SEL etc.)'
           : '',
@@ -120,7 +139,7 @@ export function buildStatistics(
   ) {
     const filterTimings = filterer.getFilterTimings();
     const accumulatedPrecompute = precomputer.getPrecomputeTimings();
-    // totalMs uses pipeline-phase timings only (fetchMs already contains the fetcher filter/precompute)
+    // totalMs uses pipeline-phase timings only (fetchMs already contains the fetcher filter/precompute/remuxDb)
     const totalMs =
       fetchMs +
       pipelineTimings.serviceWrapMs +
@@ -136,6 +155,7 @@ export function buildStatistics(
         `📥 Fetch: ${fmtMs(fetchMs)}`,
         `🔗 Service Wrap: ${fmtMs(pipelineTimings.serviceWrapMs)}`,
       ];
+      lines.push(`🎞️ Media Info: ${fmtMs(pipelineTimings.mediaInfoMs)}`);
       // Show accumulated filter total (fetcher + optional re-filter pass)
       if (filterTimings.totalMs > 0) {
         lines.push(`🔍 Filter: ${fmtMs(filterTimings.totalMs)}`);

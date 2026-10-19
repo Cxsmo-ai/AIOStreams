@@ -1,0 +1,249 @@
+import { hiddenInputStyles } from '../input';
+import { Popover } from '../popover';
+import * as SwitchPrimitive from '@radix-ui/react-switch';
+import { cva, VariantProps } from 'class-variance-authority';
+import * as React from 'react';
+import {
+  AiOutlineExclamationCircle,
+  AiOutlineQuestionCircle,
+} from 'react-icons/ai';
+import {
+  BasicField,
+  BasicFieldOptions,
+  extractBasicFieldProps,
+} from '../basic-field';
+import { cn, ComponentAnatomy, defineStyleAnatomy } from '../core/styling';
+import { mergeRefs } from '../core/utils';
+
+/* -------------------------------------------------------------------------------------------------
+ * Anatomy
+ * -----------------------------------------------------------------------------------------------*/
+export const SwitchAnatomy = defineStyleAnatomy({
+  root: cva(
+    [
+      'UI-Switch__root',
+      'peer inline-flex shrink-0 cursor-pointer items-center rounded-full border transition-colors',
+      'disabled:cursor-not-allowed data-[disabled=true]:opacity-50',
+      'outline-none focus-visible:outline-none focus-visible:ring-1 ring-offset-1 ring-offset-[--background] focus-visible:ring-white/40',
+      'data-[state=unchecked]:bg-gray-200 dark:data-[state=unchecked]:bg-gray-900', // Unchecked
+      'data-[state=unchecked]:hover:bg-gray-300 dark:data-[state=unchecked]:hover:bg-gray-800', // Unchecked hover
+      'data-[state=checked]:bg-brand', // Checked
+      'data-[error=true]:border-red-500', // Checked
+    ],
+    {
+      variants: {
+        size: {
+          sm: 'h-[1.02rem] w-8',
+          md: 'h-[1.3rem] w-9',
+          lg: 'h-7 w-14',
+        },
+      },
+      defaultVariants: {
+        size: 'md',
+      },
+    }
+  ),
+  container: cva(['UI-Switch__container', 'inline-flex gap-2 items-center'], {
+    variants: {
+      side: {
+        left: '',
+        right: 'w-full flex-row-reverse',
+      },
+    },
+    defaultVariants: {
+      side: 'left',
+    },
+  }),
+  thumb: cva(
+    [
+      'UI-Switch__thumb',
+      'pointer-events-none block rounded-full data-[state=checked]:bg-white shadow-lg ring-0 transition-transform',
+      'data-[state=unchecked]:translate-x-[0.15rem] data-[state=unchecked]:bg-white/50',
+      'rtl:data-[state=unchecked]:-translate-x-[0.15rem]',
+    ],
+    {
+      variants: {
+        size: {
+          sm: 'h-3 w-3 data-[state=checked]:translate-x-[1.05rem] rtl:data-[state=checked]:-translate-x-[1.05rem]',
+          md: 'h-4 w-4 data-[state=checked]:translate-x-[1.05rem] rtl:data-[state=checked]:-translate-x-[1.05rem]',
+          lg: 'h-5 w-5 data-[state=checked]:translate-x-[1.9rem] rtl:data-[state=checked]:-translate-x-[1.9rem]',
+        },
+      },
+      defaultVariants: {
+        size: 'md',
+      },
+    }
+  ),
+  label: cva([
+    'UI-Switch__label',
+    'relative font-normal text-sm',
+    'data-[disabled=true]:text-gray-300 cursor-pointer user-select-none select-none',
+  ]),
+});
+
+/* -------------------------------------------------------------------------------------------------
+ * Switch
+ * -----------------------------------------------------------------------------------------------*/
+
+export type SwitchProps = BasicFieldOptions &
+  ComponentAnatomy<typeof SwitchAnatomy> &
+  VariantProps<typeof SwitchAnatomy.root> &
+  VariantProps<typeof SwitchAnatomy.container> &
+  Omit<
+    React.ComponentPropsWithoutRef<typeof SwitchPrimitive.Root>,
+    | 'value'
+    | 'checked'
+    | 'disabled'
+    | 'required'
+    | 'defaultValue'
+    | 'defaultChecked'
+    | 'onCheckedChange'
+  > & {
+    /**
+     * Whether the switch is checked
+     */
+    value?: boolean;
+    /**
+     * Callback fired when the value changes
+     */
+    onValueChange?: (value: boolean) => void;
+    /**
+     * Default value when uncontrolled
+     */
+    defaultValue?: boolean;
+    /**
+     * Ref to the input element
+     */
+    inputRef?: React.Ref<HTMLInputElement>;
+    className?: string;
+  };
+
+export const Switch = React.forwardRef<HTMLButtonElement, SwitchProps>(
+  (props, ref) => {
+    const [
+      {
+        size,
+        value: controlledValue,
+        className,
+        onValueChange,
+        labelClass,
+        containerClass,
+        thumbClass,
+        defaultValue,
+        inputRef,
+        side,
+        ...rest
+      },
+      { label, moreHelp, ...basicFieldProps },
+    ] = extractBasicFieldProps(props, React.useId());
+
+    const isFirst = React.useRef(true);
+
+    const buttonRef = React.useRef<HTMLButtonElement>(null);
+
+    const [_value, _setValue] = React.useState<boolean | undefined>(
+      controlledValue ?? defaultValue ?? false
+    );
+
+    const handleOnValueChange = React.useCallback(
+      (value: boolean) => {
+        _setValue(value);
+        onValueChange?.(value);
+      },
+      [onValueChange]
+    );
+
+    React.useEffect(() => {
+      if (!defaultValue || !isFirst.current) {
+        _setValue(controlledValue);
+      }
+      isFirst.current = false;
+    }, [controlledValue]);
+
+    const row = side === 'right';
+    return (
+      <BasicField
+        {...basicFieldProps}
+        id={basicFieldProps.id}
+        // A remote moves to and shows the whole row.
+        data-nav-box={row || undefined}
+        fieldClass={cn(
+          'w-fit',
+          row &&
+            'relative w-full group/switch hover:bg-white/5 rounded-[--radius] p-2 w-[calc(100%_+_1rem)] -ms-2'
+        )}
+        fieldHelpTextClass={cn('')}
+      >
+        <div className={cn(SwitchAnatomy.container({ side }), containerClass)}>
+          <SwitchPrimitive.Root
+            ref={mergeRefs([buttonRef, ref])}
+            id={basicFieldProps.id}
+            data-nav-card={row || undefined}
+            data-focus={row ? 'own' : undefined}
+            className={cn(
+              SwitchAnatomy.root({ size }),
+              row &&
+                "focus-visible:ring-0 focus-visible:ring-offset-0 after:pointer-events-none after:absolute after:inset-0 after:rounded-[--radius] after:content-[''] focus-visible:after:bg-white/5 focus-visible:after:ring-2 focus-visible:after:ring-[--ring]",
+              className
+            )}
+            disabled={basicFieldProps.disabled || basicFieldProps.readonly}
+            data-disabled={basicFieldProps.disabled}
+            data-readonly={basicFieldProps.readonly}
+            data-error={!!basicFieldProps.error}
+            checked={_value}
+            onCheckedChange={handleOnValueChange}
+            defaultChecked={defaultValue}
+            {...rest}
+          >
+            <SwitchPrimitive.Thumb
+              className={cn(SwitchAnatomy.thumb({ size }), thumbClass)}
+            />
+          </SwitchPrimitive.Root>
+          <div className="flex flex-1"></div>
+          {!!label && (
+            <div className="flex items-center gap-1">
+              <label
+                className={cn(
+                  SwitchAnatomy.label(),
+                  labelClass,
+                  side === 'right' &&
+                    'font-semibold transition-transform __group-hover/switch:-translate-y-0.5'
+                )}
+                htmlFor={basicFieldProps.id}
+                data-disabled={basicFieldProps.disabled}
+              >
+                {label}
+              </label>
+              {moreHelp && (
+                <Popover
+                  className="text-sm"
+                  trigger={
+                    <AiOutlineExclamationCircle className="transition-opacity opacity-45 hover:opacity-90" />
+                  }
+                >
+                  {moreHelp}
+                </Popover>
+              )}
+            </div>
+          )}
+
+          <input
+            ref={inputRef}
+            type="checkbox"
+            name={basicFieldProps.name}
+            className={hiddenInputStyles}
+            value={_value ? 'on' : 'off'}
+            checked={basicFieldProps.required ? _value : true}
+            aria-hidden="true"
+            required={controlledValue === undefined && basicFieldProps.required}
+            tabIndex={-1}
+            onChange={() => {}}
+            onFocusCapture={() => buttonRef.current?.focus()}
+          />
+        </div>
+      </BasicField>
+    );
+  }
+);
+
+Switch.displayName = 'Switch';

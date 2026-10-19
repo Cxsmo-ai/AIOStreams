@@ -1,14 +1,13 @@
 import React from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { useAppSidebarContext } from '@/components/ui/app-layout';
-import { cn } from '@/components/ui/core/styling';
-import type { VerticalMenuItem } from '@/components/ui/vertical-menu';
-import { Sidebar } from '@/components/sidebar/Sidebar';
+import { cn } from '@aiostreams/ui/core/styling';
+import type { VerticalMenuItem } from '@aiostreams/ui/vertical-menu';
+import { Sidebar } from '@aiostreams/ui/shared/sidebar';
 import { CommandPaletteSearchButton } from '@/components/shared/command-palette/search-button';
 import { useStatus } from '@/context/status';
 import { useMenu, MenuId } from '@/context/menu';
 import { useUserData } from '@/context/userData';
-import { ConfigModal } from '@/components/config-modal';
+import { useConfigAuth } from '@/context/config-auth';
 import {
   BiPen,
   BiInfoCircle,
@@ -28,17 +27,12 @@ import {
 } from 'react-icons/bi';
 import { useCommandPalette } from '@/context/command-palette';
 import { useRegisterQuickAction } from '@/context/quick-actions';
-import { useDisclosure } from '@/hooks/disclosure';
-import {
-  ConfirmationDialog,
-  useConfirmationDialog,
-} from '@/components/shared/confirmation-dialog';
-import { Modal } from '@/components/ui/modal';
-import { TextInput } from '@/components/ui/text-input';
-import { toast } from 'sonner';
-import { Tooltip } from '@/components/ui/tooltip';
+import { useDisclosure } from '@aiostreams/ui/hooks/disclosure';
+import { Modal } from '@aiostreams/ui/modal';
+import { TextInput } from '@aiostreams/ui/text-input';
+import { Tooltip } from '@aiostreams/ui/tooltip';
 import { useMode } from '@/context/mode';
-import { DonationModal } from '@/components/shared/donation-modal';
+import { DonationModal } from '@aiostreams/ui/shared/donation-modal';
 import { useSave } from '@/context/save';
 
 type MenuItem = VerticalMenuItem & {
@@ -46,50 +40,16 @@ type MenuItem = VerticalMenuItem & {
 };
 
 export function MainSidebar() {
-  const ctx = useAppSidebarContext();
-  const isCollapsed = !ctx.isBelowBreakpoint;
   const navigate = useNavigate();
   const { selectedMenu, setSelectedMenu } = useMenu();
-  const pathname =
-    typeof window !== 'undefined' ? window.location.pathname : '';
   const donationModal = useDisclosure(false);
 
   const user = useUserData();
-  const signInModal = useDisclosure(false);
-  const [initialUuid, setInitialUuid] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    const uuidMatch = pathname.match(
-      /stremio\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/.*\/configure/
-    );
-    if (uuidMatch) {
-      const extractedUuid = uuidMatch[1];
-      setInitialUuid(extractedUuid);
-      signInModal.open();
-    }
-    // check for menu query param
-    // const params = new URLSearchParams(window.location.search);
-    // const menu = params.get('menu');
-    // if (menu && VALID_MENUS.includes(menu)) {
-    //   setSelectedMenu(menu);
-    // }
-  }, [pathname]);
+  const { isSignedIn, openSignIn, openSignOut } = useConfigAuth();
 
   const { status, error, loading } = useStatus();
   const { mode, setMode } = useMode();
   const { open: openCommandPalette } = useCommandPalette();
-
-  const confirmClearConfig = useConfirmationDialog({
-    title: 'Sign Out',
-    description: 'Are you sure you want to sign out?',
-    onConfirm: () => {
-      user.setUserData(null);
-      user.setUuid(null);
-      user.setPassword(null);
-    },
-  });
-
-  const isSignedIn = Boolean(user.uuid && user.password);
 
   useRegisterQuickAction(
     isSignedIn
@@ -98,16 +58,16 @@ export function MainSidebar() {
           label: 'Sign Out',
           icon: <BiLogOutCircle />,
           keywords: ['logout', 'log out'],
-          onSelect: () => confirmClearConfig.open(),
+          onSelect: openSignOut,
         }
       : {
           id: 'sign-in',
           label: 'Sign In',
           icon: <BiLogInCircle />,
           keywords: ['login', 'log in'],
-          onSelect: () => signInModal.open(),
+          onSelect: () => openSignIn(),
         },
-    [isSignedIn, confirmClearConfig, signInModal]
+    [isSignedIn, openSignIn, openSignOut]
   );
 
   useRegisterQuickAction(
@@ -258,18 +218,11 @@ export function MainSidebar() {
       iconType: BiHeart,
       onClick: () => donationModal.open(),
     },
-    // Sign in/out lives in the mobile top-navbar, so only show it in the
-    // sidebar footer on desktop (and never on the About page).
-    ...(isCollapsed && selectedMenu !== 'about'
-      ? [
-          {
-            name: isSignedIn ? 'Sign Out' : 'Sign In',
-            iconType: isSignedIn ? BiLogOutCircle : BiLogInCircle,
-            onClick: () =>
-              isSignedIn ? confirmClearConfig.open() : signInModal.open(),
-          },
-        ]
-      : []),
+    {
+      name: isSignedIn ? 'Sign Out' : 'Sign In',
+      iconType: isSignedIn ? BiLogOutCircle : BiLogInCircle,
+      onClick: () => (isSignedIn ? openSignOut() : openSignIn()),
+    },
   ];
 
   return (
@@ -283,21 +236,6 @@ export function MainSidebar() {
         }}
       />
 
-      <ConfigModal
-        open={signInModal.isOpen}
-        onSuccess={() => {
-          signInModal.close();
-          toast.success('Signed in successfully');
-        }}
-        onOpenChange={(v) => {
-          if (!v) {
-            signInModal.close();
-          }
-        }}
-        initialUuid={initialUuid || undefined}
-      />
-
-      <ConfirmationDialog {...confirmClearConfig} />
       <DonationModal
         open={donationModal.isOpen}
         onOpenChange={donationModal.toggle}

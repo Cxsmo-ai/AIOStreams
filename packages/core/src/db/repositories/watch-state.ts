@@ -1,0 +1,1173 @@
+import { getDb } from '../db.js';
+import { config as appConfig } from '../../config/index.js';
+import { deleteInBatches, type PruneResult } from '../prune.js';
+import type { DbDriver } from '../driver/types.js';
+import type { SqlFragment } from '../sql.js';
+import { join, raw, sql } from '../sql.js';
+import {
+  matchedEpisodeOf,
+  seriesKeyOfMatch,
+  type WatchScope,
+} from '../../watch-state/types.js';
+
+/** What a list row needs to render without a metadata call. */
+export interface WatchSnapshot {
+  name?: string;
+  seriesName?: string;
+  poster?: string;
+  backdrop?: string;
+  thumb?: string;
+  indexNumber?: number;
+  parentIndexNumber?: number;
+  runtimeMs?: number;
+}
+
+export type WatchKind = 'movie' | 'series' | 'season' | 'episode';
+
+/** Who wrote the row. An import may replace an import, never a recent local. */
+export type WatchOrigin = 'local' | 'import';
+
+/** Content identity of one row. `itemKey` is the primary key with the scope. */
+export interface WatchIdentity {
+  itemKey: string;
+  kind: WatchKind;
+  mediaType: string;
+  baseId: string;
+  season?: number | null;
+  episode?: number | null;
+  videoId?: string | null;
+  seriesKey?: string | null;
+  /** The key under the item's preferred id; `undefined` keeps the stored one. */
+  matchKey?: string | null;
+}
+
+export interface WatchStateRow extends WatchIdentity {
+  uuid: string;
+  persona: string;
+  positionMs: number;
+  durationMs: number;
+  played: boolean;
+  playCount: number;
+  favorite: boolean;
+  /** The addon whose watchlist set `favorite`; null when set here. */
+  favoriteSinkId: string | null;
+  favoriteAt: number | null;
+  /** Hidden from Next Up until played again. */
+  dropped: boolean;
+  /** The addon whose dropped list set `dropped`; null when set here. */
+  droppedSinkId: string | null;
+  droppedAt: number | null;
+  /** 0 to 10, as Jellyfin keeps it. */
+  rating: number | null;
+  /** The addon whose ratings set `rating`; null when set here. */
+  ratingSinkId: string | null;
+  ratingAt: number | null;
+  likes: boolean | null;
+  lastPlayedAt: number | null;
+  updatedAt: number;
+  origin: WatchOrigin;
+  sinkId: string | null;
+  externalAt: number | null;
+  snapshot: WatchSnapshot | null;
+  sortAt: number;
+}
+
+export interface WatchStatePatch {
+  positionMs?: number;
+  durationMs?: number;
+  played?: boolean;
+  incrementPlayCount?: boolean | 'if-unplayed';
+  favorite?: boolean;
+  dropped?: boolean;
+  /* For these three, `null` clears it and `undefined` leaves it alone. */
+  rating?: number | null;
+  likes?: boolean | null;
+  lastPlayedAt?: number | null;
+  snapshot?: WatchSnapshot;
+  origin?: WatchOrigin;
+  sinkId?: string | null;
+  externalAt?: number | null;
+}
+
+interface DbRow {
+  uuid: string;
+  persona: string;
+  item_key: string;
+  kind: string;
+  media_type: string;
+  base_id: string;
+  season: number | string | null;
+  episode: number | string | null;
+  video_id: string | null;
+  series_key: string | null;
+  position_ms: number | string;
+  duration_ms: number | string;
+  played: number | string;
+  play_count: number | string;
+  favorite: number | string;
+  favorite_sink_id: string | null;
+  favorite_at: number | string | null;
+  dropped: number | string | null;
+  dropped_sink_id: string | null;
+  dropped_at: number | string | null;
+  rating: number | string | null;
+  rating_sink_id: string | null;
+  rating_at: number | string | null;
+  likes: number | string | null;
+  last_played_at: number | string | null;
+  updated_at: number | string;
+  origin: string;
+  sink_id: string | null;
+  external_at: number | string | null;
+  snapshot: string | null;
+  match_key: string | null;
+  sort_at: number | string | null;
+  [k: string]: unknown;
+}
+
+const CHUNK = 200;
+
+function optionalNumber(v: number | string | null): number | null {
+  return v == null ? null : Number(v);
+}
+
+function toRow(r: DbRow): WatchStateRow {
+  let snapshot: WatchSnapshot | null = null;
+  if (r.snapshot) {
+    try {
+      snapshot = JSON.parse(r.snapshot) as WatchSnapshot;
+    } catch {
+      snapshot = null;
+    }
+  }
+  return {
+    uuid: r.uuid,
+    persona: r.persona,
+    itemKey: r.item_key,
+    kind: r.kind as WatchKind,
+    mediaType: r.media_type,
+    baseId: r.base_id,
+    season: optionalNumber(r.season),
+    episode: optionalNumber(r.episode),
+    videoId: r.video_id,
+    seriesKey: r.series_key,
+    matchKey: r.match_key ?? null,
+    positionMs: Number(r.position_ms),
+    durationMs: Number(r.duration_ms),
+    played: Boolean(Number(r.played)),
+    playCount: Number(r.play_count),
+    favorite: Boolean(Number(r.favorite)),
+    favoriteSinkId: r.favorite_sink_id ?? null,
+    favoriteAt: optionalNumber(r.favorite_at ?? null),
+    dropped: Boolean(Number(r.dropped ?? 0)),
+    droppedSinkId: r.dropped_sink_id ?? null,
+    droppedAt: optionalNumber(r.dropped_at ?? null),
+    rating: optionalNumber(r.rating ?? null),
+    ratingSinkId: r.rating_sink_id ?? null,
+    ratingAt: optionalNumber(r.rating_at ?? null),
+    likes: r.likes == null ? null : Boolean(Number(r.likes)),
+    lastPlayedAt: optionalNumber(r.last_played_at),
+    updatedAt: Number(r.updated_at),
+    origin: (r.origin as WatchOrigin) ?? 'local',
+    sinkId: r.sink_id,
+    externalAt: optionalNumber(r.external_at),
+    snapshot,
+    sortAt: Number(r.sort_at ?? 0),
+  };
+}
+
+export function watchKindOf(row: Pick<WatchIdentity, 'kind'>): WatchKind {
+  return row.kind;
+}
+
+/** Where a history page ended; rows sort on `sort_at`, then persona, then key. */
+export interface WatchHistoryCursor {
+  sortAt: number;
+  persona: string;
+  itemKey: string;
+}
+
+export interface WatchHistoryCounts {
+  persona: string;
+  played: number;
+  movies: number;
+  episodes: number;
+  inProgress: number;
+  favorites: number;
+  lastAt: number | null;
+}
+
+/** A row that is part of the history: finished, or part-way through. */
+const WATCHED = raw('(played = 1 OR position_ms > 0)');
+
+/** The item a row is one spelling of. */
+const ITEM = raw('COALESCE(match_key, item_key)');
+
+/** What outlives the history being cleared or aged out. */
+const KEPT = raw(
+  '(favorite = 1 OR dropped = 1 OR rating IS NOT NULL OR likes IS NOT NULL)'
+);
+
+function filterKinds(rows: WatchStateRow[], kinds?: WatchKind[]) {
+  if (!kinds?.length) return rows;
+  return rows.filter((r) => kinds.includes(r.kind));
+}
+
+/** `row` moved to `whole`'s show, at the episode its match key names. */
+function underShow(row: WatchStateRow, whole: WatchStateRow): WatchStateRow {
+  const at = row.matchKey
+    ? matchedEpisodeOf(row.matchKey, row.mediaType)
+    : null;
+  if (!at) return whole;
+  return {
+    ...row,
+    ...at,
+    itemKey: row.matchKey!,
+    mediaType: whole.mediaType,
+    seriesKey: whole.seriesKey,
+  };
+}
+
+export class WatchStateRepository {
+  static async get(
+    scope: WatchScope,
+    itemKey: string
+  ): Promise<WatchStateRow | null> {
+    const row = await getDb().maybeOne<DbRow>(
+      sql`SELECT * FROM watch_state
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND item_key = ${itemKey}`
+    );
+    return row ? toRow(row) : null;
+  }
+  static async getMany(
+    scope: WatchScope,
+    itemKeys: string[],
+    db: DbDriver = getDb()
+  ): Promise<Map<string, WatchStateRow>> {
+    const out = new Map<string, WatchStateRow>();
+    const wanted = [...new Set(itemKeys.filter(Boolean))];
+    for (let i = 0; i < wanted.length; i += CHUNK) {
+      const slice = wanted.slice(i, i + CHUNK);
+      const rows = await db.query<DbRow>(
+        sql`SELECT * FROM watch_state
+             WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+               AND item_key IN (${join(slice.map((k) => sql`${k}`))})`
+      );
+      for (const r of rows) out.set(r.item_key, toRow(r));
+    }
+    return out;
+  }
+
+  /** Rows stored under any of `keys`, or matched to one of them. */
+  static async getSpellings(
+    scope: WatchScope,
+    keys: string[],
+    db: DbDriver = getDb()
+  ): Promise<WatchStateRow[]> {
+    const out = new Map<string, WatchStateRow>();
+    const wanted = [...new Set(keys.filter(Boolean))];
+    const owner = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}`;
+    for (let i = 0; i < wanted.length; i += CHUNK) {
+      const list = join(wanted.slice(i, i + CHUNK).map((k) => sql`${k}`));
+      // Two branches, not an OR: SQLite only uses both indexes this way.
+      const rows = await db.query<DbRow>(
+        sql`SELECT * FROM watch_state WHERE ${owner} AND item_key IN (${list})
+            UNION ALL
+            SELECT * FROM watch_state WHERE ${owner} AND match_key IN (${list})`
+      );
+      for (const r of rows) out.set(r.item_key, toRow(r));
+    }
+    return [...out.values()];
+  }
+
+  /** One row of an import; see {@link upsertImports}. */
+  static importValues(
+    scope: WatchScope,
+    identity: WatchIdentity,
+    row: {
+      positionMs: number;
+      durationMs: number;
+      played: boolean;
+      lastPlayedAt: number | null;
+      sortAt?: number;
+      externalAt: number | null;
+      sinkId: string;
+      now: number;
+      snapshot?: WatchSnapshot | null;
+    }
+  ) {
+    return sql`(${scope.uuid}, ${scope.persona}, ${identity.itemKey},
+      ${identity.kind}, ${identity.mediaType}, ${identity.baseId},
+      ${identity.season ?? null}, ${identity.episode ?? null},
+      ${identity.videoId ?? null}, ${identity.seriesKey ?? null},
+      ${row.positionMs}, ${row.durationMs}, ${row.played ? 1 : 0},
+      ${row.lastPlayedAt}, ${row.now}, ${row.now},
+      'import', ${row.sinkId}, ${row.externalAt},
+      ${row.snapshot ? JSON.stringify(row.snapshot) : null},
+      ${row.sortAt ?? row.lastPlayedAt ?? row.now}, ${identity.matchKey ?? null})`;
+  }
+
+  /**
+   * Writes a batch of imported rows in one statement per chunk.
+   *
+   * Separate from {@link upsert}, whose conflict clause is built from bound
+   * parameters rather than `excluded` and so cannot be made multi-row.
+   * `favorite` and `snapshot` are left alone: both outlive what an addon knows.
+   */
+  static async upsertImports(
+    scope: WatchScope,
+    rows: { identity: WatchIdentity; values: SqlFragment }[],
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const slice = rows.slice(i, i + CHUNK);
+      await db.exec(
+        sql`INSERT INTO watch_state
+              (uuid, persona, item_key, kind, media_type, base_id, season,
+               episode, video_id, series_key, position_ms, duration_ms, played,
+               last_played_at, updated_at, seen_at, origin, sink_id,
+               external_at, snapshot, sort_at, match_key)
+            VALUES ${join(slice.map((r) => r.values))}
+            ON CONFLICT(uuid, persona, item_key) DO UPDATE SET
+              kind = excluded.kind,
+              media_type = excluded.media_type,
+              base_id = excluded.base_id,
+              season = excluded.season,
+              episode = excluded.episode,
+              video_id = COALESCE(excluded.video_id, watch_state.video_id),
+              series_key = COALESCE(excluded.series_key, watch_state.series_key),
+              position_ms = excluded.position_ms,
+              duration_ms = CASE WHEN excluded.duration_ms > 0
+                                 THEN excluded.duration_ms
+                                 ELSE watch_state.duration_ms END,
+              played = excluded.played,
+              play_count = watch_state.play_count
+                + CASE WHEN excluded.played = 1 AND watch_state.played = 0
+                       THEN 1 ELSE 0 END,
+              last_played_at = COALESCE(excluded.last_played_at, watch_state.last_played_at),
+              updated_at = excluded.updated_at,
+              seen_at = excluded.seen_at,
+              origin = 'import',
+              sink_id = excluded.sink_id,
+              external_at = excluded.external_at,
+              sort_at = excluded.sort_at,
+              match_key = COALESCE(excluded.match_key, watch_state.match_key)`
+      );
+    }
+  }
+
+  static async setMatchKeys(
+    scope: WatchScope,
+    pairs: [itemKey: string, matchKey: string][],
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    for (let i = 0; i < pairs.length; i += CHUNK) {
+      const slice = pairs.slice(i, i + CHUNK);
+      const cases = slice.map(
+        ([key, match]) => sql`WHEN ${key} THEN CAST(${match} AS TEXT)`
+      );
+      await db.exec(
+        sql`UPDATE watch_state SET match_key = CASE item_key ${join(cases, ' ')} END
+             WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+               AND item_key IN (${join(slice.map(([key]) => sql`${key}`))})`
+      );
+    }
+  }
+
+  static async upsert(
+    scope: WatchScope,
+    identity: WatchIdentity,
+    patch: WatchStatePatch
+  ): Promise<WatchStateRow> {
+    const now = Date.now();
+    const pos = patch.positionMs ?? null;
+    const dur = patch.durationMs ?? null;
+    const played = patch.played == null ? null : patch.played ? 1 : 0;
+    const fav = patch.favorite == null ? null : patch.favorite ? 1 : 0;
+    const setFav = fav == null ? 0 : 1;
+    const drop = patch.dropped == null ? null : patch.dropped ? 1 : 0;
+    const setDrop = drop == null ? 0 : 1;
+    const setRating = patch.rating === undefined ? 0 : 1;
+    const rating = patch.rating ?? null;
+    const setLikes = patch.likes === undefined ? 0 : 1;
+    const likes = patch.likes == null ? null : patch.likes ? 1 : 0;
+    const incMode =
+      patch.incrementPlayCount === 'if-unplayed'
+        ? 2
+        : patch.incrementPlayCount
+          ? 1
+          : 0;
+    const setLastPlayed = patch.lastPlayedAt === undefined ? 0 : 1;
+    const lastPlayed = patch.lastPlayedAt ?? null;
+    const sortAt = lastPlayed ?? now;
+    const snapshot = patch.snapshot ? JSON.stringify(patch.snapshot) : null;
+    const season = identity.season ?? null;
+    const episode = identity.episode ?? null;
+    const videoId = identity.videoId ?? null;
+    const seriesKey = identity.seriesKey ?? null;
+    const origin = patch.origin ?? 'local';
+    const sinkId = patch.sinkId ?? null;
+    const externalAt = patch.externalAt ?? null;
+
+    const row = await getDb().maybeOne<DbRow>(
+      sql`INSERT INTO watch_state
+            (uuid, persona, item_key, kind, media_type, base_id, season, episode,
+             video_id, series_key, position_ms, duration_ms, played, play_count,
+             favorite, favorite_at, dropped, dropped_at, rating, rating_at,
+             likes, last_played_at, updated_at, origin, sink_id, external_at,
+             snapshot, sort_at, match_key)
+          VALUES (${scope.uuid}, ${scope.persona}, ${identity.itemKey},
+                  ${identity.kind}, ${identity.mediaType}, ${identity.baseId},
+                  ${season}, ${episode}, ${videoId}, ${seriesKey},
+                  COALESCE(${pos}, 0), COALESCE(${dur}, 0), COALESCE(${played}, 0),
+                  CASE WHEN ${incMode} > 0 THEN 1 ELSE 0 END,
+                  COALESCE(${fav}, 0), ${setFav ? now : null},
+                  COALESCE(${drop}, 0), ${setDrop ? now : null},
+                  ${rating}, ${setRating ? now : null}, ${likes}, ${lastPlayed}, ${now},
+                  ${origin}, ${sinkId}, ${externalAt}, ${snapshot},
+                  ${sortAt}, ${identity.matchKey ?? null})
+          ON CONFLICT(uuid, persona, item_key) DO UPDATE SET
+            kind = excluded.kind,
+            media_type = excluded.media_type,
+            base_id = excluded.base_id,
+            season = excluded.season,
+            episode = excluded.episode,
+            video_id = COALESCE(excluded.video_id, watch_state.video_id),
+            series_key = COALESCE(excluded.series_key, watch_state.series_key),
+            position_ms = COALESCE(${pos}, watch_state.position_ms),
+            duration_ms = COALESCE(${dur}, watch_state.duration_ms),
+            played = COALESCE(${played}, watch_state.played),
+            play_count = watch_state.play_count +
+              CASE
+                WHEN ${incMode} = 1 THEN 1
+                WHEN ${incMode} = 2 AND watch_state.played <> 1 THEN 1
+                ELSE 0
+              END,
+            favorite = COALESCE(${fav}, watch_state.favorite),
+            -- A toggle here takes the favourite over from any watchlist import.
+            favorite_sink_id = CASE WHEN ${setFav} = 1 THEN NULL ELSE watch_state.favorite_sink_id END,
+            favorite_at = CASE WHEN ${setFav} = 1 THEN excluded.favorite_at ELSE watch_state.favorite_at END,
+            dropped = COALESCE(${drop}, watch_state.dropped),
+            dropped_sink_id = CASE WHEN ${setDrop} = 1 THEN NULL ELSE watch_state.dropped_sink_id END,
+            dropped_at = CASE WHEN ${setDrop} = 1 THEN excluded.dropped_at ELSE watch_state.dropped_at END,
+            rating = CASE WHEN ${setRating} = 1 THEN excluded.rating ELSE watch_state.rating END,
+            rating_sink_id = CASE WHEN ${setRating} = 1 THEN NULL ELSE watch_state.rating_sink_id END,
+            rating_at = CASE WHEN ${setRating} = 1 THEN excluded.rating_at ELSE watch_state.rating_at END,
+            likes = CASE WHEN ${setLikes} = 1 THEN excluded.likes ELSE watch_state.likes END,
+            last_played_at = CASE WHEN ${setLastPlayed} = 1 THEN ${lastPlayed} ELSE watch_state.last_played_at END,
+            -- Maintained on write so the shelves can order on a plain indexed
+            -- column instead of a COALESCE the index cannot serve.
+            sort_at = CASE WHEN ${setLastPlayed} = 1 THEN excluded.sort_at ELSE watch_state.sort_at END,
+            updated_at = excluded.updated_at,
+            origin = excluded.origin,
+            sink_id = excluded.sink_id,
+            external_at = excluded.external_at,
+            snapshot = COALESCE(${snapshot}, watch_state.snapshot),
+            match_key = COALESCE(excluded.match_key, watch_state.match_key)
+          RETURNING *`
+    );
+    if (row) return toRow(row);
+    return {
+      uuid: scope.uuid,
+      persona: scope.persona,
+      ...identity,
+      season,
+      episode,
+      videoId,
+      seriesKey,
+      positionMs: pos ?? 0,
+      durationMs: dur ?? 0,
+      played: !!played,
+      playCount: incMode > 0 ? 1 : 0,
+      favorite: !!fav,
+      favoriteSinkId: null,
+      favoriteAt: setFav ? now : null,
+      dropped: !!drop,
+      droppedSinkId: null,
+      droppedAt: setDrop ? now : null,
+      rating,
+      ratingSinkId: null,
+      ratingAt: setRating ? now : null,
+      likes: likes == null ? null : !!likes,
+      lastPlayedAt: lastPlayed,
+      updatedAt: now,
+      origin,
+      sinkId,
+      externalAt,
+      snapshot: patch.snapshot ?? null,
+      sortAt,
+    };
+  }
+
+  static async delete(scope: WatchScope, itemKey: string): Promise<void> {
+    await getDb().exec(
+      sql`DELETE FROM watch_state
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND item_key = ${itemKey}`
+    );
+  }
+
+  /** Ordered on `last_played_at`: an imported batch shares one `updated_at`. */
+  static async listResume(
+    scope: WatchScope,
+    limit: number,
+    kinds: WatchKind[] = ['movie', 'episode']
+  ): Promise<WatchStateRow[]> {
+    const rows = await getDb().query<DbRow>(
+      sql`SELECT * FROM watch_state
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND position_ms > 0
+           ORDER BY sort_at DESC
+           LIMIT ${Math.max(limit * 3, 30)}`
+    );
+    return filterKinds(rows.map(toRow), kinds).slice(0, limit);
+  }
+
+  /**
+   * The furthest-through episode per series, for Next Up. Season and episode
+   * break the tie, since an imported watched list gives every row of one show
+   * the same timestamp. Picked per series before the limit, so a few long
+   * histories cannot crowd out the other shows. A show dropped since it was
+   * last watched is left out, under whichever of its ids the drop was made.
+   *
+   * A show with rows under several ids, such as an anime season's own entry
+   * and the whole show, comes back once, anchored on its newest row. That row
+   * moves to the id its match key names when the show has rows there, since
+   * that id covers every season.
+   */
+  static async *recentSeries(
+    scope: WatchScope,
+    page: number
+  ): AsyncGenerator<WatchStateRow> {
+    const where = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}
+      AND series_key IS NOT NULL AND episode IS NOT NULL AND ${WATCHED}`;
+    const shown = new Set<string>();
+    for (let offset = 0; ; offset += page) {
+      // Picks the series first, so only their rows are ranked, not the history.
+      const rows = (
+        await getDb().query<DbRow>(
+          sql`WITH latest AS (
+                 SELECT series_key, MAX(sort_at) AS at FROM watch_state
+                  WHERE ${where}
+                  GROUP BY series_key
+                  ORDER BY at DESC, series_key
+                  LIMIT ${page} OFFSET ${offset}
+               )
+               SELECT * FROM (
+                 SELECT w.*, ROW_NUMBER() OVER (
+                          PARTITION BY w.series_key
+                          ORDER BY w.season DESC, w.episode DESC
+                        ) AS series_rank
+                   FROM latest l
+                   JOIN watch_state w
+                     ON w.uuid = ${scope.uuid} AND w.persona = ${scope.persona}
+                    AND w.series_key = l.series_key AND w.sort_at = l.at
+                  WHERE w.episode IS NOT NULL AND ${WATCHED}
+               ) ranked
+               WHERE series_rank = 1
+               ORDER BY sort_at DESC, season DESC, episode DESC`
+        )
+      ).map(toRow);
+      if (!rows.length) return;
+      const showOf = (row: WatchStateRow) =>
+        row.matchKey ? seriesKeyOfMatch(row.matchKey, row.mediaType) : null;
+      const droppedAt = await this.dropTimes(scope, [
+        ...new Set(
+          rows.flatMap((row) =>
+            [row.seriesKey, showOf(row)].filter((k): k is string => !!k)
+          )
+        ),
+      ]);
+      const kept = rows.filter(
+        (row) =>
+          ![row.seriesKey, showOf(row)].some(
+            (key) => key && (droppedAt.get(key) ?? 0) > row.sortAt
+          )
+      );
+      const bySeries = new Map(kept.map((row) => [row.seriesKey!, row]));
+      for (const row of kept) {
+        const show = showOf(row) ?? row.seriesKey!;
+        if (shown.has(show)) continue;
+        shown.add(show);
+        const whole = bySeries.get(show);
+        yield whole && whole !== row ? underShow(row, whole) : row;
+      }
+      if (rows.length < page) return;
+    }
+  }
+
+  static async listRecentSeries(
+    scope: WatchScope,
+    limit: number
+  ): Promise<WatchStateRow[]> {
+    const out: WatchStateRow[] = [];
+    for await (const row of this.recentSeries(scope, limit * 2)) {
+      out.push(row);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  private static async dropTimes(
+    scope: WatchScope,
+    keys: string[]
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (!keys.length) return out;
+    const list = join(keys.map((key) => sql`${key}`));
+    const owner = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}`;
+    // Two branches, not an OR: SQLite only uses both indexes this way.
+    const drops = await getDb().query<{
+      item_key: string;
+      match_key: string | null;
+      dropped_at: number | string | null;
+    }>(
+      sql`SELECT item_key, match_key, dropped_at FROM watch_state
+           WHERE ${owner} AND item_key IN (${list}) AND dropped = 1
+          UNION ALL
+          SELECT item_key, match_key, dropped_at FROM watch_state
+           WHERE ${owner} AND match_key IN (${list}) AND dropped = 1`
+    );
+    for (const drop of drops) {
+      const at = Number(drop.dropped_at ?? 0);
+      for (const key of [drop.item_key, drop.match_key]) {
+        if (key && at > (out.get(key) ?? 0)) out.set(key, at);
+      }
+    }
+    return out;
+  }
+
+  /** A title favourited under several spellings is listed once, by its newest. */
+  static async listFavorites(
+    scope: WatchScope,
+    kinds?: WatchKind[]
+  ): Promise<WatchStateRow[]> {
+    const rows = await getDb().query<DbRow>(
+      sql`SELECT * FROM watch_state
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND favorite = 1
+           ORDER BY COALESCE(favorite_at, updated_at) DESC
+           LIMIT 500`
+    );
+    const titles = new Set<string>();
+    const listed = rows.filter((row) => {
+      const title = row.match_key ?? row.item_key;
+      if (titles.has(title)) return false;
+      titles.add(title);
+      return true;
+    });
+    return filterKinds(listed.map(toRow), kinds);
+  }
+
+  static async listPlayed(
+    scope: WatchScope,
+    kinds?: WatchKind[]
+  ): Promise<WatchStateRow[]> {
+    const rows = await getDb().query<DbRow>(
+      sql`SELECT * FROM watch_state
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND played = 1
+           ORDER BY sort_at DESC
+           LIMIT 500`
+    );
+    return filterKinds(rows.map(toRow), kinds);
+  }
+
+  static async listForSeries(
+    scope: WatchScope,
+    seriesKey: string
+  ): Promise<WatchStateRow[]> {
+    const rows = await getDb().query<DbRow>(
+      sql`SELECT * FROM watch_state
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND series_key = ${seriesKey}`
+    );
+    return rows.map(toRow).filter((r) => r.episode != null);
+  }
+
+  /**
+   * One page of the histories of `personas`, newest first. An item held under
+   * several spellings is listed once, by its newest row; on a tie a local one,
+   * then the one under its preferred id.
+   */
+  static async listHistory(
+    uuid: string,
+    personas: string[],
+    opts: { limit: number; after?: WatchHistoryCursor; localOnly?: boolean }
+  ): Promise<WatchStateRow[]> {
+    if (!personas.length) return [];
+    const c = opts.after;
+    const after = c
+      ? sql`AND (w.sort_at < ${c.sortAt} OR (w.sort_at = ${c.sortAt} AND (w.persona > ${c.persona} OR (w.persona = ${c.persona} AND w.item_key < ${c.itemKey}))))`
+      : raw('');
+    const listed = (t: string) =>
+      raw(
+        `(${t}.played = 1 OR ${t}.position_ms > 0)${opts.localOnly ? ` AND ${t}.origin = 'local'` : ''}`
+      );
+    // A total order, so every page agrees on which spelling stands for the item.
+    const outranked = raw(`(s.sort_at > w.sort_at
+      OR (s.sort_at = w.sort_at AND s.origin = 'local' AND w.origin <> 'local')
+      OR (s.sort_at = w.sort_at AND s.origin = w.origin
+          AND w.item_key <> COALESCE(w.match_key, w.item_key)
+          AND (s.item_key = COALESCE(w.match_key, w.item_key)
+               OR s.item_key > w.item_key)))`);
+    const sibling = sql`s.uuid = w.uuid AND s.persona = w.persona
+      AND ${listed('s')} AND ${outranked}`;
+    // Two branches, not an OR: SQLite only uses both indexes this way.
+    const rows = await getDb().query<DbRow>(
+      sql`SELECT w.* FROM watch_state w
+           WHERE w.uuid = ${uuid}
+             AND w.persona IN (${join(personas.map((p) => sql`${p}`))})
+             AND ${listed('w')}
+             ${after}
+             AND NOT EXISTS (
+               SELECT 1 FROM watch_state s
+                WHERE ${sibling}
+                  AND s.match_key = COALESCE(w.match_key, w.item_key))
+             AND NOT EXISTS (
+               SELECT 1 FROM watch_state s
+                WHERE ${sibling} AND s.match_key IS NULL
+                  AND s.item_key = COALESCE(w.match_key, w.item_key))
+           ORDER BY w.sort_at DESC, w.persona ASC, w.item_key DESC
+           LIMIT ${opts.limit}`
+    );
+    return rows.map(toRow);
+  }
+
+  /** One page of every row `personas` hold, in key order. */
+  static async listPage(
+    uuid: string,
+    personas: string[],
+    opts: { limit: number; after?: { persona: string; itemKey: string } }
+  ): Promise<WatchStateRow[]> {
+    if (!personas.length) return [];
+    const c = opts.after;
+    const after = c
+      ? sql`AND (persona > ${c.persona} OR (persona = ${c.persona} AND item_key > ${c.itemKey}))`
+      : raw('');
+    const rows = await getDb().query<DbRow>(
+      sql`SELECT * FROM watch_state
+           WHERE uuid = ${uuid}
+             AND persona IN (${join(personas.map((p) => sql`${p}`))})
+             ${after}
+           ORDER BY persona ASC, item_key ASC
+           LIMIT ${opts.limit}`
+    );
+    return rows.map(toRow);
+  }
+
+  static async historyCounts(uuid: string): Promise<WatchHistoryCounts[]> {
+    const rows = await getDb().query<{
+      persona: string;
+      played: number | string | null;
+      movies: number | string | null;
+      episodes: number | string | null;
+      in_progress: number | string | null;
+      favorites: number | string | null;
+      last_at: number | string | null;
+    }>(
+      sql`SELECT persona,
+                 COUNT(DISTINCT CASE WHEN played = 1 THEN ${ITEM} END) AS played,
+                 COUNT(DISTINCT CASE WHEN played = 1 AND kind = 'movie' THEN ${ITEM} END) AS movies,
+                 COUNT(DISTINCT CASE WHEN played = 1 AND kind = 'episode' THEN ${ITEM} END) AS episodes,
+                 COUNT(DISTINCT CASE WHEN position_ms > 0 THEN ${ITEM} END) AS in_progress,
+                 COUNT(DISTINCT CASE WHEN favorite = 1 THEN ${ITEM} END) AS favorites,
+                 MAX(CASE WHEN ${WATCHED} THEN sort_at END) AS last_at
+            FROM watch_state
+           WHERE uuid = ${uuid}
+           GROUP BY persona`
+    );
+    return rows.map((r) => ({
+      persona: r.persona,
+      played: Number(r.played ?? 0),
+      movies: Number(r.movies ?? 0),
+      episodes: Number(r.episodes ?? 0),
+      inProgress: Number(r.in_progress ?? 0),
+      favorites: Number(r.favorites ?? 0),
+      lastAt: optionalNumber(r.last_at),
+    }));
+  }
+
+  /** `itemKeys` and the keys of every other spelling of the same items. */
+  static async withSpellings(
+    scope: WatchScope,
+    itemKeys: string[]
+  ): Promise<string[]> {
+    const out = new Set(itemKeys);
+    const wanted = [...out].filter(Boolean);
+    const owner = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}`;
+    for (let i = 0; i < wanted.length; i += CHUNK) {
+      const list = join(wanted.slice(i, i + CHUNK).map((k) => sql`${k}`));
+      const items = await getDb().query<{ item: string }>(
+        sql`SELECT DISTINCT ${ITEM} AS item FROM watch_state
+             WHERE ${owner} AND item_key IN (${list})`
+      );
+      if (!items.length) continue;
+      const of = join(items.map((r) => sql`${r.item}`));
+      const rows = await getDb().query<{ item_key: string }>(
+        sql`SELECT item_key FROM watch_state WHERE ${owner} AND match_key IN (${of})
+            UNION
+            SELECT item_key FROM watch_state
+             WHERE ${owner} AND match_key IS NULL AND item_key IN (${of})`
+      );
+      for (const r of rows) out.add(r.item_key);
+    }
+    return [...out];
+  }
+
+  static async clearPlayback(
+    scope: WatchScope,
+    itemKeys?: string[]
+  ): Promise<WatchStateRow[]> {
+    const keys = itemKeys ? [...new Set(itemKeys.filter(Boolean))] : null;
+    const slices = keys
+      ? Array.from(
+          { length: Math.ceil(keys.length / CHUNK) },
+          (_, i) =>
+            sql`AND item_key IN (${join(
+              keys.slice(i * CHUNK, (i + 1) * CHUNK).map((k) => sql`${k}`)
+            )})`
+        )
+      : [raw('')];
+    const cleared: WatchStateRow[] = [];
+    await getDb().tx(async (db) => {
+      for (const only of slices) {
+        const where = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND (${WATCHED} OR play_count > 0) ${only}`;
+        const rows = await db.query<DbRow>(
+          sql`SELECT * FROM watch_state WHERE ${where}`
+        );
+        if (!rows.length) continue;
+        cleared.push(...rows.map(toRow));
+        await db.exec(
+          sql`DELETE FROM watch_state WHERE ${where} AND NOT ${KEPT}`
+        );
+        await db.exec(
+          sql`UPDATE watch_state
+                 SET played = 0, position_ms = 0, play_count = 0,
+                     last_played_at = NULL, updated_at = ${Date.now()}
+               WHERE ${where} AND ${KEPT}`
+        );
+      }
+    });
+    return cleared;
+  }
+
+  /** An existing row only gains the favourite; a missing one is created as the addon's import. */
+  static async upsertWatchlist(
+    scope: WatchScope,
+    sinkId: string,
+    rows: { identity: WatchIdentity; at: number }[],
+    now: number,
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const values = rows.slice(i, i + CHUNK).map(
+        ({ identity, at }) =>
+          sql`(${scope.uuid}, ${scope.persona}, ${identity.itemKey},
+            ${identity.kind}, ${identity.mediaType}, ${identity.baseId},
+            ${identity.videoId ?? null}, ${identity.seriesKey ?? null}, 1,
+            ${sinkId}, ${at}, ${now},
+            ${now}, ${now}, 'import', ${sinkId}, ${at},
+            ${identity.matchKey ?? null})`
+      );
+      await db.exec(
+        sql`INSERT INTO watch_state
+              (uuid, persona, item_key, kind, media_type, base_id, video_id,
+               series_key, favorite, favorite_sink_id, favorite_at, favorite_seen_at,
+               updated_at, seen_at, origin, sink_id, sort_at, match_key)
+            VALUES ${join(values)}
+            ON CONFLICT(uuid, persona, item_key) DO UPDATE SET
+              favorite = 1,
+              favorite_sink_id = excluded.favorite_sink_id,
+              favorite_at = excluded.favorite_at,
+              favorite_seen_at = excluded.favorite_seen_at,
+              match_key = COALESCE(excluded.match_key, watch_state.match_key)`
+      );
+    }
+  }
+
+  static async touchWatchlist(
+    scope: WatchScope,
+    sinkId: string,
+    itemKeys: string[],
+    at: number,
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    const wanted = [...new Set(itemKeys)];
+    for (let i = 0; i < wanted.length; i += CHUNK) {
+      await db.exec(
+        sql`UPDATE watch_state SET favorite_seen_at = ${at}
+             WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+               AND favorite_sink_id = ${sinkId}
+               AND item_key IN (${join(wanted.slice(i, i + CHUNK).map((k) => sql`${k}`))})`
+      );
+    }
+  }
+
+  /** A row undropped here keeps its time, so a play since still counts as newer. */
+  static async upsertDropped(
+    scope: WatchScope,
+    sinkId: string,
+    identities: WatchIdentity[],
+    now: number,
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    for (let i = 0; i < identities.length; i += CHUNK) {
+      const values = identities.slice(i, i + CHUNK).map(
+        (identity) =>
+          sql`(${scope.uuid}, ${scope.persona}, ${identity.itemKey},
+            ${identity.kind}, ${identity.mediaType}, ${identity.baseId},
+            ${identity.seriesKey ?? null}, 1, ${sinkId}, ${now}, ${now},
+            ${now}, ${now}, 'import', ${sinkId}, 0)`
+      );
+      await db.exec(
+        sql`INSERT INTO watch_state
+              (uuid, persona, item_key, kind, media_type, base_id, series_key,
+               dropped, dropped_sink_id, dropped_at, dropped_seen_at,
+               updated_at, seen_at, origin, sink_id, sort_at)
+            VALUES ${join(values)}
+            ON CONFLICT(uuid, persona, item_key) DO UPDATE SET
+              dropped = 1,
+              dropped_sink_id = excluded.dropped_sink_id,
+              dropped_at = COALESCE(watch_state.dropped_at, excluded.dropped_at),
+              dropped_seen_at = excluded.dropped_seen_at`
+      );
+    }
+  }
+
+  static async touchDropped(
+    scope: WatchScope,
+    sinkId: string,
+    itemKeys: string[],
+    at: number,
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    const wanted = [...new Set(itemKeys)];
+    for (let i = 0; i < wanted.length; i += CHUNK) {
+      await db.exec(
+        sql`UPDATE watch_state SET dropped_seen_at = ${at}
+             WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+               AND dropped_sink_id = ${sinkId}
+               AND item_key IN (${join(wanted.slice(i, i + CHUNK).map((k) => sql`${k}`))})`
+      );
+    }
+  }
+
+  /** Shows an addon's dropped list set and no longer lists. */
+  static async clearStaleDropped(
+    scope: WatchScope,
+    sinkId: string,
+    before: number,
+    db: DbDriver = getDb()
+  ): Promise<number> {
+    const res = await db.exec(
+      sql`UPDATE watch_state
+             SET dropped = 0, dropped_sink_id = NULL, dropped_at = NULL
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND dropped = 1 AND dropped_sink_id = ${sinkId}
+             AND COALESCE(dropped_seen_at, 0) < ${before}`
+    );
+    return res.rowCount ?? 0;
+  }
+
+  /** A show played here is picked up again, under every id it was dropped. */
+  static async undropSeries(
+    scope: WatchScope,
+    seriesKeys: string[]
+  ): Promise<void> {
+    const keys = join(seriesKeys.map((key) => sql`${key}`));
+    const now = Date.now();
+    for (const column of [raw('item_key'), raw('match_key')]) {
+      await getDb().exec(
+        sql`UPDATE watch_state
+               SET dropped = 0, dropped_sink_id = NULL, dropped_at = ${now}
+             WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+               AND ${column} IN (${keys}) AND dropped = 1`
+      );
+    }
+  }
+
+  /** A local rating is replaced; a missing row is created as the addon's import. */
+  static async upsertRatings(
+    scope: WatchScope,
+    sinkId: string,
+    rows: { identity: WatchIdentity; rating: number; at: number }[],
+    now: number,
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const values = rows.slice(i, i + CHUNK).map(
+        ({ identity, rating, at }) =>
+          sql`(${scope.uuid}, ${scope.persona}, ${identity.itemKey},
+            ${identity.kind}, ${identity.mediaType}, ${identity.baseId},
+            ${identity.season ?? null}, ${identity.episode ?? null},
+            ${identity.videoId ?? null}, ${identity.seriesKey ?? null},
+            ${rating}, ${sinkId}, ${at}, ${now}, ${now}, ${now}, 'import',
+            ${sinkId}, 0, ${identity.matchKey ?? null})`
+      );
+      await db.exec(
+        sql`INSERT INTO watch_state
+              (uuid, persona, item_key, kind, media_type, base_id, season,
+               episode, video_id, series_key, rating, rating_sink_id, rating_at,
+               rating_seen_at, updated_at, seen_at, origin, sink_id, sort_at,
+               match_key)
+            VALUES ${join(values)}
+            ON CONFLICT(uuid, persona, item_key) DO UPDATE SET
+              rating = excluded.rating,
+              rating_sink_id = excluded.rating_sink_id,
+              rating_at = excluded.rating_at,
+              rating_seen_at = excluded.rating_seen_at,
+              match_key = COALESCE(excluded.match_key, watch_state.match_key)`
+      );
+    }
+  }
+
+  static async touchRatings(
+    scope: WatchScope,
+    sinkId: string,
+    itemKeys: string[],
+    at: number,
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    const wanted = [...new Set(itemKeys)];
+    for (let i = 0; i < wanted.length; i += CHUNK) {
+      await db.exec(
+        sql`UPDATE watch_state SET rating_seen_at = ${at}
+             WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+               AND rating_sink_id = ${sinkId}
+               AND item_key IN (${join(wanted.slice(i, i + CHUNK).map((k) => sql`${k}`))})`
+      );
+    }
+  }
+
+  /** Ratings an addon set and no longer lists. */
+  static async clearStaleRatings(
+    scope: WatchScope,
+    sinkId: string,
+    before: number,
+    db: DbDriver = getDb()
+  ): Promise<number> {
+    const res = await db.exec(
+      sql`UPDATE watch_state
+             SET rating = NULL, rating_sink_id = NULL, rating_at = NULL
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND rating IS NOT NULL AND rating_sink_id = ${sinkId}
+             AND COALESCE(rating_seen_at, 0) < ${before}`
+    );
+    return res.rowCount ?? 0;
+  }
+
+  /** Favourites an addon's watchlist set and no longer lists. */
+  static async clearStaleWatchlist(
+    scope: WatchScope,
+    sinkId: string,
+    before: number,
+    db: DbDriver = getDb()
+  ): Promise<number> {
+    const res = await db.exec(
+      sql`UPDATE watch_state
+             SET favorite = 0, favorite_sink_id = NULL, favorite_at = NULL
+           WHERE uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND favorite = 1 AND favorite_sink_id = ${sinkId}
+             AND COALESCE(favorite_seen_at, 0) < ${before}`
+    );
+    return res.rowCount ?? 0;
+  }
+
+  /**
+   * Imported rows from one addon that this run did not list. Swept per half,
+   * because the halves arrive independently: sweeping both on a read that
+   * carried only one would delete everything the other half owns.
+   */
+  static async deleteStaleImports(
+    scope: WatchScope,
+    sinkId: string,
+    before: number,
+    half: 'resume' | 'watched',
+    listed: ReadonlySet<string>,
+    db: DbDriver = getDb()
+  ): Promise<number> {
+    const playedValue = half === 'watched' ? 1 : 0;
+    const candidates = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND origin = 'import' AND sink_id = ${sinkId}
+             AND COALESCE(seen_at, updated_at) < ${before}
+             AND played = ${playedValue}
+             AND NOT ${KEPT}`;
+    const rows = await db.query<{ item_key: string }>(
+      sql`SELECT item_key FROM watch_state WHERE ${candidates}`
+    );
+    const stale = rows.map((r) => r.item_key).filter((k) => !listed.has(k));
+    let removed = 0;
+    for (let i = 0; i < stale.length; i += CHUNK) {
+      const res = await db.exec(
+        sql`DELETE FROM watch_state
+             WHERE ${candidates}
+               AND item_key IN (${join(stale.slice(i, i + CHUNK).map((k) => sql`${k}`))})`
+      );
+      removed += res.rowCount ?? 0;
+    }
+    return removed;
+  }
+
+  /** Rewatch points an addon set and no longer lists; the watched mark stays. */
+  static async clearStaleRewatches(
+    scope: WatchScope,
+    sinkId: string,
+    before: number,
+    listed: ReadonlySet<string>,
+    db: DbDriver = getDb()
+  ): Promise<number> {
+    const candidates = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}
+             AND origin = 'import' AND sink_id = ${sinkId}
+             AND COALESCE(seen_at, updated_at) < ${before}
+             AND played = 1 AND position_ms > 0`;
+    const rows = await db.query<{ item_key: string }>(
+      sql`SELECT item_key FROM watch_state WHERE ${candidates}`
+    );
+    const stale = rows.map((r) => r.item_key).filter((k) => !listed.has(k));
+    let cleared = 0;
+    for (let i = 0; i < stale.length; i += CHUNK) {
+      const res = await db.exec(
+        sql`UPDATE watch_state SET position_ms = 0
+             WHERE ${candidates}
+               AND item_key IN (${join(stale.slice(i, i + CHUNK).map((k) => sql`${k}`))})`
+      );
+      cleared += res.rowCount ?? 0;
+    }
+    return cleared;
+  }
+
+  /** History, favourites, drops and ratings last while the configuration is in use; bare progress ages out alone. */
+  static async prune(retentionDays: number): Promise<PruneResult> {
+    const db = getDb();
+    const cutoff = Date.now() - retentionDays * 24 * 3600 * 1000;
+    const batch = appConfig.watchState.pruneBatchSize;
+    return deleteInBatches(async () => {
+      // Row values, so the delete is driven by the primary key.
+      const abandoned = await db.exec(
+        sql`DELETE FROM watch_state
+             WHERE (uuid, persona, item_key) IN (
+               SELECT w.uuid, w.persona, w.item_key
+                 FROM users u JOIN watch_state w ON w.uuid = u.uuid
+                WHERE u.accessed_at < ${db.intervalAgo(retentionDays, 'days')}
+                LIMIT ${batch}
+             )`
+      );
+      if (abandoned.rowCount) return abandoned.rowCount;
+      const progress = await db.exec(
+        sql`DELETE FROM watch_state
+             WHERE (uuid, persona, item_key) IN (
+               SELECT uuid, persona, item_key FROM watch_state
+                WHERE updated_at < ${cutoff}
+                  AND played = 0 AND play_count = 0
+                  AND NOT ${KEPT}
+                ORDER BY updated_at ASC
+                LIMIT ${batch}
+             )`
+      );
+      return progress.rowCount ?? 0;
+    });
+  }
+}

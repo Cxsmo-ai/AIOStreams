@@ -15,29 +15,29 @@ import {
   BiTrash,
 } from 'react-icons/bi';
 import { toast } from 'sonner';
-import { TextInput } from '@/components/ui/text-input';
-import { Switch } from '@/components/ui/switch';
-import { Button, IconButton } from '@/components/ui/button';
-import { Select } from '@/components/ui/select';
-import { Popover } from '@/components/ui/popover';
-import { Card } from '@/components/ui/card';
-import { cn } from '@/components/ui/core/styling';
+import { TextInput } from '@aiostreams/ui/text-input';
+import { Switch } from '@aiostreams/ui/switch';
+import { Button, IconButton } from '@aiostreams/ui/button';
+import { Select } from '@aiostreams/ui/select';
+import { Popover } from '@aiostreams/ui/popover';
+import { Card } from '@aiostreams/ui/card';
+import { cn } from '@aiostreams/ui/core/styling';
 import {
   useLogStream,
   exportUrl,
   type LogFilters,
   type LogRow,
 } from './use-log-stream';
-import { useDebounce } from '@/hooks/debounce';
+import { useDebounce } from '@aiostreams/ui/hooks/debounce';
 import { PageWrapper } from '@/components/shared/page-wrapper';
-import { Spinner } from '@/components/ui/loading-spinner';
-import { LuffyError } from '@/components/shared/luffy-error';
+import { Spinner } from '@aiostreams/ui/loading-spinner';
+import { LuffyError } from '@aiostreams/ui/shared/luffy-error';
 import {
   ConfirmationDialog,
   useConfirmationDialog,
-} from '@/components/shared/confirmation-dialog';
-import { copyToClipboard } from '@/utils/clipboard';
-import { formatDateTime } from '@/lib/format';
+} from '@aiostreams/ui/shared/confirmation-dialog';
+import { copyToClipboard } from '@aiostreams/ui/utils/clipboard';
+import { formatDateTime } from '@aiostreams/ui/core/format';
 import { api } from '@/lib/api';
 
 const LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const;
@@ -47,8 +47,8 @@ const LEVEL_STYLES: Record<string, string> = {
   debug: 'text-sky-500',
   info: 'text-emerald-500',
   warn: 'text-amber-500',
-  error: 'text-red-500',
-  fatal: 'text-red-600 font-bold',
+  error: 'text-red-400',
+  fatal: 'text-red-400 font-bold',
 };
 
 const LEVEL_DOT: Record<string, string> = {
@@ -56,8 +56,8 @@ const LEVEL_DOT: Record<string, string> = {
   debug: 'bg-sky-500',
   info: 'bg-emerald-500',
   warn: 'bg-amber-500',
-  error: 'bg-red-500',
-  fatal: 'bg-red-600',
+  error: 'bg-red-400',
+  fatal: 'bg-red-400',
 };
 
 const ALL_MODULES = '__all__';
@@ -231,7 +231,8 @@ export function LogsPage() {
     [debouncedSearch, regex, regexError, levels, module]
   );
 
-  const { rows, loading, connected, error, clear, retry } = useLogStream(filters);
+  const { rows, loading, connected, error, clear, retry } =
+    useLogStream(filters);
 
   // Defer rendering the heavy virtualizer until the page-entry animation settles (~400ms spring)
   const [ready, setReady] = useState(false);
@@ -400,7 +401,7 @@ export function LogsPage() {
                   onValueChange={setSearch}
                   className={cn(
                     'flex-1',
-                    regexError && 'border-red-500 focus-within:border-red-500'
+                    regexError && 'border-red-400 focus-within:border-red-400'
                   )}
                 />
                 <button
@@ -412,7 +413,7 @@ export function LogsPage() {
                     regex && !regexError
                       ? 'border-brand bg-brand/10 text-brand'
                       : regex && regexError
-                        ? 'border-red-500 bg-red-500/10 text-red-500'
+                        ? 'border-red-400 bg-red-500/10 text-red-400'
                         : 'border-[--border] text-[--muted] hover:text-[--foreground] hover:border-[--foreground]'
                   )}
                 >
@@ -420,7 +421,7 @@ export function LogsPage() {
                 </button>
               </div>
               {regexError && (
-                <p className="text-xs text-red-500 pl-1">{regexError}</p>
+                <p className="text-xs text-red-400 pl-1">{regexError}</p>
               )}
             </div>
             <div className="flex flex-1 md:flex-none items-center gap-2">

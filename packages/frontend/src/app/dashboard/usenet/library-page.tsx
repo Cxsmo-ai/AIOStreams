@@ -9,6 +9,7 @@ import {
   BiLinkAlt,
   BiInfoCircle,
   BiExport,
+  BiWrench,
   BiSelectMultiple,
   BiCheckboxChecked,
   BiCheckbox,
@@ -23,39 +24,42 @@ import {
   BiCheckShield,
   BiRefresh,
   BiDotsVerticalRounded,
+  BiScan,
 } from 'react-icons/bi';
-import { Card } from '@/components/ui/card';
-import { Button, IconButton } from '@/components/ui/button';
-import { TextInput } from '@/components/ui/text-input';
-import { Select } from '@/components/ui/select';
-import { Tooltip } from '@/components/ui/tooltip';
+import { Link, useNavigate } from '@tanstack/react-router';
+import { Card } from '@aiostreams/ui/card';
+import { Button, IconButton } from '@aiostreams/ui/button';
+import { TextInput } from '@aiostreams/ui/text-input';
+import { Select } from '@aiostreams/ui/select';
+import { Tooltip } from '@aiostreams/ui/tooltip';
 import {
   DropdownMenu,
   DropdownMenuItem,
   DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu';
-import { SimpleDropzone } from '@/components/ui/simple-dropzone';
+} from '@aiostreams/ui/dropdown-menu';
+import { SimpleDropzone } from '@aiostreams/ui/simple-dropzone';
 import {
   Pagination,
   PaginationEllipsis,
   PaginationItem,
   PaginationTrigger,
   pageWindow,
-} from '@/components/ui/pagination';
-import { cn } from '@/components/ui/core/styling';
-import { useDebounce } from '@/hooks/debounce';
-import { useMediaQuery } from '@/hooks/media-query';
+} from '@aiostreams/ui/pagination';
+import { cn } from '@aiostreams/ui/core/styling';
+import { useDebounce } from '@aiostreams/ui/hooks/debounce';
+import { useMediaQuery } from '@aiostreams/ui/hooks/media-query';
 import { DashboardQueryBoundary } from '@/components/shared/dashboard-query-boundary';
 import {
   ConfirmationDialog,
   useConfirmationDialog,
-} from '@/components/shared/confirmation-dialog';
+} from '@aiostreams/ui/shared/confirmation-dialog';
 import {
   useUsenetLibrary,
   useUsenetLibraryStream,
   useBlockRelease,
   useUnblockRelease,
   useRequeueEntries,
+  useRepairEntry,
   useDeleteLibraryEntry,
   useDeleteAllLibraryEntries,
   useAddNzb,
@@ -71,14 +75,14 @@ import {
 import { NzbBrowser } from './_components/nzb-browser';
 import { EntryInfoModal } from './_components/entry-info-modal';
 import { SettingsPageHeader } from '../settings/_components/settings-card';
-import { formatBytes } from '@/lib/format';
+import { formatBytes } from '@aiostreams/ui/core/format';
 
 const STATUS_STYLE: Record<LibraryStatus, string> = {
   queued: 'bg-[--subtle] text-[--muted]',
   inspecting: 'bg-amber-500/15 text-amber-500',
   available: 'bg-emerald-500/15 text-emerald-500',
-  degraded: 'bg-orange-500/15 text-orange-500',
-  failed: 'bg-red-500/15 text-red-500',
+  degraded: 'bg-orange-500/15 text-orange-400',
+  failed: 'bg-red-400/15 text-red-400',
 };
 
 /** Status filter options for the Select (single-select; "all" clears it). */
@@ -315,6 +319,7 @@ function EntryActions({
   onBlock,
   onUnblock,
   onRequeue,
+  onRepair,
   onDelete,
 }: {
   entry: LibraryEntry;
@@ -323,9 +328,11 @@ function EntryActions({
   onBlock: (e: LibraryEntry) => void;
   onUnblock: (e: LibraryEntry) => void;
   onRequeue: (hashes: string[]) => void;
+  onRepair: (e: LibraryEntry) => void;
   onDelete: (hash: string) => void;
 }) {
   const playUrl = usePlayUrl();
+  const navigate = useNavigate();
   // Degraded entries are playable: known holes are zero-filled at playback.
   const available = e.status === 'available' || e.status === 'degraded';
   const multiFile = e.files.length > 1;
@@ -405,6 +412,18 @@ function EntryActions({
             Details
           </DropdownMenuItem>
           <DropdownMenuItem
+            onSelect={() =>
+              navigate({
+                to: '/dashboard/media-info',
+                search: { nzb: e.nzbHash },
+              })
+            }
+            disabled={!e.probedFiles}
+          >
+            <BiScan />
+            {e.probedFiles ? 'Media info' : 'No media info yet'}
+          </DropdownMenuItem>
+          <DropdownMenuItem
             onSelect={() => onRequeue([e.nzbHash])}
             disabled={!e.nzbUrl}
           >
@@ -415,6 +434,16 @@ function EntryActions({
             <BiExport />
             Export NZB
           </DropdownMenuItem>
+          {/* Only rows an arr grabbed can be replaced through one; the repair
+              itself is idempotent, so a finished one can be re-run. */}
+          {e.arrLink && (
+            <DropdownMenuItem onSelect={() => onRepair(e)}>
+              <BiWrench />
+              {e.arrLink.repair?.state === 'failed'
+                ? 'Retry repair'
+                : 'Replace via Sonarr/Radarr'}
+            </DropdownMenuItem>
+          )}
           {blocklistKeys.length > 0 && (
             <>
               <DropdownMenuSeparator />
@@ -445,6 +474,48 @@ function EntryActions({
   );
 }
 
+/** How many files have probed tracks; links to them unless selecting. */
+function ProbedBadge({
+  entry: e,
+  linked,
+}: {
+  entry: LibraryEntry;
+  linked: boolean;
+}) {
+  const probed = e.probedFiles ?? 0;
+  const of = e.probeableFiles ?? 0;
+  const label = of > 1 ? `${Math.min(probed, of)}/${of} probed` : 'probed';
+  const content = (
+    <>
+      <BiScan className="shrink-0" />
+      {label}
+    </>
+  );
+  const className = 'inline-flex items-center gap-1';
+  return (
+    <Tooltip
+      trigger={
+        linked ? (
+          <Link
+            to="/dashboard/media-info"
+            search={{ nzb: e.nzbHash }}
+            className={cn(
+              className,
+              'transition-colors hover:text-[--foreground]'
+            )}
+          >
+            {content}
+          </Link>
+        ) : (
+          <span className={className}>{content}</span>
+        )
+      }
+    >
+      Track details stored for {probed} file{probed === 1 ? '' : 's'}
+    </Tooltip>
+  );
+}
+
 /**
  * One library entry. `view='grid'` renders a slim vertical card; `view='list'`
  * renders a full-width horizontal row. Both share {@link EntryActions} and the
@@ -461,6 +532,7 @@ function EntryCard({
   onBlock,
   onUnblock,
   onRequeue,
+  onRepair,
   onDelete,
 }: {
   entry: LibraryEntry;
@@ -473,6 +545,7 @@ function EntryCard({
   onBlock: (e: LibraryEntry) => void;
   onUnblock: (e: LibraryEntry) => void;
   onRequeue: (hashes: string[]) => void;
+  onRepair: (e: LibraryEntry) => void;
   onDelete: (hash: string) => void;
 }) {
   const e = entry;
@@ -483,6 +556,12 @@ function EntryCard({
       <span>
         {e.files.length} file{e.files.length === 1 ? '' : 's'}
       </span>
+      {e.origin === 'sabnzbd' && (
+        <span title="Added through the SABnzbd API (Sonarr, Radarr, NZBHydra, …)">
+          {e.hiddenAt ? 'sab · imported' : 'sab'}
+        </span>
+      )}
+      {!!e.probedFiles && <ProbedBadge entry={e} linked={!selectMode} />}
     </>
   );
   const cardClass = cn(
@@ -515,7 +594,7 @@ function EntryCard({
             <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-[--muted]">
               {meta}
               {e.status === 'failed' && e.failReason && (
-                <span className="text-red-500" title={e.errorCode}>
+                <span className="text-red-400" title={e.errorCode}>
                   {e.failReason}
                 </span>
               )}
@@ -531,6 +610,7 @@ function EntryCard({
                 onBlock={onBlock}
                 onUnblock={onUnblock}
                 onRequeue={onRequeue}
+                onRepair={onRepair}
                 onDelete={onDelete}
               />
             </div>
@@ -562,7 +642,7 @@ function EntryCard({
           <StatusPill status={e.status} />
         </div>
         {e.status === 'failed' && e.failReason && (
-          <p className="text-xs text-red-500 mt-0.5" title={e.errorCode}>
+          <p className="text-xs text-red-400 mt-0.5" title={e.errorCode}>
             {e.failReason}
           </p>
         )}
@@ -583,6 +663,7 @@ function EntryCard({
             onBlock={onBlock}
             onUnblock={onUnblock}
             onRequeue={onRequeue}
+            onRepair={onRepair}
             onDelete={onDelete}
           />
         </div>
@@ -669,6 +750,7 @@ export function UsenetLibraryPage() {
   const block = useBlockRelease();
   const unblock = useUnblockRelease();
   const requeue = useRequeueEntries();
+  const repair = useRepairEntry();
   const pending = React.useRef<string[]>([]);
   const [blockTargets, setBlockTargets] = React.useState<{
     mode: 'block' | 'unblock';
@@ -788,6 +870,31 @@ export function UsenetLibraryPage() {
     }
     setBlockTargets({ mode: 'block', entries: targets });
     confirmBlock.open();
+  };
+
+  /**
+   * Ask the arr that grabbed this release to replace it. Outcomes are reported
+   * as-is rather than collapsed into success/failure: `deferred` and
+   * `not-linked` are neither, and the difference is what tells you whether to
+   * look at the arr or at the instance settings.
+   */
+  const onRepair = (e: LibraryEntry) => {
+    repair
+      .mutateAsync(e.nzbHash)
+      .then(({ outcome }) => {
+        if (outcome === 'repaired') {
+          toast.success('Release marked failed; the arr will replace it');
+        } else if (outcome === 'already-handled') {
+          toast.info('The arr had already failed this release');
+        } else if (outcome === 'not-linked') {
+          toast.error('No Sonarr/Radarr instance has a grab for this download');
+        } else if (outcome === 'deferred') {
+          toast.warning('Repair is backing off after an earlier error');
+        } else {
+          toast.error('Repair gave up; see the entry details');
+        }
+      })
+      .catch((err: any) => toast.error(err?.message ?? 'Repair failed'));
   };
 
   const onRequeue = (hashes: string[]) => {
@@ -1052,6 +1159,7 @@ export function UsenetLibraryPage() {
                   onBlock={onBlock}
                   onUnblock={onUnblock}
                   onRequeue={onRequeue}
+                  onRepair={onRepair}
                   onDelete={onDelete}
                 />
               ))}

@@ -1,11 +1,11 @@
 import { useStatus } from '@/context/status';
 import { useUserData } from '@/context/userData';
 import { SettingsCard } from '../../../shared/settings-card';
-import { Switch } from '../../../ui/switch';
-import { Select } from '../../../ui/select';
-import { Combobox } from '../../../ui/combobox';
-import { NumberInput } from '../../../ui/number-input/number-input';
-import { DurationInput } from '../../../ui/duration-input';
+import { Switch } from '@aiostreams/ui/switch';
+import { Select } from '@aiostreams/ui/select';
+import { Combobox } from '@aiostreams/ui/combobox';
+import { NumberInput } from '@aiostreams/ui/number-input';
+import { DurationInput } from '@aiostreams/ui/duration-input';
 import {
   ServiceId,
   BUILTIN_SUPPORTED_SERVICES,
@@ -246,6 +246,19 @@ export function BuiltinSettings() {
                   Math.max(0, Number(value ?? 2))
                 ),
               },
+            }));
+          }}
+        />
+        <Switch
+          label="Only Same-Release Failover"
+          side="right"
+          disabled={!userData.failover?.enabled}
+          help="Never fail over to a different release, even if same-release alternatives run out."
+          value={userData.failover?.onlySameReleaseFailover ?? false}
+          onValueChange={(value) => {
+            setUserData((prev) => ({
+              ...prev,
+              failover: { ...prev.failover, onlySameReleaseFailover: value },
             }));
           }}
         />

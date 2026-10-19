@@ -1,0 +1,108 @@
+import type { JellyfinClient } from '../client';
+import type { DownloadsHost } from '../downloads/types';
+import type { PlayerFeature } from '../playback/controller';
+import type { EngineFactory } from '../playback/engine';
+import type { BaseItemDto, SourceInfo } from '../types';
+import { androidHost } from './jellyfin-android';
+import { jellyfinDesktopHost } from './jellyfin-desktop';
+import { nativeShellHost } from './native-shell';
+import { shellHost } from './shell';
+import type { MediaKey } from './shell/bridge';
+import { tizenHost } from './tizen';
+import { webosHost } from './webos';
+
+export interface NowPlaying {
+  itemId: string;
+  title: string;
+  artist: string;
+  imageUrl: string;
+  positionMs: number;
+  durationMs: number;
+  paused: boolean;
+}
+
+/** A sound level from 0 to 1, and the words so far. */
+export interface Hearing {
+  level: number;
+  text: string | null;
+}
+
+/**
+ * The app the page runs in, from the bridge it injects. Anything left out
+ * falls back to what a browser does.
+ */
+export interface Host {
+  /** `data-host` on the page's root, which custom CSS matches, so it can't change. */
+  name: string;
+  /** A TV, which gets the TV layout. */
+  tv?: boolean;
+  /** The app's own name for this device, and its id where its player reports as it. */
+  device?(): { id?: string; name?: string } | null;
+  /** A player drawn beneath the page, in place of the page's own video. */
+  player?: EngineFactory;
+  playerFeatures?: readonly PlayerFeature[];
+  /** The app's own player takes over from the page and plays on through the `next` item ids. */
+  play?(
+    item: BaseItemDto,
+    source: SourceInfo,
+    startMs: number,
+    next: string[]
+  ): void;
+  selectServer?(): void;
+  /** The app's own settings, which get a tab. */
+  settings?: { label: string; description: string; help: string; open(): void };
+  /** Full screen for a web view without the fullscreen API. */
+  fullscreen?: { active(): boolean; set(on: boolean): void };
+  /** The device's media volume and screen brightness, 0 to 1, which swipes on the video set. */
+  levels?: {
+    read(): Promise<{ volume: number; brightness: number }>;
+    set(level: 'volume' | 'brightness', value: number): void;
+    /** Hands the brightness back to the system. */
+    release(): void;
+  };
+  /** Takes Back before the page does; true when it acted. */
+  back?(): boolean;
+  /** Back from the first page leaves the app. */
+  exit?(): void;
+  /** Holds off a screensaver the system starts over the page's own video. */
+  keepAwake?(on: boolean): void;
+  /** The app's media controls, in place of the browser's. */
+  mediaSession?: {
+    update(now: NowPlaying): void;
+    clear(): void;
+    listen?(press: (key: MediaKey) => void): () => void;
+  };
+  start?(ctx: { base: string }): () => void;
+  signedIn?(client: JellyfinClient): void;
+  /** Saves what the page asks for to the device. */
+  downloads?: DownloadsHost;
+  /** A YouTube video's stream, which only plays from the address that asked. */
+  resolveYouTube?(id: string): Promise<string | null>;
+  /** Shows these above the on-screen keyboard's keys, for the field it types into. */
+  keyboardCompletions?(names: string[]): void;
+  /** What the device's speech recogniser heard, or null for nothing. */
+  listen?(opts: {
+    hearing(heard: Hearing): void;
+    signal: AbortSignal;
+  }): Promise<string | null>;
+  /** Saves a file the page made, for a web view that drops download links. */
+  saveFile?(name: string, type: string, text: string): void;
+}
+
+const browserHost: Host = { name: 'browser' };
+
+/**
+ * Checked on every call, since some apps inject their bridge late or switch
+ * players. Each host is the same object while nothing changes.
+ */
+export function currentHost(): Host {
+  return (
+    shellHost() ??
+    jellyfinDesktopHost() ??
+    androidHost() ??
+    nativeShellHost() ??
+    webosHost() ??
+    tizenHost() ??
+    browserHost
+  );
+}

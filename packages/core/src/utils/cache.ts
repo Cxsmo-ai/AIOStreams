@@ -31,6 +31,11 @@ export interface CacheDescription {
   };
 }
 
+export interface CacheOptions {
+  /** Memory store only. `false` shares values that callers must not change. */
+  clone?: boolean;
+}
+
 export class Cache<K, V> {
   private static instances: Map<string, any> = new Map();
   /**
@@ -46,6 +51,7 @@ export class Cache<K, V> {
     | (() => number | null | undefined)
     | undefined;
   private storePreference: 'redis' | 'sql' | 'memory' | undefined;
+  private options: CacheOptions;
   private name: string;
 
   // Redis client singleton
@@ -54,11 +60,13 @@ export class Cache<K, V> {
   private constructor(
     name: string,
     maxSize: number | (() => number | null | undefined) | undefined,
-    store?: 'redis' | 'sql' | 'memory'
+    store?: 'redis' | 'sql' | 'memory',
+    options: CacheOptions = {}
   ) {
     this.name = name;
     this.explicitMaxSize = maxSize;
     this.storePreference = store;
+    this.options = options;
   }
 
   /** Resolved max size — falls back to the runtime-config default. */
@@ -82,7 +90,9 @@ export class Cache<K, V> {
         maxSize
       );
     } else {
-      this._backend = new MemoryCacheBackend<K, V>(maxSize);
+      this._backend = new MemoryCacheBackend<K, V>(maxSize, {
+        clone: this.options.clone ?? true,
+      });
     }
     return this._backend;
   }
@@ -171,14 +181,16 @@ export class Cache<K, V> {
    * Get an instance of the cache with a specific name
    * @param name Unique identifier for this cache instance
    * @param maxSize Maximum size of the cache (only used when creating a new instance)
+   * @param options Only used when creating a new instance
    */
   public static getInstance<K, V>(
     name: string,
     maxSize?: number | (() => number | null | undefined),
-    store?: 'redis' | 'sql' | 'memory'
+    store?: 'redis' | 'sql' | 'memory',
+    options?: CacheOptions
   ): Cache<K, V> {
     if (!this.instances.has(name)) {
-      this.instances.set(name, new Cache<K, V>(name, maxSize, store));
+      this.instances.set(name, new Cache<K, V>(name, maxSize, store, options));
     }
     return this.instances.get(name) as Cache<K, V>;
   }
@@ -336,8 +348,43 @@ export class Cache<K, V> {
     return result;
   }
 
-  async get(key: K, updateTTL: boolean = false): Promise<V | undefined> {
+  private revalidating = new Set<K>();
+
+  /** `load` and `refresh` store what they fetch for its TTL plus `staleTtl`. */
+  async getOrRevalidate(
+    key: K,
+    load: () => Promise<V>,
+    refresh: () => Promise<void>,
+    staleTtl: number
+  ): Promise<V> {
+    const [cached, remaining] = await Promise.all([
+      this.get(key).catch(() => undefined),
+      this.getTTL(key).catch(() => 0),
+    ]);
+    if (cached === undefined) return load();
+    if (remaining < staleTtl && !this.revalidating.has(key)) {
+      this.revalidating.add(key);
+      void refresh()
+        .catch(() => undefined)
+        .finally(() => this.revalidating.delete(key));
+    }
+    return cached;
+  }
+
+  /**
+   * @param updateTTL Re-arm the entry's expiry on read. Pass the TTL in
+   * seconds; `true` only slides on the memory backend, which is the one that
+   * still knows what the original was.
+   */
+  async get(
+    key: K,
+    updateTTL: boolean | number = false
+  ): Promise<V | undefined> {
     return this.backend.get(key, updateTTL);
+  }
+
+  async getMany(keys: K[]): Promise<(V | undefined)[]> {
+    return this.backend.getMany(keys);
   }
 
   /**

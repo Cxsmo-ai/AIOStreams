@@ -1,0 +1,321 @@
+---
+title: Jellyfin extensions
+description: What AIOStreams adds to the Jellyfin API, so another server can offer the same to its web app.
+---
+
+AIOStreams' Jellyfin server speaks the standard Jellyfin API, and its web app works with any Jellyfin
+server. On top of that it adds a few fields and endpoints, which the web app uses where a server has
+them and does without where it does not. A server that implements some of them gets those parts of
+the app; everything else falls back to plain Jellyfin.
+
+Standard Jellyfin clients ignore all of these, so offering them never breaks one.
+
+## Finding out what a server offers
+
+`GET /System/Info/Public` carries an `aiostreams` object next to the standard fields:
+
+```json
+{
+  "ServerName": "My server",
+  "aiostreams": {
+    "logo": "https://…/logo.png",
+    "configureUrl": "https://example.com/configure",
+    "pinSignIn": false,
+    "personal": false,
+    "version": { "tag": "v2.35.0", "channel": "stable", "commit": "a1b2c3d4" },
+    "features": {
+      "users": 1,
+      "history": 1,
+      "playedUpTo": 1,
+      "dropped": 1,
+      "refreshVersions": 1,
+      "versions": 1,
+      "genreRequired": 1,
+      "fillers": 1,
+      "parties": 1,
+      "reports": 1
+    },
+    "css": null,
+    "parties": { "relay": "off", "defaultRelay": null },
+    "reports": { "forward": true }
+  }
+}
+```
+
+| Field          | Shape                  | What the web app does with it                                                         |
+| -------------- | ---------------------- | ------------------------------------------------------------------------------------- |
+| `logo`         | URL or `null`          | Shows it on the sign-in screen, in the sidebar and in the server list                 |
+| `configureUrl` | URL or `null`          | Links to it as the place to change the account's setup                                |
+| `pinSignIn`    | boolean                | AIOStreams only; see [what stays with AIOStreams](#what-stays-with-aiostreams)        |
+| `personal`     | boolean                | AIOStreams only; opens straight on the one listed user's sign-in                      |
+| `features`     | name to version number | Turns on the parts below; a missing name, or no `aiostreams` object, means "off"      |
+| `version`      | object of strings      | Shows the build in About and diagnostics: `commit` on nightly or dev, else `tag`      |
+| `css`          | text or `null`         | Applies it on every screen, before the user's own custom CSS, unless they turn it off |
+| `parties`      | object                 | Who the server's [party relay](#watch-parties) admits, and the relay it suggests      |
+| `reports`      | object or `null`       | Whether the server keeps [reports](#reports), and passes them on to the developer     |
+
+The server list reads `ServerName` and `logo` before signing in, so a server that hosts several
+accounts at their own addresses should answer with the one the address names.
+
+The web app checks `features` for each part it uses, never whether the server is AIOStreams. Each
+value is that feature's version.
+
+## Features
+
+| Feature           | What it promises                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `users`           | [`/AIOStreams/Users` and `/AIOStreams/Token`](#users): the user picker and switching user |
+| `history`         | [`/AIOStreams/History` and `/AIOStreams/Activity`](#history-and-activity)                 |
+| `playedUpTo`      | [`/AIOStreams/PlayedUpTo/{id}`](#played-up-to): mark a series watched up to an episode    |
+| `dropped`         | [A disliked series is dropped](#dropped)                                                  |
+| `refreshVersions` | [`Refresh` in a `PlaybackInfo` body](#versions) runs the lookup for versions again        |
+| `versions`        | [Every version carries the `aiostreams` object](#versions), with its own `id`             |
+| `genreRequired`   | [A library that needs a genre picked says so](#libraries)                                 |
+| `fillers`         | [A filler or recap episode says so](#episodes)                                            |
+| `parties`         | [SyncPlay, and a watch party relay](#watch-parties) on the server's origin                |
+| `reports`         | [`POST /AIOStreams/Reports`](#reports), while `aiostreams.reports` isn't `null`           |
+
+Every `/AIOStreams/*` endpoint takes the same authorization as the rest of the API. AIOStreams
+refuses them to API keys, which belong to other tools.
+
+## Versions
+
+A title's versions are its `MediaSources`. With the `versions` feature, each carries an `aiostreams`
+object:
+
+| Field         | Shape  | What the web app does with it                                                            |
+| ------------- | ------ | ---------------------------------------------------------------------------------------- |
+| `id`          | string | The version's own id, the same in every listing; the app remembers it to resume on it    |
+| `name`        | string | The version's title in the version list, instead of `Name`                               |
+| `description` | string | The lines under the title in the version list                                            |
+| `bingeGroup`  | string | Autoplay picks the next episode's version with the same group, as Stremio's `bingeGroup` |
+| `ytId`        | string | A YouTube video, which the app's player opens itself rather than the version's address   |
+
+The [version search, quick filters and badges](/reference/version-badges) also read these, all optional:
+
+| Field                                                                                                   | Shape             | What it is                                                         |
+| ------------------------------------------------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------ |
+| `filename`, `folderName`, `resolution`, `quality`, `encode`, `releaseGroup`, `indexer`, `addon`, `service` | string            | Read from the release, as the formatter has them                   |
+| `visualTags`, `audioTags`, `audioChannels`, `languages`, `editions`                                     | string[]          | The same                                                           |
+| `seMatched`, `regexMatched`                                                                             | string            | The stream expression and regex it matched first, by name          |
+| `rseMatched`, `rankedRegexMatched`                                                                      | string[]          | The ranked stream expressions and ranked regexes it matched        |
+| `seadex`                                                                                                | `best` or `alt`   | Listed on SeaDex, as a best or an alternative release              |
+
+The first version's `Id` is the item's own id, as in standard Jellyfin, so `id` is how the app tells
+versions apart across listings. Without the feature, the next episode settings say nothing of
+matching versions.
+
+The app loads a title's page with `/Items?Ids={id}&Fields=…` and no `MediaSources` field, and asks
+for versions only when play is pressed. A server that has to run something slow to find versions
+should only do so for `PlaybackInfo`, or for a lookup that asks for `MediaSources`.
+
+In the `PlaybackInfo` body:
+
+| Field                       | Meaning                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| `Fresh`                     | The app is listing versions: answer with a list no older than the server keeps one for   |
+| `Refresh`                   | Look versions up again even if a recent list exists (with the `refreshVersions` feature) |
+| `MediaSourceId`             | Standard. The app is playing that version: answer from the list it came from             |
+| `EnableRequiredHttpHeaders` | The app's player sends a version's standard `RequiredHttpHeaders` with its requests      |
+| `EnableYouTube`             | The app's player opens a version by its `ytId`                                           |
+
+Other clients send neither, so a version that only plays with its headers, or only as a YouTube
+video, is listed only when the body says the app can play it.
+
+## Libraries
+
+With `genreRequired`, a library (a `CollectionFolder`) whose items only list once a genre is picked
+carries `"aiostreams": { "genreRequired": true }`. Asked for without a genre, such a library lists
+nothing. Its genres come from `/Genres?ParentId={library}` as usual, and a genre named `None` stands
+for all of it. The app opens it on `None` where that is offered and on its first genre otherwise, and
+offers All only where `None` is there to send.
+
+## Titles
+
+A title or collection whose addon sends an [`animatedPoster`](/reference/addon-protocol/metadata)
+carries `"aiostreams": { "animatedPoster": "…" }`, the image's own address. The app plays it over the
+poster while the card is focused or hovered, and not when the device asks for reduced motion. The
+poster stays the still that everything else shows.
+
+## Episodes
+
+With `fillers`, a filler episode carries `"aiostreams": { "filler": true }` and a recap
+`"aiostreams": { "recap": true }`. The web app marks them in episode lists and passes over them when
+it plays on to the next episode, unless the user turns that off. Without the feature, those settings
+are hidden.
+
+An episode whose `Id` only its own server resolves, because its series is known by one id and its
+episodes by another (an anime listed by its MyAnimeList id, with IMDb episode ids), carries
+`"aiostreams": { "sharedId": "…" }`: the same episode's id under its own episode id, which any
+AIOStreams server resolves. A watch party sends it along, so members on other servers open the same
+episode.
+
+## Users
+
+`GET /AIOStreams/Users` lists who the signed-in user can switch to:
+
+```json
+[
+  {
+    "user": { "Id": "…", "Name": "Sam" },
+    "avatar": "https://…/sam.png",
+    "hidden": false,
+    "needs": "pin"
+  }
+]
+```
+
+`user` is a standard `UserDto`. `needs` says what switching to that user asks for: `null` for
+nothing, `"pin"`, `"password"` or `"password-pin"`. A hidden user is listed only to itself, and its
+own list holds only itself.
+
+`POST /AIOStreams/Token` with `{ "UserId": "…", "Pw": "…" }` switches: `Pw` is what `needs` asked
+for, with a password and PIN written as `password/PIN`. It answers like
+`/Users/AuthenticateByName`, with `401` for a wrong secret, `404` for an unknown user and `429` after
+too many tries.
+
+## History and activity
+
+`GET /AIOStreams/Activity` answers the Activity page's header:
+
+```json
+{
+  "users": [
+    {
+      "user": { "Id": "…", "Name": "Sam" },
+      "avatar": null,
+      "hidden": false,
+      "locked": true,
+      "historyOf": "…",
+      "counts": {
+        "played": 120,
+        "movies": 30,
+        "episodes": 90,
+        "inProgress": 4,
+        "favorites": 12,
+        "lastAt": 1790290000000
+      }
+    }
+  ],
+  "sessions": []
+}
+```
+
+`locked` is whether the user has a PIN. `historyOf` is the user whose history this one shares, and
+`counts` is `null` on a user that shares another's. `sessions` are standard `SessionInfoDto`s of
+what is playing now, sent only to the account's own user.
+
+`GET /AIOStreams/History?userId=&limit=&cursor=&source=` pages through what was watched, newest
+first. `userId` narrows it to one user, `source=local` leaves out plays imported from elsewhere, and
+`cursor` is the previous page's:
+
+```json
+{
+  "items": [
+    {
+      "userId": "…",
+      "itemKey": "…",
+      "kind": "episode",
+      "played": true,
+      "playCount": 1,
+      "positionMs": 0,
+      "durationMs": 2700000,
+      "favorite": false,
+      "lastPlayedAt": 1790290000000,
+      "sortAt": 1790290000000,
+      "origin": "import",
+      "tracker": "My tracker",
+      "item": { "Id": "…", "Name": "…", "Type": "Episode", "SeriesId": "…" }
+    }
+  ],
+  "cursor": "…"
+}
+```
+
+`origin` is `"local"` for a play on this server and `"import"` for one read from a tracker, named in
+`tracker`. `item` is a standard `BaseItemDto`.
+
+`POST /AIOStreams/History/Clear` with `{ "userId": "…", "itemKeys": ["…"] }` removes those entries,
+or the user's whole history without `itemKeys`, and answers `{ "cleared": 3 }`.
+`GET /AIOStreams/History/Export` downloads every visible user's history as one JSON file.
+
+Without `history`, the app shows the signed-in user's own activity from standard queries: played
+items sorted by `DatePlayed`, the `TotalRecordCount` of played, in-progress and favourite items, and
+`/Sessions`.
+
+## Played up to
+
+`POST /AIOStreams/PlayedUpTo/{episodeId}` marks that episode and every earlier one of its series as
+played, leaving out specials and episodes not aired yet, and answers `204`. Without `playedUpTo`
+the app does not offer it: marking a long series one episode at a time would take a request each.
+
+## Dropped
+
+With `dropped`, rating a series with the standard `Likes=false` (`POST /UserItems/{id}/Rating`)
+drops it: it leaves Next Up until it is played again, and the drop reaches the user's trackers. The
+app shows "Drop show" on series only where the server has the feature, since elsewhere the rating
+would do nothing. It undrops with `Likes=true`, since clearing the rating would also clear a
+numeric one.
+
+## Watch parties
+
+With `parties`, the server offers standard SyncPlay (`/SyncPlay/*`, `/GetUtcTime` and the
+`SyncPlayCommand` and `SyncPlayGroupUpdate` socket messages) to Jellyfin apps, and runs a relay that
+the web app's watch parties use, on the same server and across servers:
+
+| Path                     | What it is                                                                    |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| `GET /party/v1`          | `{ "v": 1, "relay": "off" }`: the protocol version and who the relay admits   |
+| `/party/v1` (WebSocket)  | The relay: JSON text frames, one party per connection                         |
+| `GET /party/v1/parties`  | With a user's token, the parties of that user's household, each with its code |
+| `GET /party/join#{code}` | The page an invite link opens, which hands the invite to the app              |
+
+`aiostreams.parties.relay` is `off` (only the server's users, who send their token), `users` (its
+users start parties, anyone with an invite joins) or `public`. While it is `off`, `defaultRelay` is
+the address of a relay the server suggests for parties with people elsewhere, or `null`. With no
+`parties` object at all, the web app suggests `https://aiostreams.viren070.me`.
+
+An invite is a relay and a 10-character code from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`. PBKDF2 with
+SHA-256 over the code, salt `aiostreams-party-1` and 100,000 iterations gives 48 bytes: the first 16
+are the party's id on the relay, in base64url, and the other 32 an AES-GCM key. Names, chat,
+reactions and what plays travel sealed with that key, as base64url of a 12-byte nonce followed by the
+ciphertext of their JSON, so a relay keeps only timing. The messages themselves are typed in
+`packages/core/src/sync/protocol.ts`.
+
+## Reports
+
+With `reports`, `POST /AIOStreams/Reports` keeps a report for the server's admins, who read it in the
+dashboard under **Reports**:
+
+```json
+{
+  "kind": "crash",
+  "platform": "android",
+  "appVersion": "0.5.1",
+  "device": "Sony BRAVIA",
+  "note": "It closed as the film started",
+  "summary": "Native crash: SIGSEGV …",
+  "details": "…the whole report and the recent log…",
+  "forward": true
+}
+```
+
+`kind` is `crash` or `report`, `summary` a few lines a list shows the first of, and `details` the
+rest, kept to 192 KB by cutting the middle. The answer is the code to read the report by:
+`{ "code": "ABC-DEFG", "forwarded": "HJK-MNPQ", "forwardError": null }`. With `forward`, and
+`aiostreams.reports.forward` true, the server also passes it on to the developer's server
+(`APP_REPORTS_FORWARD_TO`) and gives its code as `forwarded`, or why it couldn't as `forwardError`.
+Passwords, tokens and keys are taken out of what is kept, and configuration ids out of what is passed
+on. A server whose `APP_REPORTS` is `public` takes passed-on reports at `POST /api/v1/reports`.
+
+## What stays with AIOStreams
+
+These belong to how AIOStreams signs in to a configuration, and other servers have no use for them:
+
+- Signing in with a configuration's UUID or alias, `<uuid>/<user>` as the user name and
+  `password/PIN` as the password, and the `configSignIn` feature that announces it.
+- Signing in with a PIN alone (`pinSignIn`), on the addresses that name a configuration:
+  `/jellyfin/<uuid>/<encrypted password>`, `/jellyfin/u/<alias>` and `/jellyfin/p/<code>`.
+- A separate user's own address, `/jellyfin/p/<code>` (`personal`), which lists and signs in that
+  one user and no other.
+- The web app signing in from the configure page, through AIOStreams' own API.

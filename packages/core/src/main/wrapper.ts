@@ -36,10 +36,11 @@ import {
   makeUrlLogSafe,
   formatZodError,
   PossibleRecursiveRequestError,
-  Env,
   appConfig,
   getTimeTakenSincePoint,
   RequestOptions,
+  DistributedLock,
+  requestLockType,
 } from '../utils/index.js';
 import { Preset, PresetManager } from '../presets/index.js';
 import {
@@ -196,21 +197,18 @@ export class Wrapper {
         options: this.addon.preset.options,
       }) || this.manifestUrl;
 
-    const requestFn = async (signal: AbortSignal): Promise<Manifest> => {
+    const fetchManifest = async (
+      signal: AbortSignal,
+      fetchTimeout: number
+    ): Promise<Manifest> => {
       logger.debug(
         { addon: this.addon.name, url: makeUrlLogSafe(this.manifestUrl) },
         'fetching manifest'
       );
       try {
-        const backgroundTimeout =
-          appConfig.resources.background.timeout ??
-          appConfig.userLimits.timeouts.maxTimeout;
         const res = await makeRequest(this.manifestUrl, {
-          timeout: backgroundTimeout,
-          signal: AbortSignal.any([
-            signal,
-            AbortSignal.timeout(backgroundTimeout),
-          ]),
+          timeout: fetchTimeout,
+          signal: AbortSignal.any([signal, AbortSignal.timeout(fetchTimeout)]),
           headers: this.addon.headers,
           internalHeaders: this.addon.internalHeaders,
           forwardIp: this.addon.ip,
@@ -251,36 +249,88 @@ export class Wrapper {
       }
     };
 
-    const failureTtl = appConfig.resources.cache.manifest.failureTtl;
-    if (failureTtl > 0 && !options?.bypassCache) {
-      const failure = await manifestFailureCache.get(cacheKey);
-      if (failure) {
-        throw new Error(failure);
-      }
-    }
+    const backgroundTimeout =
+      appConfig.resources.background.timeout ??
+      appConfig.userLimits.timeouts.maxTimeout;
+    const foregroundTimeout =
+      options?.timeout ?? appConfig.resources.timeouts.manifest;
+    const requestFn = (signal: AbortSignal) =>
+      fetchManifest(
+        signal,
+        appConfig.resources.background.enabled
+          ? backgroundTimeout
+          : foregroundTimeout
+      );
 
-    try {
-      return await this._request({
-        requestFn,
-        timeout: options?.timeout ?? appConfig.resources.timeouts.manifest,
-        resourceName: 'manifest',
-        cacher: manifestCache,
-        cacheKey,
-        cacheTtl: resolveTtl(
-          appConfig.resources.cache.manifest.ttl,
-          this.addon.preset.type,
-          this.manifestUrl
-        ),
-        bypassCache: options?.bypassCache,
-      });
-    } catch (error: any) {
+    const ttl = resolveTtl(
+      appConfig.resources.cache.manifest.ttl,
+      this.addon.preset.type,
+      this.manifestUrl
+    );
+    const cacheTtl = ttl > 0 ? ttl + ttl : ttl;
+    const failureTtl = appConfig.resources.cache.manifest.failureTtl;
+    const recordFailure = async (error: unknown) => {
       if (failureTtl > 0 && !(error instanceof PossibleRecursiveRequestError)) {
         await manifestFailureCache
-          .set(cacheKey, error.message, failureTtl)
+          .set(cacheKey, (error as Error).message, failureTtl)
           .catch(() => undefined);
       }
-      throw error;
-    }
+    };
+
+    const fetchNow = async (): Promise<Manifest> => {
+      if (failureTtl > 0 && !options?.bypassCache) {
+        const failure = await manifestFailureCache.get(cacheKey);
+        if (failure) {
+          throw new Error(failure);
+        }
+      }
+      try {
+        return await this._request({
+          requestFn,
+          timeout: foregroundTimeout,
+          resourceName: 'manifest',
+          cacher: manifestCache,
+          cacheKey,
+          cacheTtl,
+          bypassCache: options?.bypassCache,
+        });
+      } catch (error) {
+        await recordFailure(error);
+        throw error;
+      }
+    };
+
+    const refresh = async (): Promise<void> => {
+      if (failureTtl > 0 && (await manifestFailureCache.get(cacheKey))) return;
+      if (backgroundInFlight >= appConfig.resources.background.maxConcurrent)
+        return;
+      backgroundInFlight++;
+      try {
+        await DistributedLock.getInstance().withLock(
+          cacheKey,
+          async () => {
+            const manifest = await fetchManifest(
+              AbortSignal.timeout(backgroundTimeout),
+              backgroundTimeout
+            );
+            await manifestCache.set(cacheKey, manifest, cacheTtl);
+            return manifest;
+          },
+          {
+            timeout: backgroundTimeout,
+            ttl: backgroundTimeout + 1000,
+            type: requestLockType(),
+          }
+        );
+      } catch (error) {
+        await recordFailure(error);
+      } finally {
+        backgroundInFlight--;
+      }
+    };
+
+    if (ttl <= 0 || options?.bypassCache) return fetchNow();
+    return manifestCache.getOrRevalidate(cacheKey, fetchNow, refresh, ttl);
   }
 
   async getStreams(type: string, id: string): Promise<ParsedStream[]> {
@@ -439,6 +489,7 @@ export class Wrapper {
       this.addon.preset.type,
       this.manifestUrl
     );
+    const hit = { fromCache: false };
     const meta: Meta = await this.makeResourceRequest(
       'meta',
       { type, id },
@@ -452,8 +503,17 @@ export class Wrapper {
         id,
         headers: this.addon.headers,
         options: this.addon.preset.options,
-      })
+      }),
+      hit
     );
+    /*
+     * A cached meta was validated on the way in, so the schema is not re-run
+     * over every episode. Metas carrying per-video streams still take the full
+     * path: those streams are cached unparsed.
+     */
+    if (hit.fromCache && !meta.videos?.some((v) => v.streams?.length)) {
+      return meta as ParsedMeta;
+    }
     // parse streams in meta.videos.streams if present
     const parser = new (this.preset.getParser())(this.addon);
     if (meta.videos) {
@@ -497,6 +557,7 @@ export class Wrapper {
         id,
         headers: this.addon.headers,
         options: this.addon.preset.options,
+        extras,
       })
     );
   }
@@ -599,6 +660,8 @@ export class Wrapper {
     cacheTtl: number;
     shouldCache?: (data: T) => boolean;
     bypassCache?: boolean;
+    /** Set to true when the value came from the cache rather than upstream. */
+    hit?: { fromCache: boolean };
   }): Promise<T> {
     const {
       requestFn,
@@ -609,6 +672,7 @@ export class Wrapper {
       cacheTtl,
       shouldCache,
       bypassCache,
+      hit,
     } = options;
 
     let doBackground = appConfig.resources.background.enabled && cacher;
@@ -622,6 +686,7 @@ export class Wrapper {
           { addon: this.getAddonName(this.addon), resource: resourceName },
           'returning cached resource'
         );
+        if (hit) hit.fromCache = true;
         return cached;
       }
     }
@@ -637,7 +702,17 @@ export class Wrapper {
       return result;
     };
 
-    const requestPromise = processRequest();
+    const maxRequestDuration = doBackground
+      ? (appConfig.resources.background.timeout ??
+        appConfig.userLimits.timeouts.maxTimeout)
+      : timeout;
+    const requestPromise = DistributedLock.getInstance()
+      .withLock(cacheKey, processRequest, {
+        timeout,
+        ttl: maxRequestDuration + 1000,
+        type: requestLockType(),
+      })
+      .then(({ result }) => result);
 
     if (!doBackground) {
       return await requestPromise;
@@ -688,7 +763,8 @@ export class Wrapper {
     validator: (data: unknown) => T,
     cacher: Cache<string, T> | undefined,
     cacheTtl: number,
-    cacheKey?: string
+    cacheKey?: string,
+    hit?: { fromCache: boolean }
   ) {
     const { type, id, extras } = params;
     const url = this.buildResourceUrl(resource, type, id, extras);
@@ -738,6 +814,7 @@ export class Wrapper {
         cacheTtl,
         shouldCache: (data: T) =>
           resource !== 'stream' || (Array.isArray(data) && data.length > 0),
+        hit,
       });
       const count = this.resultCountOf(data);
       track({

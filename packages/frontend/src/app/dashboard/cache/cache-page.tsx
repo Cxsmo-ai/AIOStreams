@@ -3,16 +3,16 @@ import { toast } from 'sonner';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BiSearchAlt, BiTrash, BiRefresh } from 'react-icons/bi';
 import { PageWrapper } from '@/components/shared/page-wrapper';
-import { Card } from '@/components/ui/card';
-import { Button, IconButton } from '@/components/ui/button';
-import { cn } from '@/components/ui/core/styling';
+import { Card } from '@aiostreams/ui/card';
+import { Button, IconButton } from '@aiostreams/ui/button';
+import { cn } from '@aiostreams/ui/core/styling';
 import {
   ConfirmationDialog,
   useConfirmationDialog,
-} from '@/components/shared/confirmation-dialog';
+} from '@aiostreams/ui/shared/confirmation-dialog';
 import { DashboardQueryBoundary } from '@/components/shared/dashboard-query-boundary';
 import { api } from '@/lib/api';
-import { formatBytes } from '@/lib/format';
+import { formatBytes } from '@aiostreams/ui/core/format';
 
 interface Instance {
   name: string;
@@ -35,7 +35,7 @@ interface Describe {
 const BADGE: Record<string, string> = {
   memory: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
   sql: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
-  redis: 'bg-red-500/10 text-red-500 border-red-500/20',
+  redis: 'bg-red-500/10 text-red-400 border-red-400/20',
   disk: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
 };
 

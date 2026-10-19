@@ -1,0 +1,841 @@
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import {
+  AIOStreams,
+  APIError,
+  Cache,
+  accountScope,
+  activateVariants,
+  config as appConfig,
+  constants,
+  createLogger,
+  extractAuth,
+  getDb,
+  getSimpleTextHash,
+  isConfigUuid,
+  isEncrypted,
+  JellyfinAddressRepository,
+  PERSONA_PIN_PATTERN,
+  verifyHash,
+  mintToken,
+  readToken,
+  resolveConfigAlias,
+  memoScope,
+  personaUserId,
+  recordClientAgent,
+  serverId as instanceServerId,
+  sql,
+  UserRepository,
+  validateConfig,
+  decryptString,
+  type ClientInfo,
+  type ItemBuildContext,
+  type JellyfinApiKey,
+  type JellyfinPersona,
+  exposedCatalogs,
+  guessLeaf,
+  leafEvidenceFor,
+  type LeafEvidence,
+  listViews,
+  type ParsedMeta,
+  type TokenPayload,
+  type ViewEntry,
+  type UserData,
+  type WatchScope,
+} from '@aiostreams/core';
+import { syncUserDataUrls } from '../../utils/syncUserData.js';
+import { buildVariantRequestContext } from '../../utils/variant-context.js';
+import { attemptLimiter } from '../../middlewares/ratelimit.js';
+
+const logger = createLogger('jellyfin');
+
+/**
+ * The Android app's own player, which plays an `Http` source's `Path` as a
+ * live HLS playlist, so it is sent through the stream route instead.
+ */
+export const ANDROID_PLAYER_CLIENT = 'Jellyfin for Android';
+
+export interface JellyfinRequestContext {
+  uuid: string;
+  encryptedPassword: string;
+  userData: UserData;
+  userId: string;
+  /** Who is signed in; null for the account. */
+  persona: JellyfinPersona | null;
+  /** Set for API-key requests, which act for any user the URL names. */
+  apiKey: JellyfinApiKey | null;
+  /** The history in use: the account's when the persona shares it. */
+  watch: WatchScope;
+  serverId: string;
+  /** Absolute origin plus mount path, e.g. https://host/jellyfin */
+  baseUrl: string;
+  token: string;
+  client: ClientInfo;
+  build: ItemBuildContext;
+  engine(): Promise<AIOStreams>;
+  /** The primary user's configuration, whose sinks are the ones trackers sync with. */
+  primaryEngine(): Promise<AIOStreams>;
+  /** Playback memos are keyed by this, so a config change never reuses them. */
+  scope(): string;
+  /** Metas fetched while serving this request, keyed `type|id`. */
+  metas: Map<string, Promise<ParsedMeta | null>>;
+  /** The libraries, resolved once per request; one cache read per catalog. */
+  views(): Promise<ViewEntry[]>;
+  /** Which types play on their own, and a guess for the ones not yet swept. */
+  leafEvidence(): Promise<LeafEvidence>;
+}
+
+/*
+ * The expensive, request-independent part of serving a config (load, decrypt,
+ * sync remote lists, validate) is cached per config; the engine itself is
+ * built per request because it carries request state.
+ */
+interface CachedConfig {
+  userData: UserData;
+  /** As saved, for variants to patch before the sync and validation. */
+  stored: UserData;
+  updatedAt: string;
+  loadedAt: number;
+  checkedAt: number;
+}
+const CONFIG_TTL = 300;
+const RECHECK_MS = 30_000;
+/* `memory` is required: the config must not leave the process, and a JSON
+ * round trip would drop its `undefined` fields. */
+const configCache = Cache.getInstance<string, CachedConfig>(
+  'jellyfin-config',
+  5000,
+  'memory',
+  { clone: false }
+);
+const inFlight = new Map<string, Promise<CachedConfig | null>>();
+
+async function configUpdatedAt(uuid: string): Promise<string> {
+  const row = await getDb().maybeOne<{ updated_at: string | Date | null }>(
+    sql`SELECT updated_at FROM users WHERE uuid = ${uuid}`
+  );
+  const v = row?.updated_at;
+  return v instanceof Date ? v.toISOString() : String(v ?? '');
+}
+
+async function loadConfig(
+  uuid: string,
+  encryptedPassword: string
+): Promise<CachedConfig | null> {
+  const dec = decryptString(encryptedPassword);
+  if (!dec.success || dec.data == null) return null;
+  let userData: UserData | null;
+  try {
+    userData = await UserRepository.getUser(uuid, dec.data);
+  } catch (error) {
+    if (
+      error instanceof APIError &&
+      error.code === constants.ErrorCode.USER_INVALID_DETAILS
+    ) {
+      return null;
+    }
+    throw error;
+  }
+  if (!userData) return null;
+  userData.uuid = uuid;
+  userData.encryptedPassword = encryptedPassword;
+  userData.ip = undefined;
+  const stored = structuredClone(userData);
+  return {
+    userData: await syncAndValidate(userData),
+    stored,
+    updatedAt: await configUpdatedAt(uuid),
+    loadedAt: Date.now(),
+    checkedAt: Date.now(),
+  };
+}
+
+async function syncAndValidate(userData: UserData): Promise<UserData> {
+  return validateConfig(await syncUserDataUrls(userData), {
+    skipVariantValidation: true,
+    skipErrorsFromAddonsOrProxies: true,
+    decryptValues: true,
+  });
+}
+
+/**
+ * The configuration a `/u/<alias>` picker address names. Aliases are lowercase,
+ * and a TV keyboard may capitalise what was typed.
+ */
+export async function resolvePickerAlias(
+  alias: string
+): Promise<{ uuid: string; encryptedPassword: string } | null> {
+  const lower = alias.toLowerCase();
+  return (
+    (await resolveConfigAlias(alias)) ??
+    (lower !== alias ? await resolveConfigAlias(lower) : null)
+  );
+}
+
+const ADDRESS_CODE = /^[a-z0-9]{10,32}$/;
+
+/** The configuration a `/p/<code>` sign-in address names. */
+export async function resolveAddressCode(
+  code: string
+): Promise<{ uuid: string; encryptedPassword: string } | null> {
+  return ADDRESS_CODE.test(code)
+    ? JellyfinAddressRepository.resolve(code)
+    : null;
+}
+
+export async function resolveUuid(uuidOrAlias: string): Promise<string | null> {
+  if (isConfigUuid(uuidOrAlias)) return uuidOrAlias;
+  const alias = await resolveConfigAlias(uuidOrAlias);
+  return alias?.uuid ?? null;
+}
+
+/** The cached entry, whose `updatedAt` identifies the configuration version. */
+export async function resolveConfigEntry(
+  uuid: string,
+  encryptedPassword: string
+): Promise<CachedConfig | null> {
+  const key = `${uuid}|${getSimpleTextHash(encryptedPassword)}`;
+  let entry = await configCache.get(key).catch(() => undefined);
+  if (entry && Date.now() - entry.checkedAt > RECHECK_MS) {
+    // Synced lists were merged in at load, so an unchanged config still expires.
+    const expired = Date.now() - entry.loadedAt > CONFIG_TTL * 1000;
+    if (expired || (await configUpdatedAt(uuid)) !== entry.updatedAt) {
+      await configCache.delete(key).catch(() => undefined);
+      entry = undefined;
+    } else {
+      entry = { ...entry, checkedAt: Date.now() };
+      void configCache.set(key, entry, CONFIG_TTL).catch(() => undefined);
+    }
+  }
+  if (!entry) {
+    let pending = inFlight.get(key);
+    if (!pending) {
+      pending = loadConfig(uuid, encryptedPassword).finally(() =>
+        inFlight.delete(key)
+      );
+      inFlight.set(key, pending);
+    }
+    const loaded = await pending;
+    if (!loaded) return null;
+    void configCache.set(key, loaded, CONFIG_TTL).catch(() => undefined);
+    entry = loaded;
+  }
+  return entry;
+}
+
+/**
+ * The resolved config, or null when the credentials are wrong. Shared with the
+ * cache: copy it before changing anything.
+ */
+export async function resolveConfig(
+  uuid: string,
+  encryptedPassword: string
+): Promise<UserData | null> {
+  const entry = await resolveConfigEntry(uuid, encryptedPassword);
+  return entry?.userData ?? null;
+}
+
+/**
+ * Proves credentials by resolving the configuration rather than by a bcrypt
+ * compare, which on a reconnect storm would saturate the libuv pool.
+ *
+ * Resolving is proof: the config-key cache is keyed by a hash of the password,
+ * a hit also requires the stored hash to be unchanged, and a miss falls through
+ * to bcrypt and fails there.
+ */
+export async function resolveConfigFor(
+  uuidOrAlias: string,
+  encryptedPassword: string
+): Promise<{ uuid: string; userData: UserData } | null> {
+  const uuid = await resolveUuid(uuidOrAlias);
+  if (!uuid) return null;
+  const entry = await resolveConfigEntry(uuid, encryptedPassword);
+  return entry ? { uuid, userData: entry.userData } : null;
+}
+
+export interface TokenUser {
+  uuid: string;
+  userData: UserData;
+  persona: JellyfinPersona | null;
+  userId: string;
+  watch: WatchScope;
+  payload: TokenPayload;
+}
+
+/**
+ * The user a session token signs in, or null once it no longer does. API keys
+ * act for no one in particular, so they are none.
+ */
+export async function userForToken(token: string): Promise<TokenUser | null> {
+  const payload = readToken(token);
+  if (!payload || payload.a) return null;
+  // Resolved rather than verified: see `resolveConfigFor`.
+  const resolved = await resolveConfigFor(payload.u, payload.p);
+  if (!resolved) return null;
+  const { uuid, userData } = resolved;
+  const persona = payload.k ? personaById(userData, payload.k) : null;
+  if (payload.k && !persona) return null;
+  if ((payload.l ?? '') !== lockTag(userData, persona)) return null;
+  return {
+    uuid,
+    userData,
+    persona,
+    userId: personaUserId(uuid, persona?.id ?? ''),
+    watch: watchScopeOf(uuid, persona),
+    payload,
+  };
+}
+
+/** A persona with a history of its own keeps its watch state and preferences apart. */
+export function watchScopeOf(
+  uuid: string,
+  persona: JellyfinPersona | null | undefined
+): WatchScope {
+  return persona && persona.history !== 'shared'
+    ? { uuid, persona: persona.id }
+    : accountScope(uuid);
+}
+
+export function personasOf(userData: UserData): JellyfinPersona[] {
+  return userData.jellyfin?.personas ?? [];
+}
+
+export function personaById(
+  userData: UserData,
+  id: string
+): JellyfinPersona | null {
+  return personasOf(userData).find((p) => p.id === id) ?? null;
+}
+
+/** What a client types or posts back: the id, or the name it was shown. */
+export function personaByName(
+  userData: UserData,
+  name: string
+): JellyfinPersona | null {
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return null;
+  return (
+    personasOf(userData).find(
+      (p) => p.id === wanted || p.name.trim().toLowerCase() === wanted
+    ) ?? null
+  );
+}
+
+export function personaLocked(
+  persona: JellyfinPersona | null | undefined
+): boolean {
+  return !!persona?.lock;
+}
+
+/** The PIN hash of a persona, or of the account for `null`. */
+function lockOf(
+  userData: Pick<UserData, 'jellyfin'>,
+  persona: JellyfinPersona | null
+): string | undefined {
+  return persona ? persona.lock : userData.jellyfin?.primary?.lock;
+}
+
+export function accountLocked(userData: Pick<UserData, 'jellyfin'>): boolean {
+  return !!lockOf(userData, null);
+}
+
+export function lockTag(
+  userData: Pick<UserData, 'jellyfin'>,
+  persona: JellyfinPersona | null
+): string {
+  const lock = lockOf(userData, persona);
+  return lock ? getSimpleTextHash(lock).slice(0, 12) : '';
+}
+
+/** Sent when the credential was right but a PIN is missing or wrong, so a client can ask for it. */
+export const PIN_REQUIRED = 'PIN required';
+
+// Shared across replicas when Redis is set, so a guess cannot be spread over them.
+const pinAttempts = attemptLimiter(15 * 60, 5, 'jellyfin-pin');
+
+/**
+ * Whether `pin` opens the user, a persona or the account for `null`. Past the
+ * attempt limit even the right PIN is refused for a while.
+ */
+export async function userUnlocks(
+  uuid: string,
+  userData: Pick<UserData, 'jellyfin'>,
+  persona: JellyfinPersona | null,
+  pin: string
+): Promise<boolean> {
+  const lock = lockOf(userData, persona);
+  if (!lock) return true;
+  // No PIN at all is a prompt, not a guess.
+  if (!pin) return false;
+  const key = `${uuid}:${persona?.id ?? ''}`;
+  if (!(await pinAttempts.take(key))) {
+    logger.warn({ uuid, persona: persona?.id }, 'user pin locked out');
+    return false;
+  }
+  if (PERSONA_PIN_PATTERN.test(pin) && (await verifyHash(pin, lock))) {
+    await pinAttempts.reset(key);
+    return true;
+  }
+  return false;
+}
+
+export function requestOrigin(req: Request): string {
+  const host = req.get('host');
+  if (host) return `${req.protocol}://${host}`;
+  if (appConfig.bootstrap.baseUrl)
+    return appConfig.bootstrap.baseUrl.replace(/\/$/, '');
+  return `http://localhost:${appConfig.bootstrap.port}`;
+}
+
+export function param(req: Request, name: string): string {
+  const v = (req.params as Record<string, string | string[] | undefined>)[name];
+  return Array.isArray(v) ? (v[0] ?? '') : (v ?? '');
+}
+
+/** Query lookup that ignores key case, as ASP.NET does. */
+export function qs(req: Request, name: string): string | undefined {
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(req.query)) {
+    if (k.toLowerCase() === lower) {
+      if (typeof v === 'string') return v;
+      if (Array.isArray(v) && typeof v[0] === 'string') return v[0];
+    }
+  }
+  return undefined;
+}
+
+export function qi(req: Request, name: string, fallback: number): number {
+  const v = qs(req, name);
+  if (v == null || v === '') return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function qb(req: Request, name: string): boolean | undefined {
+  const v = qs(req, name)?.toLowerCase();
+  if (v === 'true' || v === '1') return true;
+  if (v === 'false' || v === '0') return false;
+  return undefined;
+}
+
+export function qlist(req: Request, name: string): string[] {
+  const lower = name.toLowerCase();
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(req.query)) {
+    if (k.toLowerCase() !== lower) continue;
+    for (const entry of Array.isArray(v) ? v : [v]) {
+      if (typeof entry !== 'string') continue;
+      for (const part of entry.split(/[,|]/)) {
+        const s = part.trim();
+        if (s) out.push(s);
+      }
+    }
+  }
+  return out;
+}
+
+export function bodyOf(req: Request): Record<string, unknown> {
+  return req.body && typeof req.body === 'object'
+    ? (req.body as Record<string, unknown>)
+    : {};
+}
+
+/** A body field by name in any case, as Jellyfin reads JSON. */
+export function bodyField(req: Request, name: string): unknown {
+  const body = bodyOf(req);
+  if (name in body) return body[name];
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(body)) {
+    if (key.toLowerCase() === lower) return value;
+  }
+  return undefined;
+}
+
+/** Routes that must answer without a credential (clients send none). */
+const ANONYMOUS_OK = [
+  /^\/system\/info\/public$/i,
+  /^\/system\/ping$/i,
+  /^\/system\/endpoint$/i,
+  /^\/getutctime$/i,
+  /^\/users\/authenticatebyname$/i,
+  /^\/users\/authenticatewithquickconnect$/i,
+  /^\/users\/public$/i,
+  /^\/branding\//i,
+  /^\/quickconnect\/(enabled|initiate|connect)$/i,
+  /^\/startup\//i,
+  /^\/items\/[^/]+\/images(\/|$)/i,
+  /^\/persons\/[^/]+\/images(\/|$)/i,
+  /^\/userimage$/i,
+  /^\/users\/[^/]+\/images(\/|$)/i,
+  /^\/images\/general\//i,
+  /^\/videos\/[^/]+\/stream(\.|\/|$)/i,
+  /^\/videos\/[^/]+\/[^/]+\/subtitles\//i,
+  /^\/items\/[^/]+\/(download|file)$/i,
+  /^\/items\/[^/]+\/playbackinfo$/i,
+  /^\/items\/[^/]+\/mediasources$/i,
+  /^\/web\/manifest\.json$/i,
+];
+
+export function isAnonymousOk(path: string): boolean {
+  return ANONYMOUS_OK.some((re) => re.test(path));
+}
+
+/**
+ * Only Infuse builds its version picker from the list document; clients that
+ * render a row's sources directly would offer the placeholders as versions.
+ */
+function wantsListVersions(req: Request, client: ClientInfo): boolean {
+  return /infuse/i.test(`${client.name} ${req.get('user-agent') ?? ''}`);
+}
+
+function urlUserId(req: Request): string | undefined {
+  const fromPath = /^\/Users\/([0-9a-f-]{32,36})(?:\/|$)/i.exec(req.path)?.[1];
+  const raw = fromPath ?? qs(req, 'userId');
+  return raw ? raw.replace(/-/g, '').toLowerCase() : undefined;
+}
+
+/** Null for the primary user, undefined when the id is nobody's. */
+function userForId(
+  uuid: string,
+  userData: UserData,
+  userId: string
+): JellyfinPersona | null | undefined {
+  if (userId === personaUserId(uuid, '')) return null;
+  return personasOf(userData).find((p) => personaUserId(uuid, p.id) === userId);
+}
+
+interface ApiKeyClaim {
+  id: string;
+  userId?: string;
+}
+
+const UNKNOWN_USER = 'unknown-user';
+
+/** Clients name themselves in the auth header, hidden from conditions. */
+function withClientName(userAgent: string, client: ClientInfo): string {
+  if (client.name === 'Unknown') return userAgent;
+  let product =
+    client.version === '0' ? client.name : `${client.name}/${client.version}`;
+  if (client.device !== 'Unknown') product += ` (${client.device})`;
+  return userAgent ? `${userAgent} ${product}` : product;
+}
+
+async function buildContext(
+  req: Request,
+  uuid: string,
+  encryptedPassword: string,
+  token: string | undefined,
+  client: ClientInfo,
+  personaKey: string,
+  keyClaim?: ApiKeyClaim,
+  /** The token's PIN tag; absent when the context is not built from a token. */
+  lockClaim?: string
+): Promise<JellyfinRequestContext | typeof UNKNOWN_USER | null> {
+  const entry = await resolveConfigEntry(uuid, encryptedPassword);
+  if (!entry) return null;
+  let userData: UserData = { ...entry.userData, ip: req.userIp };
+  const baseUserData = userData;
+
+  let apiKey: JellyfinApiKey | null = null;
+  let persona: JellyfinPersona | null;
+  if (keyClaim) {
+    apiKey =
+      userData.jellyfin?.apiKeys?.find((k) => k.id === keyClaim.id) ?? null;
+    if (!apiKey) return null;
+    const named = keyClaim.userId
+      ? userForId(uuid, userData, keyClaim.userId)
+      : null;
+    // A key goes to a tool, not a person, so it must not open a PIN.
+    if (named === undefined || personaLocked(named)) return UNKNOWN_USER;
+    persona = named;
+  } else {
+    // A token naming a persona that no longer exists is no longer valid.
+    persona = personaKey ? personaById(userData, personaKey) : null;
+    if (personaKey && !persona) return null;
+    if (lockClaim !== undefined && lockClaim !== lockTag(userData, persona))
+      return null;
+  }
+  const primaryVariants = userData.jellyfin?.primary?.variants ?? [];
+  const request = buildVariantRequestContext(req, 'jellyfin');
+  const variantContext = {
+    ...request,
+    userAgent: withClientName(request.userAgent, client),
+  };
+  // Tokenless contexts also serve the configuration page's own requests.
+  if (token) void recordClientAgent(uuid, variantContext.userAgent, 'jellyfin');
+  const configFor = async (selected: string[]): Promise<UserData> => {
+    try {
+      // Activation sets `healthResults` on its argument.
+      const { userData: activated, applied } = await activateVariants(
+        { ...entry.stored },
+        selected,
+        variantContext
+      );
+      const data = applied.length
+        ? await syncAndValidate(activated)
+        : { ...baseUserData, healthResults: activated.healthResults };
+      return { ...data, ip: req.userIp };
+    } catch (error) {
+      logger.warn(
+        {
+          uuid,
+          persona: persona?.id,
+          variants: selected,
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'variant activation failed for jellyfin request'
+      );
+      return baseUserData;
+    }
+  };
+  userData = await configFor(
+    persona ? (persona.variants ?? []) : primaryVariants
+  );
+
+  const serverIdValue = instanceServerId();
+  const baseUrl = `${requestOrigin(req)}${req.baseUrl}`.replace(/\/$/, '');
+  let engine: Promise<AIOStreams> | null = null;
+  let primaryEngine: Promise<AIOStreams> | null = null;
+  let scope: string | null = null;
+  let views: Promise<ViewEntry[]> | null = null;
+  let leafEvidence: Promise<LeafEvidence> | null = null;
+  const finalUserData = userData;
+  const engineOf = (data: UserData) =>
+    new AIOStreams(data, {
+      skipFailedAddons: true,
+      path: 'jellyfin',
+    }).initialise();
+  const getEngine = () => (engine ??= engineOf(finalUserData));
+  const getViews = () =>
+    (views ??= getEngine().then((e) => listViews(e, finalUserData)));
+  const getLeafEvidence = () =>
+    (leafEvidence ??= getEngine().then(async (engine) => ({
+      ...(await leafEvidenceFor(finalUserData, exposedCatalogs(engine))),
+      guess: (entry: { id: string; type: string }) =>
+        guessLeaf(entry, (type, id) => engine.canGetMeta(type, id)),
+    })));
+  const getPrimaryEngine = () => {
+    if (!persona) return getEngine();
+    return (primaryEngine ??= configFor(primaryVariants).then(engineOf));
+  };
+  const userId = personaUserId(uuid, persona?.id ?? '');
+  const watch = watchScopeOf(uuid, persona);
+  return {
+    uuid,
+    encryptedPassword,
+    userData: finalUserData,
+    userId,
+    persona,
+    apiKey,
+    watch,
+    serverId: serverIdValue,
+    baseUrl,
+    token:
+      token ??
+      mintToken({
+        u: uuid,
+        p: encryptedPassword,
+        d: client.deviceId,
+        k: persona?.id,
+        l: lockTag(baseUserData, persona) || undefined,
+      }),
+    client,
+    build: {
+      serverId: serverIdValue,
+      userId,
+      uuid,
+      listVersions: wantsListVersions(req, client),
+      markUnaired: finalUserData.jellyfin?.markUnaired ?? true,
+    },
+    engine: getEngine,
+    primaryEngine: getPrimaryEngine,
+    metas: new Map(),
+    views: getViews,
+    leafEvidence: getLeafEvidence,
+    scope: () => (scope ??= memoScope(finalUserData, entry.updatedAt)),
+  };
+}
+
+export const jellyfinContext: RequestHandler = async (req, res, next) => {
+  try {
+    const params = req.params as Record<string, string | undefined>;
+    const { token, client } = extractAuth({
+      header: (name) => req.get(name),
+      query: req.query as Record<string, unknown>,
+    });
+
+    let uuid: string | undefined;
+    let encryptedPassword: string | undefined;
+    const payload = token ? readToken(token) : null;
+
+    // A picker address only names the configuration; a token still signs in.
+    if (params.uuid && params.encryptedPassword) {
+      if (!isEncrypted(params.encryptedPassword)) {
+        next('router');
+        return;
+      }
+      if (!isConfigUuid(params.uuid)) {
+        res.status(401).json({ Message: 'Unknown configuration' });
+        return;
+      }
+      req.jfMount = {
+        uuid: params.uuid,
+        encryptedPassword: params.encryptedPassword,
+      };
+    } else if (params.alias) {
+      const target = await resolvePickerAlias(params.alias);
+      if (!target) {
+        res.status(401).json({ Message: 'Unknown configuration' });
+        return;
+      }
+      req.jfMount = target;
+    } else if (params.code) {
+      const target = await resolveAddressCode(params.code);
+      if (!target) {
+        res.status(401).json({ Message: 'Unknown address' });
+        return;
+      }
+      req.jfMount = target;
+    }
+    if (
+      payload &&
+      (!req.jfMount ||
+        payload.u.toLowerCase() === req.jfMount.uuid.toLowerCase())
+    ) {
+      uuid = payload.u;
+      encryptedPassword = payload.p;
+    }
+
+    if (!uuid || !encryptedPassword) {
+      if (isAnonymousOk(req.path)) {
+        req.jfClient = client;
+        next();
+        return;
+      }
+      res.status(401).json({ Message: 'Unauthorized' });
+      return;
+    }
+
+    const ctx = await buildContext(
+      req,
+      uuid,
+      encryptedPassword,
+      token,
+      client,
+      payload?.k ?? '',
+      payload?.a ? { id: payload.a, userId: urlUserId(req) } : undefined,
+      payload?.l ?? ''
+    );
+    if (ctx === UNKNOWN_USER) {
+      res.status(404).json({ Message: 'User not found' });
+      return;
+    }
+    if (!ctx) {
+      if (isAnonymousOk(req.path)) {
+        req.jfClient = client;
+        next();
+        return;
+      }
+      res.status(401).json({ Message: 'Invalid credentials' });
+      return;
+    }
+    req.jf = ctx;
+    req.jfClient = client;
+    req.uuid = ctx.uuid;
+    req.userData = ctx.userData;
+    next();
+  } catch (error) {
+    logger.error(
+      {
+        path: req.originalUrl,
+        err: error instanceof Error ? error.message : String(error),
+      },
+      'jellyfin context failed'
+    );
+    res.status(500).json({ Message: 'Internal error' });
+  }
+};
+
+export function requireContext(
+  req: Request,
+  res: Response
+): JellyfinRequestContext | null {
+  if (!req.jf) {
+    res.status(401).json({ Message: 'Unauthorized' });
+    return null;
+  }
+  return req.jf;
+}
+
+/** Wraps an authenticated handler with the context and uniform error handling. */
+export function jf(
+  handler: (
+    req: Request,
+    res: Response,
+    ctx: JellyfinRequestContext
+  ) => Promise<void> | void
+): RequestHandler {
+  return async (req, res, next: NextFunction) => {
+    const ctx = requireContext(req, res);
+    if (!ctx) return;
+    try {
+      await handler(req, res, ctx);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(
+        { path: req.originalUrl, err: msg },
+        'jellyfin handler failed'
+      );
+      if (!res.headersSent) res.status(500).json({ Message: msg });
+      else next(error);
+    }
+  };
+}
+
+/** Same as {@link jf} for routes that may run without a context. */
+export function jfOptional(
+  handler: (
+    req: Request,
+    res: Response,
+    ctx: JellyfinRequestContext | undefined
+  ) => Promise<void> | void
+): RequestHandler {
+  return async (req, res, next: NextFunction) => {
+    try {
+      await handler(req, res, req.jf);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(
+        { path: req.originalUrl, err: msg },
+        'jellyfin handler failed'
+      );
+      if (!res.headersSent) res.status(500).json({ Message: msg });
+      else next(error);
+    }
+  };
+}
+
+/**
+ * Builds a context from stored credentials, for routes with no Jellyfin token.
+ * The account unless a persona is named; null when that persona is gone.
+ */
+export async function contextFromCredentials(
+  req: Request,
+  uuid: string,
+  encryptedPassword: string,
+  personaKey = ''
+): Promise<JellyfinRequestContext | null> {
+  const ctx = await buildContext(
+    req,
+    uuid,
+    encryptedPassword,
+    undefined,
+    req.jfClient ?? {
+      name: 'Unknown',
+      device: 'Unknown',
+      deviceId: 'unknown',
+      version: '0',
+    },
+    personaKey
+  );
+  return ctx === UNKNOWN_USER ? null : ctx;
+}

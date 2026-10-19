@@ -12,6 +12,7 @@ import {
   constants,
   UserRepository,
   mergeConfigs,
+  requiresOnlyGenre,
 } from '@aiostreams/core';
 
 const router: Router = Router();
@@ -82,6 +83,8 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
       return;
     }
     validatedUserData.catalogModifications = undefined;
+    validatedUserData.newCatalogsDisabled = undefined;
+    validatedUserData.upstreamCatalogOrder = undefined;
 
     const aio = new AIOStreams(validatedUserData);
     await aio.initialise();
@@ -95,6 +98,7 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
       hideable: catalog.extra
         ? catalog.extra.every((e) => !e.isRequired)
         : true,
+      genreRequired: requiresOnlyGenre(catalog.extra),
       searchable: catalog.extra
         ? catalog.extra?.findIndex(
             (e) => e.name === 'search' && !e.isRequired

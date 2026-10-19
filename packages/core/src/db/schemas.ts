@@ -91,13 +91,14 @@ export type SortCriterion = z.infer<typeof SortCriterion>;
 const StreamTypes = z.enum(constants.STREAM_TYPES);
 const Languages = z.enum(constants.LANGUAGES);
 
-const FormatterTemplateShape = z.object({
+export const FormatterTemplateShape = z.object({
   name: formatterTemplate(),
   description: formatterTemplate(),
 });
 
 const Formatter = z.object({
   id: z.enum(constants.FORMATTERS),
+  selectedSaved: z.string().optional(),
   definitions: z
     .object({
       custom: FormatterTemplateShape.optional(),
@@ -106,6 +107,181 @@ const Formatter = z.object({
     })
     .optional(),
 });
+
+const CONFIG_UUID_SHAPE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const PERSONA_PIN_PATTERN = /^\d{4,12}$/;
+const BCRYPT_HASH_PATTERN = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
+/** A plain PIN as entered, or the bcrypt hash it was saved as. */
+const PERSONA_LOCK_PATTERN = new RegExp(
+  `${PERSONA_PIN_PATTERN.source}|${BCRYPT_HASH_PATTERN.source}`
+);
+
+export function isPersonaLockHash(value: string): boolean {
+  return BCRYPT_HASH_PATTERN.test(value);
+}
+
+/** A PIN's bcrypt hash; a plain PIN sent here is hashed when the config is saved. */
+const UserLockSchema = z
+  .string()
+  .regex(PERSONA_LOCK_PATTERN, 'A PIN must be 4 to 12 digits.')
+  .optional();
+
+/** A user a Jellyfin client can sign in as. Shares the configuration's credential. */
+const JellyfinPersonaSchema = z.object({
+  // Names the DB partition, so a rename must not touch it.
+  id: z
+    .string()
+    .regex(
+      /^[a-z0-9][a-z0-9_-]{0,31}$/,
+      'Persona id must be 1-32 characters: lowercase letters, digits, "-" or "_", starting with a letter or digit.'
+    ),
+  name: z.string().min(1).max(32),
+  avatar: z.string().url().max(2048).optional(),
+  /** Variants applied while this persona is signed in, in this order. */
+  variants: z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/)).optional(),
+  /** `shared` reads and writes the account's rows, trackers included. */
+  history: z.enum(['own', 'shared']).default('own'),
+  /** Preset ids of the trackers it syncs with; absent is automatic. */
+  trackers: z.array(z.string().min(1)).max(50).optional(),
+  /** Kept out of the picker and apart from the other users; still usable by name. */
+  hidden: z.boolean().optional(),
+  /** The code of a hidden user's own sign-in address, `/jellyfin/p/<address>`. */
+  address: z
+    .string()
+    .regex(/^[a-z0-9]{10,32}$/)
+    .optional(),
+  lock: UserLockSchema,
+});
+
+export type JellyfinPersona = z.infer<typeof JellyfinPersonaSchema>;
+
+/** No secret is stored: a key's token carries the credential itself. */
+const JellyfinApiKeySchema = z.object({
+  id: z.string().regex(/^[a-z0-9]{8,32}$/),
+  name: z.string().trim().min(1).max(64),
+  createdAt: z.string().max(64),
+});
+
+export type JellyfinApiKey = z.infer<typeof JellyfinApiKeySchema>;
+
+const MAX_JELLYFIN_API_KEYS = 10;
+
+const JellyfinSettingsFields = z.object({
+  /** Resolve streams when an item is opened so clients can offer a version picker. Default on. */
+  resolveOnOpen: z.boolean().optional(),
+  /** Versions offered per item; the instance setting caps it. */
+  maxVersions: z.number().int().min(1).max(500).optional(),
+  /** Offer skip markers, when the instance has them enabled at all. Default on. */
+  segments: z.boolean().optional(),
+  /** Which markers to offer. Absent means all of them. */
+  segmentTypes: z.array(z.enum(['Intro', 'Recap', 'Outro'])).optional(),
+  /** Send unaired episodes as missing, which clients won't offer to play. Default on. */
+  markUnaired: z.boolean().optional(),
+  /** Seconds a play waits for its version's tracks; absent uses the instance's. */
+  playWait: z.number().int().min(0).max(30).optional(),
+  /** The configuration's own user: the history its trackers sync with. */
+  primary: z
+    .object({
+      name: z.string().min(1).max(32).optional(),
+      avatar: z.string().url().max(2048).optional(),
+      /** Variants applied while the primary user is signed in, in this order. */
+      variants: z
+        .array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/))
+        .optional(),
+      /** Preset ids of the trackers it syncs with; absent means all. */
+      trackers: z.array(z.string().min(1)).max(50).optional(),
+      /** Kept out of the picker; still signs in by name. */
+      hidden: z.boolean().optional(),
+      lock: UserLockSchema,
+    })
+    .optional(),
+  personas: z
+    .array(JellyfinPersonaSchema)
+    .superRefine((personas, ctx) => {
+      const max = config.jellyfin.maxPersonas;
+      if (personas.length > max) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            max === 0
+              ? 'This instance does not allow extra Jellyfin users.'
+              : `At most ${max} Jellyfin users per configuration.`,
+        });
+      }
+      const ids = new Set<string>();
+      const names = new Set<string>();
+      const addresses = new Set<string>();
+      for (const persona of personas) {
+        if (persona.address) {
+          if (addresses.has(persona.address)) {
+            ctx.addIssue({
+              code: 'custom',
+              message: 'Two users have the same sign-in address.',
+            });
+          }
+          addresses.add(persona.address);
+        }
+        if (ids.has(persona.id)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `Duplicate persona id "${persona.id}".`,
+          });
+        }
+        ids.add(persona.id);
+        const name = persona.name.trim().toLowerCase();
+        if (names.has(name)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `Duplicate persona name "${persona.name}".`,
+          });
+        }
+        names.add(name);
+        // A uuid-shaped name would shadow the configuration's own sign-in.
+        if (CONFIG_UUID_SHAPE.test(persona.name)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `Persona name "${persona.name}" looks like a configuration id.`,
+          });
+        }
+      }
+    })
+    .optional(),
+  apiKeys: z
+    .array(JellyfinApiKeySchema)
+    .max(
+      MAX_JELLYFIN_API_KEYS,
+      `At most ${MAX_JELLYFIN_API_KEYS} API keys per configuration.`
+    )
+    .superRefine((keys, ctx) => {
+      const ids = new Set<string>();
+      for (const key of keys) {
+        if (ids.has(key.id)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `Duplicate API key id "${key.id}".`,
+          });
+        }
+        ids.add(key.id);
+      }
+    })
+    .optional(),
+});
+
+/** Per-configuration settings for the Jellyfin-compatible API. */
+const JellyfinSettings = JellyfinSettingsFields.superRefine((settings, ctx) => {
+  for (const persona of settings.personas ?? []) {
+    if (persona.history === 'shared' && persona.trackers) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `${persona.name} shares the primary user's history, so it uses the primary user's trackers.`,
+      });
+    }
+  }
+});
+
+export type JellyfinSettings = z.infer<typeof JellyfinSettings>;
 
 const StreamProxyConfig = z.object({
   enabled: z.boolean().optional(),
@@ -400,12 +576,14 @@ const CatalogModification = z.object({
   reverse: z.boolean().optional(), // reverse the catalog
   persistShuffleFor: z.number().min(0).max(24).optional(), // persist the shuffle for a given amount of time (in hours)
   onlyOnDiscover: z.boolean().optional(), // only show the catalog on the discover page
+  showOnHome: z.boolean().optional(), // show a genre-requiring catalog on the home page too
   disableSearch: z.boolean().optional(), // disable the search for the catalog
   onlyOnSearch: z.boolean().optional(), // only show the catalog on search results - mutually exclusive with onlyOnDiscover, only available when the catalog has a non-required search extra
   enabled: z.boolean().optional(), // enable or disable the catalog
   usePosterService: z.boolean().optional(), // use rpdb or top poster for posters if supported
   overrideType: z.string().min(1).optional(), // override the type of the catalog
   hideable: z.boolean().optional(), // hide the catalog from the home page
+  genreRequired: z.boolean().optional(), // property of whether only a genre is required (showOnHome applies)
   searchable: z.boolean().optional(), // property of whether the catalog is searchable (not a search only catalog)
   addonName: z.string().optional(), // the name of the addon that provides the catalog
 });
@@ -469,9 +647,75 @@ export const VariantSchema = z.object({
   name: z.string().min(1).max(64).optional(),
   enabled: z.boolean().optional(),
   script: variantScript(),
+  /**
+   * Boolean stream expression. When it matches, the variant applies without
+   * being named in the URL. An explicit selector applies either way.
+   */
+  when: streamExpressionOptional().optional(),
 });
 
 export type Variant = z.infer<typeof VariantSchema>;
+
+/**
+ * What counts as a healthy response. Rules are combined with AND; an empty
+ * object means "any 2xx".
+ */
+export const HealthCheckExpectSchema = z.object({
+  /** `200`, `2xx` or `200-299`. Defaults to `2xx`. */
+  status: z
+    .string()
+    .regex(
+      /^(\d{3}|\dxx|\d{3}-\d{3})$/,
+      'Expected status must be a code (200), a class (2xx) or a range (200-299).'
+    )
+    .optional(),
+  /**
+   * Plain case-insensitive substring rather than a pattern: a health check runs
+   * this against a remote body the author also chooses, and a regex there is a
+   * ready-made way to hang the event loop.
+   */
+  bodyContains: z.string().min(1).max(200).optional(),
+  /** Dotted path into a JSON body, e.g. `services.realdebrid[0].up`. */
+  jsonPath: z
+    .string()
+    .regex(
+      /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*|\[\d+\])*$/,
+      'JSON path must be dotted keys with optional [n] indexes, e.g. "data.status".'
+    )
+    .max(200)
+    .optional(),
+  /** Compared to the value at `jsonPath`. Omit to require any truthy value. */
+  jsonValue: z.union([z.string(), z.number(), z.boolean()]).optional(),
+});
+
+export type HealthCheckExpect = z.infer<typeof HealthCheckExpectSchema>;
+
+export const HealthCheckSchema = z.object({
+  // Referenced from expressions as health('<id>').
+  id: z
+    .string()
+    .regex(
+      /^[a-z0-9][a-z0-9_-]{0,31}$/,
+      'Health check id must be 1-32 characters: lowercase letters, digits, "-" or "_", starting with a letter or digit.'
+    ),
+  name: z.string().min(1).max(64).optional(),
+  url: z.string().url().max(2048),
+  method: z.enum(['GET', 'HEAD']).optional(),
+  expect: HealthCheckExpectSchema.optional(),
+  /** Seconds a result is considered fresh. Clamped to the operator minimum. */
+  ttl: z.number().int().positive().optional(),
+  /** Milliseconds. Clamped to the operator maximum. */
+  timeout: z.number().int().positive().optional(),
+  /** Result when the check itself fails (timeout, DNS, refused URL). */
+  onError: z.enum(['unhealthy', 'healthy']).optional(),
+});
+
+export type HealthCheck = z.infer<typeof HealthCheckSchema>;
+
+export const VariantSelectorLocationSchema = z.enum(['query', 'path']);
+export type VariantSelectorLocation = z.infer<
+  typeof VariantSelectorLocationSchema
+>;
 
 const MergeStrategy = z.enum(['inherit', 'extend', 'override']);
 const BinaryMergeStrategy = z.enum(['inherit', 'override']);
@@ -517,11 +761,40 @@ export const UserDataSchema = z.object({
       }
     })
     .optional(),
+  healthChecks: z
+    .array(HealthCheckSchema)
+    .superRefine((checks, ctx) => {
+      const seen = new Set<string>();
+      for (const check of checks) {
+        if (seen.has(check.id)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `Duplicate health check id "${check.id}".`,
+          });
+        }
+        seen.add(check.id);
+      }
+    })
+    .optional(),
   /** Request scoped: the variant ids applied to this instance. Never persisted. */
   activeVariants: z.array(z.string()).optional(),
+  /** Request scoped: variant ids activated by their own `when`. Never persisted. */
+  autoVariants: z.array(z.string()).optional(),
+  /** Request scoped: every health check resolved once for this request. Never persisted. */
+  healthResults: z.record(z.string(), z.boolean()).optional(),
+  /** Request scoped: where the selector sat in the URL. Never persisted. */
+  variantSelectorLocation: VariantSelectorLocationSchema.optional(),
   encryptedPassword: z.string().min(1).optional(),
   trusted: z.boolean().optional(),
   showChanges: z.boolean().optional(),
+  /** How often the manifest change notice appears after a save. */
+  manifestNotice: z.enum(['always', 'significant', 'never']).optional(),
+  /** Preferences only. The credentials themselves live in `linked_accounts`. */
+  linkedAccounts: z
+    .object({
+      pushBehaviour: z.enum(['ask', 'auto', 'never']).optional(),
+    })
+    .optional(),
   accessKey: z.string().optional(),
   ip: z.string().optional(),
   addonName: z.string().min(1).max(300).optional(),
@@ -615,6 +888,7 @@ export const UserDataSchema = z.object({
     .object({
       enabled: z.boolean().optional(),
       tolerance: z.number().min(0).max(365).optional(),
+      checkResultAge: z.boolean().optional(),
       requestTypes: z.array(z.string()).optional(),
       addons: z.array(z.string()).optional(),
       showInfoOnFilter: z.boolean().optional(),
@@ -730,6 +1004,9 @@ export const UserDataSchema = z.object({
         )
         .optional(),
       behaviour: z.enum(['sequential', 'parallel']).optional(),
+      onConditionFailure: z
+        .enum(['stop', 'skip', 'includeFinished'])
+        .optional(),
     })
     .optional(),
   sortCriteria: z.object({
@@ -790,6 +1067,7 @@ export const UserDataSchema = z.object({
   tmdbAccessToken: z.string().optional(),
   tmdbApiKey: z.string().optional(),
   tvdbApiKey: z.string().optional(),
+  pmdbApiKey: z.string().optional(),
   yearMatching: z
     .object({
       enabled: z.boolean().optional(),
@@ -882,6 +1160,8 @@ export const UserDataSchema = z.object({
   presets: PresetList,
   addonCategoryColors: z.record(z.string(), z.string()).optional(), // maps custom category name → colour key
   catalogModifications: z.array(CatalogModification).optional(),
+  newCatalogsDisabled: z.array(z.string()).optional(), // addon instance ids whose catalogs start disabled until saved otherwise
+  upstreamCatalogOrder: z.array(z.string()).optional(), // addon instance ids whose catalogs keep the addon's order within their positions
   mergedCatalogs: z.array(MergedCatalog).optional(),
   externalDownloads: z.boolean().optional(),
   cacheAndPlay: CacheAndPlaySchema.optional(),
@@ -914,6 +1194,8 @@ export const UserDataSchema = z.object({
       sameReleaseLimit: z.number().min(0).optional(),
       /** Delay between launching same-release variant attempts (ms). Default 0. */
       duplicateStaggerMs: z.number().min(0).optional(),
+      /** When true, only try same-release variants — never fail over to a different release. Default false. */
+      onlySameReleaseFailover: z.boolean().optional(),
     })
     .optional(),
   serviceWrap: z
@@ -928,6 +1210,12 @@ export const UserDataSchema = z.object({
       reconfigureService: z.boolean().optional(),
     })
     .optional(),
+  jellyfin: JellyfinSettings.optional(),
+  remuxDb: z
+    .object({
+      enabled: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 export type UserData = z.infer<typeof UserDataSchema>;
@@ -937,7 +1225,7 @@ export type UserData = z.infer<typeof UserDataSchema>;
 // longer creates tables.
 
 const strictManifestResourceSchema = z.object({
-  name: z.enum(constants.RESOURCES),
+  name: z.string(),
   types: z.array(z.string()),
   idPrefixes: z.array(z.string()).or(z.null()).optional(),
 });
@@ -962,6 +1250,9 @@ const ManifestCatalogSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   extra: z.array(ManifestExtraSchema).optional(),
+  poster: z.string().nullish(),
+  background: z.string().nullish(),
+  idPrefixes: z.array(z.string()).nullish(),
 });
 
 const AddonCatalogDefinitionSchema = z.object({
@@ -969,6 +1260,40 @@ const AddonCatalogDefinitionSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
 });
+
+/**
+ * The root `watchState` key of an addon declaring the `watch_state` resource.
+ */
+/**
+ * The root `watchState` key. `push` is what we send an addon, `pull` what we
+ * read back from it; an addon may declare either or both. Parsed on its own and
+ * leniently, so a malformed block costs the capability and not the manifest.
+ */
+export const WatchStateCapabilitySchema = z.looseObject({
+  version: z.coerce.number().optional(),
+  viewers: z.boolean().optional(),
+  push: z
+    .looseObject({
+      events: z.array(z.string()).optional(),
+      minIntervalMs: z.coerce.number().min(0).optional(),
+      bulk: z.boolean().optional(),
+    })
+    .optional(),
+  pull: z
+    .looseObject({
+      items: z.boolean().optional(),
+      watched: z.boolean().optional(),
+      watchlist: z.boolean().optional(),
+      ratings: z.boolean().optional(),
+      ttlSeconds: z.coerce.number().min(0).optional(),
+    })
+    .optional(),
+  // v1 spelling: events sat at the root and meant the push half.
+  events: z.array(z.string()).optional(),
+  minProgressIntervalMs: z.coerce.number().min(0).optional(),
+});
+
+export type WatchStateCapability = z.infer<typeof WatchStateCapabilitySchema>;
 
 export const ManifestSchema = z
   .object({
@@ -990,6 +1315,7 @@ export const ManifestSchema = z
         p2p: z.boolean().optional(),
         configurable: z.boolean().optional(),
         configurationRequired: z.boolean().optional(),
+        epgProvider: z.boolean().optional(),
       })
       .optional(),
     // not part of the manifest scheme, but needed for stremio-addons.net
@@ -1045,6 +1371,7 @@ export const ReleaseKeySchema = z
 export const StreamSchema = z.looseObject({
   url: z.string().or(z.null()).optional(),
   nzbUrl: z.string().or(z.null()).optional(),
+  infoUrl: z.string().or(z.null()).optional(),
   releaseKey: ReleaseKeySchema,
   idMatched: z.boolean().optional(),
   servers: z.array(z.string().min(1)).nullable().optional(),
@@ -1089,6 +1416,29 @@ export type StreamResponse = z.infer<typeof StreamResponseSchema>;
 
 export type Stream = z.infer<typeof StreamSchema>;
 
+/** Best-to-worst provenance tiers for ParsedFile.mediaInfoQuality. */
+export const MEDIA_INFO_QUALITY_TIERS = ['probe', 'indexer', 'addon'] as const;
+
+/** One probed audio or subtitle track; see ParsedMediaTrack in utils/media-info. */
+export const MediaTrackSchema = z.object({
+  index: z.number().int().nonnegative().optional(),
+  lang: z.string().optional(),
+  codec: z.string().optional(),
+  title: z.string().optional(),
+  /** @deprecated the first of `tags` */
+  tag: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  channels: z.string().optional(),
+  default: z.boolean().optional(),
+  forced: z.boolean().optional(),
+  commentary: z.boolean().optional(),
+  dub: z.boolean().optional(),
+  original: z.boolean().optional(),
+  hearingImpaired: z.boolean().optional(),
+  visualImpaired: z.boolean().optional(),
+});
+export type MediaTrack = z.infer<typeof MediaTrackSchema>;
+
 export const ParsedFileSchema = z.object({
   releaseGroup: z.string().optional(),
   resolution: z.string().optional(),
@@ -1097,8 +1447,12 @@ export const ParsedFileSchema = z.object({
   audioChannels: z.array(z.string()),
   visualTags: z.array(z.string()),
   audioTags: z.array(z.string()),
+  mediaInfoQuality: z.enum(MEDIA_INFO_QUALITY_TIERS).optional(),
   languages: z.array(z.string()),
   subtitles: z.array(z.string()).optional(),
+  audioTracks: z.array(MediaTrackSchema).optional(),
+  subtitleTracks: z.array(MediaTrackSchema).optional(),
+  videoIndex: z.number().int().nonnegative().optional(),
   subbed: z.boolean().optional(),
   dubbed: z.boolean().optional(),
   title: z.string().optional(),
@@ -1119,6 +1473,7 @@ export const ParsedFileSchema = z.object({
   unrated: z.boolean().optional(),
   upscaled: z.boolean().optional(),
   network: z.string().optional(),
+  site: z.string().optional(),
   container: z.string().optional(),
   extension: z.string().optional(),
   seasonPack: z.boolean().optional(),
@@ -1166,6 +1521,8 @@ export const ParsedStreamSchema = z.object({
       sources: z.array(z.string().min(1)).optional(),
       private: z.boolean().optional(),
       freeleech: z.boolean().optional(),
+      file: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
     })
     .optional(),
   countryWhitelist: z.array(z.string().length(3)).optional(),
@@ -1212,6 +1569,7 @@ export const ParsedStreamSchema = z.object({
   passthrough: PassthroughSchema.optional(),
   url: z.string().optional(),
   nzbUrl: z.string().optional(),
+  infoUrl: z.string().optional(),
   releaseKey: ReleaseKeySchema,
   // Same-release failover targets harvested from discarded duplicates by the
   // deduplicator merge step. Each is another playback URL for the *same*
@@ -1260,8 +1618,9 @@ export type ParsedStreams = z.infer<typeof ParsedStreams>;
 
 const TrailerSchema = z
   .object({
-    source: z.string().min(1),
-    type: z.enum(['Trailer', 'Clip', 'Teaser']),
+    source: z.string().optional(),
+    type: z.string().optional(),
+    name: z.string().nullish(),
   })
   .passthrough();
 
@@ -1272,6 +1631,83 @@ const MetaLinkSchema = z
     url: z.string().url().or(z.string().startsWith('stremio:///')),
   })
   .passthrough();
+
+/** A certification a programme carries. */
+const ContentRatingSchema = z
+  .object({
+    value: z.string(),
+    system: z.string().nullish(),
+    icon: z.string().nullish(),
+  })
+  .passthrough();
+
+const ExternalIdsSchema = z.record(
+  z.string(),
+  z.string().or(z.number()).nullable()
+);
+
+const MetaPersonSchema = z.object({
+  name: z.string(),
+  role: z.string(),
+  character: z.string().nullish(),
+  photo: z.string().nullish(),
+  id: z.string().nullish(),
+});
+
+export type MetaPerson = z.infer<typeof MetaPersonSchema>;
+
+const EntrySchema = z.looseObject({ id: z.string(), type: z.string() });
+
+const CollectionSchema = z.object({
+  items: z.array(EntrySchema).nullish(),
+  sources: z
+    .array(
+      z.object({
+        /** Another addon's manifest id or URL; absent means the same addon. */
+        addonId: z.string().nullish(),
+        type: z.string(),
+        catalogId: z.string(),
+        genre: z.string().nullish(),
+      })
+    )
+    .nullish(),
+});
+
+/** Documented in `reference/addon-protocol/metadata`. */
+const metaExtensionFields = {
+  ids: ExternalIdsSchema.nullish(),
+  originalTitle: z.string().nullish(),
+  tagline: z.string().nullish(),
+  landscapePoster: z.string().nullish(),
+  animatedPoster: z.string().nullish(),
+  people: z.array(MetaPersonSchema).nullish(),
+  certification: z.string().nullish(),
+  certificationLocal: z.string().nullish(),
+  criticRating: z.number().or(z.string()).nullish(),
+  studios: z.array(z.string()).nullish(),
+  networks: z.array(z.string()).nullish(),
+  countries: z.array(z.string()).nullish(),
+  tags: z.array(z.string()).nullish(),
+  endDate: z.string().nullish(),
+  airDays: z.array(z.string()).nullish(),
+  airTime: z.string().nullish(),
+  seasons: z
+    .array(
+      z.object({
+        season: z.number(),
+        name: z.string().nullish(),
+        overview: z.string().nullish(),
+        poster: z.string().nullish(),
+        released: z.string().nullish(),
+      })
+    )
+    .nullish(),
+  collection: CollectionSchema.nullish(),
+  birthday: z.string().nullish(),
+  deathday: z.string().nullish(),
+  birthPlace: z.string().nullish(),
+  credits: z.array(EntrySchema).nullish(),
+};
 
 const MetaVideoSchema = z
   .object({
@@ -1286,6 +1722,22 @@ const MetaVideoSchema = z
     season: z.number().or(z.null()).optional(),
     trailers: z.array(TrailerSchema).or(z.null()).optional(),
     overview: z.string().or(z.null()).optional(),
+    // The video's own ids and credits, never the show's.
+    ids: ExternalIdsSchema.nullish(),
+    rating: z.number().or(z.string()).nullish(),
+    people: z.array(MetaPersonSchema).nullish(),
+    startTime: z.string().nullish(),
+    endTime: z.string().nullish(),
+    runtime: z.string().nullish(),
+    releaseInfo: z.string().nullish(),
+    genres: z.array(z.string()).nullish(),
+    cast: z.array(z.string()).nullish(),
+    directors: z.array(z.string()).nullish(),
+    links: z.array(MetaLinkSchema).nullish(),
+    // Some addons send a display string here.
+    ratings: z.array(ContentRatingSchema).nullish().catch(undefined),
+    filler: z.boolean().nullish(),
+    recap: z.boolean().nullish(),
   })
   .passthrough();
 
@@ -1319,6 +1771,7 @@ export const MetaPreviewSchema = z
     trailers: z.array(TrailerSchema).or(z.null()).optional(),
     links: z.array(MetaLinkSchema).or(z.null()).optional(),
     // released: z.string().datetime().optional(),
+    ...metaExtensionFields,
   })
   .passthrough();
 
@@ -1336,6 +1789,7 @@ export const MetaSchema = MetaPreviewSchema.extend({
     .object({
       defaultVideoId: z.string().or(z.null()).optional(),
       hasScheduledVideo: z.boolean().nullable().optional(),
+      hasScheduledVideos: z.boolean().nullable().optional(),
     })
     .passthrough()
     .optional(),
@@ -1375,6 +1829,7 @@ export const ExtrasSchema = z
     skip: z.coerce.number().optional(),
     genre: z.string().optional(),
     search: z.string().optional(),
+    date: z.string().optional(),
     filename: z.string().optional(),
     videoHash: z.string().optional(),
     videoSize: z.coerce.number().optional(),
@@ -1500,8 +1955,45 @@ const StatusResponseSchema = z.object({
     addonName: z.string(),
     customHtml: z.string().optional(),
     featuredTemplateIds: z.array(z.string()).optional(),
+    jellyfin: z
+      .object({
+        enabled: z.boolean(),
+        /** Cap on versions per item; a configuration may ask for fewer. */
+        maxVersions: z.number(),
+        /** `user` leaves the per-configuration switch free; the others force it. */
+        resolveOnOpen: z.enum(['always', 'never', 'user']),
+        /** How deep a client may page into one library. 0 = uncapped. */
+        maxCatalogItems: z.number(),
+        /** Catalogs shown as libraries, in the configuration's order. 0 = uncapped. */
+        maxLibraries: z.number(),
+        /** Extra users a configuration may add beyond its primary user. */
+        maxPersonas: z.number(),
+        /** Whether a user's PIN alone signs it in on a picker address. */
+        pinSignIn: z.boolean().optional(),
+        /** Trackers one user syncs with at most. */
+        maxTrackers: z.number(),
+        /** The default wait for tracks on play; absent when nothing is probed. */
+        playWait: z.number().optional(),
+        segments: z.object({
+          enabled: z.boolean(),
+          /** In the operator's order; `configuration` needs the configuration's own key. */
+          providers: z.array(
+            z.object({
+              id: z.enum(constants.SEGMENT_PROVIDERS),
+              name: z.string(),
+              key: z.enum(['none', 'instance', 'configuration']),
+            })
+          ),
+        }),
+      })
+      .optional(),
     alternateDesign: z.boolean(),
     protected: z.boolean(),
+    community: z.object({
+      formatters: z.enum(['off', 'open', 'approval']),
+      templates: z.enum(['off', 'open', 'approval']),
+      minAccountAge: z.number(),
+    }),
     oidc: z.object({
       enabled: z.boolean(),
       buttonLabel: z.string(),
@@ -1522,21 +2014,33 @@ const StatusResponseSchema = z.object({
       access: z.enum(['none', 'trusted', 'all']),
       max: z.number(),
       maxScriptLength: z.number(),
-      maxInstructions: z.number(),
-      maxActive: z.number(),
+      maxTotalInstructions: z.number(),
       maxValueDepth: z.number(),
       maxPathSegments: z.number(),
       maxPathMatches: z.number(),
+    }),
+    healthChecks: z.object({
+      access: z.enum(['none', 'trusted', 'all']),
+      max: z.number(),
+      minTtl: z.number(),
+      maxTimeout: z.number(),
+      maxBytes: z.number(),
     }),
     loggingSensitiveInfo: z.boolean(),
     searchApiDisabled: z.boolean(),
     nabApiDisabled: z.boolean(),
     seanimeExtensionVersion: z.string().nullable(),
-    tmdbApiAvailable: z.boolean(),
+    metadata: z.object({
+      tmdb: z.object({ accessToken: z.boolean(), apiKey: z.boolean() }),
+      tvdb: z.object({ apiKey: z.boolean() }),
+    }),
+    remuxdb: z.object({ enabled: z.boolean() }),
     /** Global analytics master switch (false = no events written anywhere). */
     analyticsEnabled: z.boolean(),
     /** Per-user analytics (configure-page Stats tab) enabled state. */
     userAnalyticsEnabled: z.boolean(),
+    /** Whether "stay signed in" is offered when loading a configuration. */
+    configSessionsEnabled: z.boolean(),
     forced: z.object({
       proxy: z.object({
         enabled: z.boolean().or(z.null()),
@@ -1581,6 +2085,7 @@ const StatusResponseSchema = z.object({
       maxFailoverAttempts: z.number(),
       maxParallelAttempts: z.number(),
       maxBackgroundPings: z.number(),
+      maxLinkedAccounts: z.number(),
     }),
   }),
 });
@@ -1625,7 +2130,7 @@ export const TemplateSchema = z.object({
     description: z.string().min(1).max(1000), // description of the template
     author: z.string().min(1).max(20), // author of the template
     source: z
-      .enum(['builtin', 'custom', 'external'])
+      .enum(['builtin', 'custom', 'external', 'community'])
       .optional()
       .default('builtin'),
     version: z
@@ -1633,6 +2138,7 @@ export const TemplateSchema = z.object({
       .optional()
       .default('1.0.0'),
     category: z.string().min(1).max(20), // category of the template
+    tags: z.array(z.string().min(1).max(20)).max(5).optional(), // multi-tag; `category` stays as the single-tag fallback
     services: z.array(ServiceIds).optional(),
     serviceRequired: z.boolean().optional(), // whether a service is required for this template or not.
     setToSaveInstallMenu: z.boolean().optional().default(true), // whether to set the menu to save-install after importing the template

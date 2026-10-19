@@ -1,6 +1,7 @@
 /**
- * Manami offline anime database: large catalogue of titles and per-anime
- * metadata (season, year, synonyms, studios, ...) keyed by source URL.
+ * Anime offline database: large catalogue of titles and per-anime metadata
+ * (season, year, synonyms, studios, ...) keyed by source URL. Served from
+ * cedya77's continuation of the Manami project, archived on 2026-07-04.
  */
 import path from 'path';
 import { config as appConfig } from '../../config/index.js';
@@ -12,7 +13,7 @@ import {
   type SourceEntry,
 } from '../types.js';
 import { ANIME_DATABASE_PATH } from '../storage/paths.js';
-import { streamJsonLines } from '../storage/streaming.js';
+import { detachString, streamJsonLines } from '../storage/streaming.js';
 import type { IdType } from '../../utils/id-parser.js';
 import type { AnimeSource } from './base.js';
 
@@ -100,8 +101,8 @@ function toAnimeSeason(v: unknown): AnimeSeason {
 
 export const manamiSource: AnimeSource = {
   id: 'manami',
-  name: 'Manami DB',
-  url: 'https://github.com/manami-project/anime-offline-database/releases/download/latest/anime-offline-database.jsonl',
+  name: 'Anime Offline Database',
+  url: 'https://github.com/cedya77/anime-offline-database/releases/download/latest/anime-offline-database.jsonl',
   filePath: path.join(ANIME_DATABASE_PATH, 'manami-db.jsonl'),
   refreshIntervalMs() {
     return appConfig.metadata.animeDb.refresh.manamiDb * 1000;
@@ -134,7 +135,7 @@ function parseRaw(raw: ManamiRaw): SourceEntry | null {
     for (const [idType, extractor] of Object.entries(URL_EXTRACTORS)) {
       if (ids[idType as IdType] !== undefined) continue;
       const value = extractor!(url);
-      if (value !== null) ids[idType as IdType] = value;
+      if (value !== null) ids[idType as IdType] = detachString(value);
     }
   }
   if (Object.keys(ids).length === 0) return null;
@@ -150,13 +151,15 @@ function parseRaw(raw: ManamiRaw): SourceEntry | null {
     : undefined;
 
   const synonyms = Array.isArray(raw.synonyms)
-    ? raw.synonyms.filter((s): s is string => typeof s === 'string')
+    ? raw.synonyms
+        .filter((s): s is string => typeof s === 'string')
+        .map(detachString)
     : undefined;
 
   const entry: SourceEntry = {
     type,
     ids,
-    title: raw.title,
+    title: detachString(raw.title),
     synonyms,
     animeSeason,
   };

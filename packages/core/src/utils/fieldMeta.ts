@@ -75,6 +75,9 @@ type IgnoredKeys =
   | 'encryptedPassword'
   | 'trusted'
   | 'activeVariants'
+  | 'autoVariants'
+  | 'healthResults'
+  | 'variantSelectorLocation'
   | 'addons'
   | 'proxies'
   | 'ip'
@@ -166,6 +169,7 @@ export const FIELD_META: Omit<Record<keyof UserData, FieldMeta>, IgnoredKeys> = 
   syncedRankedStreamExpressionUrls: { label: 'Synced Ranked Expression URLs', group: 'filters', type: 'list', menu: 'filters', subTab: 'stream-expression' },
 
   enableSeadex: { label: 'SeaDex', group: 'filters', type: 'scalar', menu: 'filters', subTab: 'miscellaneous', keywords: ['anime', 'releases.moe'] },
+  remuxDb: { label: 'RemuxDB', group: 'filters', type: 'scalar', menu: 'filters', subTab: 'miscellaneous', keywords: ['probe', 'media info'] },
   excludeSeasonPacks: { label: 'Exclude Season Packs', group: 'filters', type: 'scalar', menu: 'filters', subTab: 'miscellaneous', ignoreForCommandPalette: true },
 
   excludeCached: { label: 'Exclude Cached Streams', group: 'filters', type: 'scalar', menu: 'filters', subTab: 'cache' },
@@ -210,6 +214,7 @@ export const FIELD_META: Omit<Record<keyof UserData, FieldMeta>, IgnoredKeys> = 
   tmdbApiKey: { label: 'TMDB API Key', group: 'metadata', type: 'scalar', menu: 'services', subTab: 'metadata', sectionId: 'tmdb' },
   tmdbAccessToken: { label: 'TMDB Access Token', group: 'metadata', type: 'scalar', menu: 'services', subTab: 'metadata', sectionId : 'tmdb' },
   tvdbApiKey: { label: 'TVDB API Key', group: 'metadata', type: 'scalar', menu: 'services', subTab: 'metadata' },
+  pmdbApiKey: { label: 'PublicMetaDB API Key', group: 'metadata', type: 'scalar', menu: 'save-install', sectionId: 'jellyfin', keywords: ['pmdb', 'publicmetadb', 'skip intro', 'segments'] },
   rpdbApiKey: { label: 'RPDB API Key', group: 'metadata', type: 'scalar', menu: 'services', subTab: 'posters' },
   topPosterApiKey: { label: 'TopPoster API Key', group: 'metadata', type: 'scalar', menu: 'services', subTab: 'posters' },
   aioratingsApiKey: { label: 'AIOratings API Key', group: 'metadata', type: 'scalar', menu: 'services', subTab: 'posters' },
@@ -234,16 +239,21 @@ export const FIELD_META: Omit<Record<keyof UserData, FieldMeta>, IgnoredKeys> = 
   dynamicAddonFetching: { label: 'Dynamic Addon Fetching', group: 'misc', type: 'scalar', menu: 'addons', subTab: 'addons', sectionId: 'fetchStrategy', keywords: ['exit condition', 'dynamic fetching', 'fetch strategy'] },
   addonCategoryColors: { label: 'Addon Category Colors', group: 'misc', type: 'scalar', menu: 'addons', subTab: 'addons' },
   catalogModifications: { label: 'Catalog Modifications', group: 'misc', type: 'scalar', menu: 'addons', subTab: 'catalogs' },
+  newCatalogsDisabled: { label: 'New Catalogs Disabled', group: 'misc', type: 'scalar', menu: 'addons', subTab: 'catalogs' },
+  upstreamCatalogOrder: { label: 'Upstream Catalog Order', group: 'misc', type: 'scalar', menu: 'addons', subTab: 'catalogs' },
   mergedCatalogs: { label: 'Merged Catalogs', group: 'misc', type: 'scalar', menu: 'addons', subTab: 'catalogs' },
 
   failover: { label: 'Failover', group: 'misc', type: 'scalar', menu: 'services', subTab: 'builtin' },
   serviceWrap: { label: 'Service Wrap', group: 'misc', type: 'scalar', menu: 'services', subTab: 'builtin' },
   cacheAndPlay: { label: 'Cache and Play', group: 'misc', type: 'scalar', menu: 'services', subTab: 'builtin' },
+  jellyfin: { label: 'Jellyfin', group: 'misc', type: 'scalar', menu: 'save-install', keywords: ['jellyfin', 'swiftfin', 'streamyfin', 'findroid', 'infuse', 'kodi'] },
   autoRemoveDownloads: { label: 'Auto Remove Downloads', group: 'misc', type: 'scalar', menu: 'services', subTab: 'builtin' },
   checkOwned: { label: 'Check Owned', group: 'misc', type: 'scalar', menu: 'services', subTab: 'builtin' },
 
   accessKey: { label: 'Config Access Key', group: 'misc', type: 'scalar', menu: 'save-install' },
   showChanges: { label: 'Show Changes', group: 'misc', type: 'scalar', menu: 'save-install' },
+  manifestNotice: { label: 'Manifest Change Notices', group: 'misc', type: 'scalar', menu: 'save-install', keywords: ['reinstall', 'notice', 'diff'] },
+  linkedAccounts: { label: 'Linked Accounts', group: 'misc', type: 'scalar', menu: 'save-install', keywords: ['sync', 'stremio', 'aiomanager', 'push'] },
 
   addonName: { label: 'Addon Name', group: 'branding', type: 'scalar', menu: 'about', keywords: ['branding'] },
   addonLogo: { label: 'Addon Logo', group: 'branding', type: 'scalar', menu: 'about', keywords: ['branding'] },
@@ -257,4 +267,5 @@ export const FIELD_META: Omit<Record<keyof UserData, FieldMeta>, IgnoredKeys> = 
   parentConfig: { label: 'Parent Config', group: 'misc', type: 'scalar', menu: 'miscellaneous', subTab: 'parent', sectionId: 'parentConfig', keywords: ['inherit', 'link', 'parent'], ignoreForParentConfig: true },
   variants: { label: 'Variants', group: 'misc', type: 'list', identityKey: 'id', menu: 'miscellaneous', subTab: 'variants', sectionId: 'variants', keywords: ['variant', 'sub-profile', 'cel', 'config expression', 'override'], ignoreForParentConfig: true },
   groups: { label: 'Groups', group: 'misc', type: 'scalar', menu: 'addons', subTab: 'addons', keywords: ['groupings'], ignoreForParentConfig: true, sectionId: 'fetchStrategy' },
+  healthChecks: { label: 'Health Checks', group: 'misc', type: 'list', identityKey: 'id', menu: 'miscellaneous', subTab: 'health-checks', sectionId: 'healthChecks', keywords: ['health', 'uptime', 'status', 'variant', 'conditional'], ignoreForParentConfig: true },
 };

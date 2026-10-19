@@ -16,6 +16,7 @@ export {
   type UsenetLibraryFile,
   type UsenetLibraryStatus,
   type UsenetLibrarySource,
+  type UsenetLibraryOrigin,
   type UsenetLibraryStatusGroup,
   type UsenetLibrarySort,
   type UsenetLibrarySortDir,
@@ -37,12 +38,14 @@ export {
 export {
   UsenetMetricsRepository,
   type UsenetMetricDelta,
+  type UsenetMetricScope,
   type UsenetProviderRollup,
   type UsenetMetricBucket,
 } from './repositories/usenet-metrics.js';
 export {
   UsenetIndexerMetricsRepository,
   type UsenetIndexerGrabDelta,
+  type UsenetIndexerScope,
   type UsenetIndexerRollup,
   type UsenetIndexerLastError,
 } from './repositories/usenet-indexer-metrics.js';
@@ -70,6 +73,73 @@ export {
   getTorrentClawNzbQuotaStatus,
   TORRENTCLAW_NZB_MONTHLY_LIMIT_BYTES,
 } from './repositories/torrentclaw-nzb-quota.js';
+  ConfigSessionRepository,
+  type ConfigSessionCredentials,
+  type IssuedConfigSession,
+} from './repositories/config-sessions.js';
+export { LinkedAccountRepository } from './repositories/linked-accounts.js';
+export {
+  JellyfinAddressRepository,
+  type JellyfinAddressTarget,
+} from './repositories/jellyfin-addresses.js';
+export {
+  AppReportRepository,
+  normaliseReportCode,
+  formatReportCode,
+  type AppReport,
+  type AppReportInput,
+  type AppReportKind,
+  type AppReportListing,
+} from './repositories/app-reports.js';
+export {
+  CommunityRepository,
+  type CommunityItemInsert,
+  type CommunityLiveUpdate,
+} from './repositories/community.js';
+export {
+  WatchStateRepository,
+  watchKindOf,
+  type WatchSnapshot,
+  type WatchIdentity,
+  type WatchStateRow,
+  type WatchStatePatch,
+  type WatchKind,
+  type WatchOrigin,
+  type WatchHistoryCursor,
+  type WatchHistoryCounts,
+} from './repositories/watch-state.js';
+export {
+  WatchAirTimeRepository,
+  type WatchAirTime,
+} from './repositories/watch-air-times.js';
+export {
+  WatchSessionRepository,
+  type WatchSessionRow,
+  type WatchSessionUpsert,
+} from './repositories/watch-sessions.js';
+export { JellyfinRepository } from './repositories/jellyfin.js';
+export {
+  MediaInfoRepository,
+  type MediaInfoRow,
+  type MediaInfoKind,
+  type MediaInfoFileFilter,
+} from './repositories/media-info.js';
+export {
+  MediaInfoProbeRepository,
+  type ProbeAttempt,
+  type ProbeAttemptFilter,
+  type ProbeKind,
+  type ProbeOutcome,
+  type ProbePath,
+  type ProbeReader,
+} from './repositories/media-info-probes.js';
+export {
+  PlaybackHandoffRepository,
+  type SinkRow,
+  type SinkStatus,
+  type DeliveryRow,
+  type DeliveryStatus,
+} from './repositories/playback-handoff.js';
 export * from './schemas.js';
 
 export { sql, raw, join, SqlFragment } from './sql.js';

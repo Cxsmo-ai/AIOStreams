@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Button } from '../../../ui/button';
-import { Modal } from '../../../ui/modal';
-import { Popover } from '../../../ui/popover';
-import { Tooltip } from '../../../ui/tooltip';
-import { Alert } from '../../../ui/alert';
+import { Button } from '@aiostreams/ui/button';
+import { Modal } from '@aiostreams/ui/modal';
+import { Popover } from '@aiostreams/ui/popover';
+import { Tooltip } from '@aiostreams/ui/tooltip';
+import { Alert } from '@aiostreams/ui/alert';
 import MarkdownLite from '../../../shared/markdown-lite';
 import { PlusIcon } from 'lucide-react';
 import * as constants from '../../../../../../core/src/utils/constants';
@@ -124,7 +124,7 @@ export function AddonCard({
             {preset.SUPPORTED_RESOURCES?.map((res: string) => (
               <span
                 key={res}
-                className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20"
+                className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-blue-500/10 text-blue-300 border border-blue-400/20"
               >
                 {res}
               </span>

@@ -2,17 +2,19 @@ import { z } from 'zod';
 import { ParsedId } from '../../utils/id-parser.js';
 import { createLogger } from '../../utils/index.js';
 import { Torrent, NZB, UnprocessedTorrent } from '../../debrid/index.js';
+import { extractTrackersFromMagnet } from '../utils/debrid.js';
 import {
-  extractTrackersFromMagnet,
-  validateInfoHash,
-} from '../utils/debrid.js';
-import { BaseNabApi, Capabilities } from '../base/nab/api.js';
+  BaseNabApi,
+  Capabilities,
+  extractTorznabInfoHash,
+} from '../base/nab/api.js';
 import {
   BaseNabAddon,
   NabAddonConfigSchema,
   NabAddonConfig,
   parseNabParsedFileInfo,
 } from '../base/nab/addon.js';
+import { ageInHoursSince } from '../utils/general.js';
 
 const logger = createLogger('torznab');
 
@@ -50,7 +52,7 @@ export class TorznabAddon extends BaseNabAddon<NabAddonConfig, TorznabApi> {
     const torrents: UnprocessedTorrent[] = [];
 
     for (const result of results) {
-      const infoHash = this.extractInfoHash(result);
+      const infoHash = extractTorznabInfoHash(result);
       const downloadUrl = result.enclosure.find(
         (e: any) =>
           e.type === 'application/x-bittorrent' && !e.url.includes('magnet:')
@@ -68,7 +70,9 @@ export class TorznabAddon extends BaseNabAddon<NabAddonConfig, TorznabApi> {
       torrents.push({
         confirmed: meta.searchType === 'id',
         hash: infoHash,
+        guid: result.guid,
         downloadUrl,
+        age: result.pubDate ? ageInHoursSince(result.pubDate) : undefined,
         sources: result.torznab?.magneturl?.toString()
           ? extractTrackersFromMagnet(result.torznab.magneturl.toString())
           : [],
@@ -81,7 +85,10 @@ export class TorznabAddon extends BaseNabAddon<NabAddonConfig, TorznabApi> {
           typeof result.torznab?.downloadvolumefactor === 'number'
             ? result.torznab.downloadvolumefactor
             : undefined,
-        indexer: result.jackettindexer?.name ?? undefined,
+        indexer:
+          result.prowlarrindexer?.name ??
+          result.jackettindexer?.name ??
+          undefined,
         title: result.title,
         size:
           result.size ??
@@ -101,20 +108,5 @@ export class TorznabAddon extends BaseNabAddon<NabAddonConfig, TorznabApi> {
   protected async _searchNzbs(_parsedId: ParsedId): Promise<NZB[]> {
     // This addon does not support NZBs, so we return an empty array.
     return [];
-  }
-
-  private extractInfoHash(result: any): string | undefined {
-    return validateInfoHash(
-      result.torznab?.infohash?.toString() ||
-        (
-          result.torznab?.magneturl ||
-          result.enclosure.find(
-            (e: any) =>
-              e.type === 'application/x-bittorrent' && e.url.includes('magnet:')
-          )?.url
-        )
-          ?.toString()
-          ?.match(/(?:urn(?::|%3A)btih(?::|%3A))([a-f0-9]{40})/i)?.[1]
-    );
   }
 }

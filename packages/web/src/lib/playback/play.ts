@@ -1,0 +1,124 @@
+import { t } from '@lingui/core/macro';
+import { currentHost } from '../hosts';
+import { fullTitle, ticksToMs } from '../format';
+import { navigate, to } from '../paths';
+import { externalReturnUrl } from './external-return';
+import { chosenPlayer, playerLink } from './player-choice';
+import { directUrl } from './stream';
+import { subtitleUrl, textSubtitles } from '../subtitles/tracks';
+import { useSession } from '../session';
+import { storedMap } from '../storage';
+import { subtitleLanguages, usePlaybackPrefs } from '../user-config';
+import { useEpisodesAfter } from '../queries';
+import { sameLanguage } from '../languages';
+import { party } from '../party/party';
+import { usePlayForParty } from '../party/actions';
+import type { BaseItemDto, PlaybackInfoResponse, SourceInfo } from '../types';
+
+/** The version each item last played in, which resuming it goes straight to. */
+export const lastVersions = storedMap<string>(
+  'aiostreams-web-last-versions',
+  500
+);
+
+/** Versions that can play; notices from addons carry text only. */
+export function playableSources(
+  info: PlaybackInfoResponse | undefined
+): SourceInfo[] {
+  return (info?.MediaSources ?? []).filter(
+    (s) => s.Type !== 'Placeholder'
+  ) as SourceInfo[];
+}
+
+export function noticeSources(
+  info: PlaybackInfoResponse | undefined
+): SourceInfo[] {
+  return (info?.MediaSources ?? []).filter(
+    (s) => s.Type === 'Placeholder'
+  ) as SourceInfo[];
+}
+
+/** Enough to offer, few enough to keep the link short. */
+const MAX_EXTERNAL_SUBTITLES = 10;
+
+/** The returned function says whether the player was given a way to report back. */
+function useOpenLink() {
+  const { client } = useSession();
+  const { prefs } = usePlaybackPrefs();
+  return (
+    template: string,
+    item: BaseItemDto,
+    source: SourceInfo,
+    startMs: number
+  ): boolean => {
+    const returnUrl = template.includes('{returnUrl}')
+      ? externalReturnUrl(item, source, template)
+      : undefined;
+    // A server's own file path ends in the name; a stream address does not.
+    const lastSegment = source.Path?.split(/[\\/]/).pop();
+    const filename =
+      source.aiostreams?.filename ??
+      (lastSegment && /\.\w{2,4}$/.test(lastSegment) ? lastSegment : undefined);
+    const languages = subtitleLanguages(prefs);
+    const rank = (language: string | null | undefined) =>
+      languages.findIndex((l) => sameLanguage(l, language));
+    const subtitles = textSubtitles(source)
+      .filter((s) => !languages.length || rank(s.Language) >= 0)
+      .sort((a, b) => rank(a.Language) - rank(b.Language))
+      .slice(0, MAX_EXTERNAL_SUBTITLES)
+      .map((s) => subtitleUrl(client, s, { original: true }))
+      .filter((u): u is string => !!u);
+    window.location.href = playerLink(
+      template,
+      directUrl(client, item.Id!, source),
+      { startMs, title: fullTitle(item), returnUrl, filename, subtitles }
+    );
+    return !!returnUrl;
+  };
+}
+
+/** Plays an item on the player chosen for this device, or for the party it is in. */
+export function usePlay() {
+  const openLink = useOpenLink();
+  const episodesAfter = useEpisodesAfter();
+  const playForParty = usePlayForParty();
+  const { prefs } = usePlaybackPrefs();
+  return async (
+    item: BaseItemDto,
+    opts: {
+      source: SourceInfo;
+      startMs?: number;
+      replace?: boolean;
+      onExternal?: () => void;
+    }
+  ) => {
+    const { source } = opts;
+    if (!source.Id) throw new Error(t`No playable version was found`);
+    const startMs =
+      opts.startMs ?? ticksToMs(item.UserData?.PlaybackPositionTicks);
+    if (party.state()?.status === 'live')
+      return playForParty(item, source, startMs);
+
+    const { play } = currentHost();
+    if (play) {
+      const next =
+        prefs.EnableNextEpisodeAutoPlay !== false
+          ? await episodesAfter(item).catch(() => [])
+          : [];
+      play(
+        item,
+        source,
+        startMs,
+        next.map((e) => e.Id!)
+      );
+      return;
+    }
+    const player = chosenPlayer();
+    if (player.kind === 'link') {
+      if (!openLink(player.template, item, source, startMs))
+        opts.onExternal?.();
+      return;
+    }
+    navigate(to.play(item.Id!, source.Id, startMs), { replace: opts.replace });
+  };
+}

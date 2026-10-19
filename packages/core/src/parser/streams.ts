@@ -6,6 +6,8 @@ import {
   Env,
   FULL_LANGUAGE_MAPPING,
   getLanguageDisplayName,
+  normaliseLanguage,
+  ServiceId,
 } from '../utils/index.js';
 import { config as appConfig } from '../config/index.js';
 import { parseDurationHint } from './duration-hint.js';
@@ -14,6 +16,8 @@ import {
   parseAgeString,
   parseDuration,
   extractInfoHashFromMagnet,
+  convertFlagToLanguage,
+  getRegexForTextAfterEmojis,
 } from './utils.js';
 import {
   mergeParsedFiles,
@@ -22,6 +26,21 @@ import {
 } from './merge.js';
 
 const logger = createLogger('parser');
+
+let serviceRegexes: { id: ServiceId; regex: RegExp }[] | undefined;
+
+function getServiceRegexes(): { id: ServiceId; regex: RegExp }[] {
+  serviceRegexes ??= Object.values(constants.SERVICE_DETAILS).map(
+    (service) => ({
+      id: service.id,
+      regex: new RegExp(
+        `(^|(?<![^ |[(_\\/\\-.]))(${service.knownNames.join('|')})(?=[ ⬇️⏳⚡☁️🌩️📫+/|\\)\\]_.-]|$|\n)`,
+        'im'
+      ),
+    })
+  );
+  return serviceRegexes;
+}
 
 class StreamParser {
   private count = 0;
@@ -60,18 +79,11 @@ class StreamParser {
   }
 
   protected get indexerRegex(): RegExp | undefined {
-    return this.getRegexForTextAfterEmojis(this.indexerEmojis);
+    return getRegexForTextAfterEmojis(this.indexerEmojis);
   }
 
   protected get ageRegex(): RegExp | undefined {
     return undefined;
-  }
-
-  protected getRegexForTextAfterEmojis(emojis: string[]): RegExp {
-    return new RegExp(
-      `(?:${emojis.join('|')})\\s*([^\\p{Emoji_Presentation}\\n]*?)(?=\\p{Emoji_Presentation}|$|\\n)`,
-      'u'
-    );
   }
 
   constructor(protected readonly addon: Addon) {}
@@ -101,6 +113,7 @@ class StreamParser {
       proxied: this.isProxied(stream),
       url: this.applyUrlModifications(stream.url ?? undefined),
       nzbUrl: stream.nzbUrl || undefined,
+      infoUrl: stream.infoUrl || undefined,
       releaseKey: this.getReleaseKey(stream),
       idMatched: this.getIdMatched(stream),
       tarUrls: stream.tarUrls ?? undefined,
@@ -183,8 +196,15 @@ class StreamParser {
 
     parsedStream.parsedFile = this.getParsedFile(stream, parsedStream);
 
+    const infoHash = stream.infoHash ?? this.getInfoHash(stream, parsedStream);
     parsedStream.torrent = {
-      infoHash: stream.infoHash ?? this.getInfoHash(stream, parsedStream),
+      infoHash,
+      file: infoHash
+        ? this.getTorrentFile(stream, parsedStream)?.trim() || undefined
+        : undefined,
+      title: infoHash
+        ? this.getTorrentTitle(stream, parsedStream)?.trim() || undefined
+        : undefined,
       seeders: this.getSeeders(stream, parsedStream),
       sources: stream.sources ?? undefined,
       fileIdx:
@@ -382,6 +402,10 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): number | undefined {
+    const seeders = stream.behaviorHints?.seeders;
+    if (typeof seeders === 'number' && seeders >= 0) {
+      return Math.round(seeders);
+    }
     const regex = this.seedersRegex;
     if (!regex) {
       return undefined;
@@ -398,6 +422,13 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): number | undefined {
+    const publishDate = stream.behaviorHints?.publishDate;
+    if (typeof publishDate === 'string') {
+      const published = Date.parse(publishDate);
+      if (!Number.isNaN(published)) {
+        return Math.max(0, (Date.now() - published) / 3_600_000);
+      }
+    }
     const regex = this.ageRegex;
     if (!regex) {
       return undefined;
@@ -438,6 +469,10 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): string | undefined {
+    const indexer = stream.behaviorHints?.indexer;
+    if (typeof indexer === 'string' && indexer.trim()) {
+      return indexer.trim();
+    }
     const regex = this.indexerRegex;
     if (!regex) {
       return undefined;
@@ -465,6 +500,16 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
+    const service = stream.behaviorHints?.service;
+    if (
+      typeof service === 'string' &&
+      (constants.SERVICES as readonly string[]).includes(service)
+    ) {
+      return {
+        id: service as ServiceId,
+        cached: stream.behaviorHints?.cached === true,
+      };
+    }
     return this.parseServiceData(stream.name || '');
   }
 
@@ -486,6 +531,21 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): number | undefined {
+    return undefined;
+  }
+
+  /** A file inside the torrent, only where the addon names one reliably. */
+  protected getTorrentFile(
+    _stream: Stream,
+    _currentParsedStream: ParsedStream
+  ): string | undefined {
+    return undefined;
+  }
+
+  protected getTorrentTitle(
+    _stream: Stream,
+    _currentParsedStream: ParsedStream
+  ): string | undefined {
     return undefined;
   }
 
@@ -516,16 +576,23 @@ class StreamParser {
     return undefined;
   }
 
+  /** An HLS playlist, whatever query string the url carries. */
+  protected isHlsUrl(url: string | null | undefined): boolean {
+    if (!url) return false;
+    const path = url.split('#')[0].split('?')[0];
+    return /\.m3u8?$/i.test(path);
+  }
+
   protected getStreamType(
     stream: Stream,
     service: ParsedStream['service'],
     currentParsedStream: ParsedStream
   ): ParsedStream['type'] {
-    if (stream.url && /\.m3u8(?:[?#]|$)/i.test(stream.url)) {
+    if (this.isHlsUrl(stream.url)) {
       return 'live';
     }
 
-    if (stream.externalUrl) {
+    if (stream.externalUrl && !stream.url) {
       return 'external';
     }
 
@@ -597,6 +664,10 @@ class StreamParser {
         arrayMerge(folderParsed?.languages, fileParsed?.languages),
         this.getLanguages(stream, parsedStream)
       ),
+      subtitles: arrayMerge(
+        arrayMerge(folderParsed?.subtitles, fileParsed?.subtitles),
+        this.getSubtitles(stream, parsedStream)
+      ),
       ...this.getParsedFileMergeOverrides(stream, parsedStream),
     });
 
@@ -625,24 +696,26 @@ class StreamParser {
       ...(descriptionMatches ? [...new Set(descriptionMatches)] : []),
       ...(nameMatches ? [...new Set(nameMatches)] : []),
     ];
-    const languages = flags
-      .map((flag) => this.convertFlagToLanguage(flag))
+    return flags
+      .map((flag) => convertFlagToLanguage(flag))
       .filter((language) => language !== undefined);
-    return languages;
   }
 
-  protected convertFlagToLanguage(flag: string): string | undefined {
-    const possibleLanguages = FULL_LANGUAGE_MAPPING.filter(
-      (language) => language.flag === flag
-    );
+  /**
+   * Subtitle languages the addon says ship with the stream.
+   */
+  protected getSubtitles(
+    stream: Stream,
+    currentParsedStream: ParsedStream
+  ): string[] {
+    return [];
+  }
 
-    const language =
-      possibleLanguages.find((l) => l.flag_priority) || possibleLanguages[0];
-    if (!language) return undefined;
-    const languageName = getLanguageDisplayName(language);
-    return constants.LANGUAGES.includes(languageName as any)
-      ? languageName
-      : undefined;
+  /** Languages of `stream.subtitles`, for presets whose attached subs ship with the release. */
+  protected attachedSubtitleLanguages(stream: Stream): string[] {
+    return (stream.subtitles ?? [])
+      .map((subtitle) => normaliseLanguage(subtitle.lang))
+      .filter((language) => language !== undefined);
   }
 
   protected convertISO6392ToLanguage(code: string): string | undefined {
@@ -696,16 +769,10 @@ class StreamParser {
     string: string
   ): ParsedStream['service'] | undefined {
     const cleanString = string.replace(/web-?dl/i, '');
-    const services = constants.SERVICE_DETAILS;
     const cachedSymbols = ['⚡', '🚀', 'cached', '🌩️', '📫'];
     const uncachedSymbols = ['⏳', 'download', 'UNCACHED', '☁️'];
     let streamService: ParsedStream['service'] | undefined;
-    Object.values(services).forEach((service) => {
-      // for each service, generate a regexp which creates a regex with all known names separated by |
-      const regex = new RegExp(
-        `(^|(?<![^ |[(_\\/\\-.]))(${service.knownNames.join('|')})(?=[ ⬇️⏳⚡☁️🌩️📫+/|\\)\\]_.-]|$|\n)`,
-        'im'
-      );
+    getServiceRegexes().forEach(({ id, regex }) => {
       // check if the string contains the regex
       const match = cleanString.match(regex);
       if (match) {
@@ -725,7 +792,7 @@ class StreamParser {
         }
 
         streamService = {
-          id: service.id,
+          id,
           cached: cached,
         };
       }

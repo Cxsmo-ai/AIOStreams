@@ -1,0 +1,502 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use aiostreams_desktop_core::bridge::{Inbound, Outbound, origin};
+use aiostreams_desktop_core::discord;
+use aiostreams_desktop_core::external::External;
+use aiostreams_desktop_core::player::Player;
+use gtk4::prelude::*;
+use gtk4::{gdk, gio, glib};
+use webkit6::prelude::*;
+use webkit6::{
+    LoadEvent, NavigationPolicyDecision, PolicyDecisionType, UserContentInjectedFrames,
+    UserScriptInjectionTime,
+};
+
+use crate::links::Inbox;
+use crate::media;
+use crate::placement::{self, MIN_SIZE, Placement, SETTLE};
+use crate::updates::Updater;
+use crate::{
+    App, Edge, Served, UserEvent, allowed_navigation, handle, platform, receive_script, serve,
+    start_downloads, start_external, start_player,
+};
+use aiostreams_desktop_core::downloads::{Command as DownloadCommand, Downloads};
+
+/// The bridge posts through `window.ipc`, as wry names it on the other platforms.
+const IPC_SHIM: &str = "window.ipc = { postMessage: (message) => window.webkit.messageHandlers.ipc.postMessage(message) };";
+
+pub fn webview_version() -> String {
+    format!(
+        "{}.{}.{}",
+        webkit6::functions::major_version(),
+        webkit6::functions::minor_version(),
+        webkit6::functions::micro_version()
+    )
+}
+
+/// Wayland only moves or resizes a window from the press that started it.
+struct Press {
+    device: gdk::Device,
+    button: u32,
+    x: f64,
+    y: f64,
+    time: u32,
+}
+
+struct Shell {
+    window: gtk4::Window,
+    webview: webkit6::WebView,
+    video: platform::VideoSurface,
+    player: Rc<RefCell<Option<Player>>>,
+    external: Rc<External>,
+    downloads: Rc<Downloads>,
+    press: RefCell<Option<Press>>,
+    links: RefCell<Inbox>,
+    main_loop: glib::MainLoop,
+}
+
+thread_local! {
+    static SHELL: RefCell<Option<Rc<Shell>>> = const { RefCell::new(None) };
+}
+
+fn shell() -> Option<Rc<Shell>> {
+    SHELL.with(|s| s.borrow().clone())
+}
+
+/// Runs `event` on the UI thread's next turn: a caller there may still hold the player.
+fn post(event: UserEvent) {
+    glib::timeout_add_once(std::time::Duration::ZERO, move || {
+        if let Some(shell) = shell() {
+            shell.dispatch(event);
+        }
+    });
+}
+
+/// Leaves out the states the theme squares, since a provider above it wins.
+const FRAME_CSS: &str = "
+window.csd:not(.maximized):not(.fullscreen):not(.tiled):not(.tiled-top):not(.tiled-bottom):not(.tiled-left):not(.tiled-right),
+window.csd:not(.maximized):not(.fullscreen):not(.tiled):not(.tiled-top):not(.tiled-bottom):not(.tiled-left):not(.tiled-right) > overlay {
+    border-radius: 8px;
+}";
+
+fn add_frame_style(window: &gtk4::Window) {
+    let css = gtk4::CssProvider::new();
+    css.load_from_string(FRAME_CSS);
+    gtk4::style_context_add_provider_for_display(
+        &WidgetExt::display(window),
+        &css,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+/// Skia compositing (2.54+) flashes stale opacity when an animation ends, and redrawing only what
+/// changed leaves parts of the page stale.
+const FEATURES_OFF: &[&str] = &[
+    "UseSkiaForComposition",
+    "UseDamagingInformationForCompositing",
+    "PropagateDamagingInformation",
+];
+
+/// Skips a feature this WebKitGTK does not have.
+fn turn_features_off(settings: &webkit6::Settings) {
+    let Some(features) = webkit6::Settings::all_features() else {
+        return;
+    };
+    for i in 0..features.length() {
+        if let Some(feature) = features.get(i)
+            && feature
+                .identifier()
+                .is_some_and(|id| FEATURES_OFF.contains(&id.as_str()))
+        {
+            settings.set_feature_enabled(&feature, false);
+        }
+    }
+}
+
+fn respond(request: &webkit6::URISchemeRequest, served: Served) {
+    let length = served.body.len() as i64;
+    let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(served.body));
+    let response = webkit6::URISchemeResponse::new(&stream, length);
+    response.set_status(served.status.into(), None);
+    response.set_content_type(served.content_type);
+    request.finish_with_response(&response);
+}
+
+impl Shell {
+    fn emit(&self, message: Outbound) {
+        self.dispatch(UserEvent::Emit(receive_script(&message)));
+    }
+
+    fn toplevel(&self) -> Option<gdk::Toplevel> {
+        self.window.surface()?.downcast().ok()
+    }
+
+    fn dispatch(&self, event: UserEvent) {
+        match event {
+            UserEvent::Emit(script) => self.webview.evaluate_javascript(
+                &script,
+                None,
+                None,
+                None::<&gio::Cancellable>,
+                |_| {},
+            ),
+            UserEvent::Fullscreen(value) => {
+                if value.unwrap_or(!self.window.is_fullscreen()) {
+                    self.window.fullscreen();
+                } else {
+                    self.window.unfullscreen();
+                }
+            }
+            UserEvent::Minimize => self.window.minimize(),
+            UserEvent::Close => self.close(),
+            UserEvent::Sync => {
+                if let Some(p) = self.player.borrow().as_ref() {
+                    p.sync();
+                }
+                self.emit(Outbound::Fullscreen {
+                    value: self.window.is_fullscreen(),
+                });
+            }
+            UserEvent::Drag => {
+                if let (Some(p), Some(top)) = (self.press.borrow().as_ref(), self.toplevel()) {
+                    top.begin_move(&p.device, p.button as i32, p.x, p.y, p.time);
+                }
+            }
+            UserEvent::Resize(edge) => {
+                let edge = match edge {
+                    Edge::North => gdk::SurfaceEdge::North,
+                    Edge::NorthEast => gdk::SurfaceEdge::NorthEast,
+                    Edge::NorthWest => gdk::SurfaceEdge::NorthWest,
+                };
+                if let (Some(p), Some(top)) = (self.press.borrow().as_ref(), self.toplevel()) {
+                    top.begin_resize(edge, Some(&p.device), p.button as i32, p.x, p.y, p.time);
+                }
+            }
+            UserEvent::ToggleMaximize => {
+                if self.window.is_maximized() {
+                    self.window.unmaximize();
+                } else {
+                    self.window.maximize();
+                }
+            }
+            UserEvent::WindowState => self.emit(Outbound::WindowState {
+                maximized: self.window.is_maximized(),
+            }),
+            UserEvent::WindowButtons(_) => {}
+            UserEvent::Link(link) => {
+                self.window.present();
+                let now = self.links.borrow_mut().receive(link);
+                if let Some(link) = now {
+                    self.emit(Outbound::Link { url: link });
+                }
+            }
+            UserEvent::LinksReady => {
+                let ready = self.links.borrow_mut().ready();
+                for link in ready {
+                    self.emit(Outbound::Link { url: link });
+                }
+            }
+            UserEvent::ChoosePlayer(kind) => {
+                let dialog = gtk4::FileDialog::builder()
+                    .title(format!("Choose {}", kind.id()))
+                    .modal(true)
+                    .build();
+                let external = self.external.clone();
+                dialog.open(Some(&self.window), None::<&gio::Cancellable>, move |file| {
+                    if let Some(path) = file.ok().and_then(|f| f.path()) {
+                        external.set_program(kind, path);
+                    }
+                    if let Some(shell) = shell() {
+                        shell.emit(external.players());
+                    }
+                });
+            }
+            UserEvent::ChooseDownloadFolder => {
+                let dialog = gtk4::FileDialog::builder()
+                    .title("Choose where downloads go")
+                    .modal(true)
+                    .build();
+                let downloads = self.downloads.clone();
+                dialog.select_folder(Some(&self.window), None::<&gio::Cancellable>, move |file| {
+                    if let Some(folder) = file.ok().and_then(|f| f.path()) {
+                        downloads.send(DownloadCommand::SetFolder(folder));
+                    }
+                });
+            }
+        }
+    }
+
+    fn close(&self) {
+        log::info!("closing");
+        self.video.shutdown();
+        self.player.borrow_mut().take();
+        self.external.close();
+        self.main_loop.quit();
+    }
+}
+
+/// GTK keeps the size the window has when not maximized as its default size.
+/// Wayland leaves where it goes to the desktop.
+fn placement_of(window: &gtk4::Window) -> Placement {
+    let (width, height) = window.default_size();
+    Placement {
+        width: width.max(MIN_SIZE.0 as i32) as u32,
+        height: height.max(MIN_SIZE.1 as i32) as u32,
+        position: None,
+        maximized: window.is_maximized(),
+    }
+}
+
+pub fn run(app: App) {
+    let App {
+        args,
+        web,
+        start_url,
+        app_origin,
+        data_dir,
+        paths,
+        bridge,
+    } = app;
+    // The window's app id and class, which desktops match to its entry and icon.
+    glib::set_prgname(Some("io.github.viren070.aiostreams"));
+    glib::set_application_name("AIOStreams");
+    // From 4.16 GTK draws with Vulkan, which stutters mpv's OpenGL frames in fullscreen.
+    let minor = gtk4::minor_version();
+    if minor >= 16 && std::env::var_os("GSK_RENDERER").is_none() {
+        let gl = if minor >= 18 { "opengl" } else { "ngl" };
+        // SAFETY: on the main thread, before any other thread starts.
+        unsafe { std::env::set_var("GSK_RENDERER", gl) };
+    }
+    gtk4::init().unwrap_or_else(|e| platform::fatal(&format!("could not start GTK: {e}")));
+    // libmpv refuses to start unless LC_NUMERIC is C, which GTK's init replaced.
+    // SAFETY: on the main thread, before any other thread starts.
+    unsafe { libc::setlocale(libc::LC_NUMERIC, c"C".as_ptr()) };
+    let saved = placement::load(&data_dir);
+    let window = gtk4::Window::builder()
+        .title("AIOStreams")
+        .default_width(saved.width as i32)
+        .default_height(saved.height as i32)
+        .maximized(saved.maximized)
+        .build();
+    window.set_size_request(MIN_SIZE.0 as i32, MIN_SIZE.1 as i32);
+    // A hidden title bar keeps GTK's frame: corners, shadow and resize borders.
+    let titlebar = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    titlebar.set_visible(false);
+    window.set_titlebar(Some(&titlebar));
+    add_frame_style(&window);
+
+    let video = platform::VideoSurface::new().unwrap_or_else(|e| platform::fatal(&e));
+    video.widget().set_overflow(gtk4::Overflow::Hidden);
+    window.set_child(Some(video.widget()));
+    let started = start_player(&video, &paths.mpv, |message| {
+        if let Outbound::PlayerState { state, .. } = &message
+            && state.idle == Some(true)
+        {
+            platform::clear_video();
+        }
+        post(UserEvent::Emit(receive_script(&message)))
+    });
+    video.attach(started.mpv());
+    let player = Rc::new(RefCell::new(Some(started)));
+    let external = Rc::new(start_external(&paths, |message| {
+        post(UserEvent::Emit(receive_script(&message)))
+    }));
+    let updater = Rc::new(Updater::start(|message| {
+        post(UserEvent::Emit(receive_script(&message)))
+    }));
+    let downloads = Rc::new(start_downloads(&paths, |message| {
+        post(UserEvent::Emit(receive_script(&message)))
+    }));
+    discord::start(|message| post(UserEvent::Emit(receive_script(&message))));
+    media::start(|key| post(UserEvent::Emit(receive_script(&Outbound::MediaKey { key }))));
+
+    let context = webkit6::WebContext::new();
+    context.register_uri_scheme("aiostreams", move |request| {
+        let path = request.path().unwrap_or_default();
+        respond(request, serve(web.as_deref(), &path));
+    });
+    if let Some(security) = context.security_manager() {
+        security.register_uri_scheme_as_secure("aiostreams");
+        security.register_uri_scheme_as_cors_enabled("aiostreams");
+    }
+    let storage = data_dir.join(platform::WEB_DATA_DIR);
+    let session = webkit6::NetworkSession::new(
+        Some(&storage.join("data").to_string_lossy()),
+        Some(&storage.join("cache").to_string_lossy()),
+    );
+    let content = webkit6::UserContentManager::new();
+    content.add_script(&webkit6::UserScript::new(
+        &format!("{IPC_SHIM}\n{bridge}"),
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    ));
+    content.register_script_message_handler("ipc", None);
+    let settings = webkit6::Settings::new();
+    settings.set_enable_developer_extras(args.devtools);
+    turn_features_off(&settings);
+    let webview = webkit6::WebView::builder()
+        .web_context(&context)
+        .network_session(&session)
+        .user_content_manager(&content)
+        .settings(&settings)
+        .build();
+    webview.set_background_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
+    video.widget().add_overlay(&webview);
+
+    content.connect_script_message_received(Some("ipc"), {
+        let (webview, player, app_origin) =
+            (webview.downgrade(), player.clone(), app_origin.clone());
+        let (external, paths, updater) = (external.clone(), paths.clone(), updater.clone());
+        let downloads = downloads.clone();
+        move |_, value| {
+            let page = webview.upgrade().and_then(|w| w.uri()).unwrap_or_default();
+            let from = origin(&page).unwrap_or_default();
+            if from != app_origin {
+                return log::warn!("ignored a message from {from}");
+            }
+            match serde_json::from_str::<Inbound>(&value.to_str()) {
+                Ok(message) => handle(
+                    message, &player, &external, &post, &paths, &updater, &downloads,
+                ),
+                Err(e) => log::warn!("bad message: {e}"),
+            }
+        }
+    });
+    webview.connect_decide_policy({
+        let app_origin = app_origin.clone();
+        move |_, decision, kind| {
+            let uri = decision
+                .downcast_ref::<NavigationPolicyDecision>()
+                .and_then(|d| d.navigation_action())
+                .and_then(|a| a.request())
+                .and_then(|r| r.uri());
+            let Some(uri) = uri else { return false };
+            let leave = match kind {
+                PolicyDecisionType::NavigationAction => !allowed_navigation(&uri, &app_origin),
+                PolicyDecisionType::NewWindowAction => true,
+                _ => false,
+            };
+            if leave {
+                platform::open_external(&uri);
+                decision.ignore();
+            }
+            leave
+        }
+    });
+    webview.connect_load_changed({
+        let (player, external) = (player.clone(), external.clone());
+        move |_, event| {
+            if let LoadEvent::Started = event {
+                if let Some(shell) = shell() {
+                    shell.links.borrow_mut().page_loading();
+                }
+                if let Some(p) = player.borrow().as_ref() {
+                    p.stop();
+                }
+                external.close();
+            }
+        }
+    });
+
+    let presses = gtk4::GestureClick::new();
+    presses.set_button(0);
+    presses.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    presses.connect_pressed({
+        let webview = webview.downgrade();
+        move |gesture, _, x, y| {
+            // WebKitGTK 6 leaves a mouse's back and forward buttons to the app.
+            match (gesture.current_button(), webview.upgrade()) {
+                (8, Some(w)) => return w.go_back(),
+                (9, Some(w)) => return w.go_forward(),
+                _ => {}
+            }
+            let (Some(shell), Some(device)) = (shell(), gesture.current_event_device()) else {
+                return;
+            };
+            *shell.press.borrow_mut() = Some(Press {
+                device,
+                button: gesture.current_button(),
+                x,
+                y,
+                time: gesture.current_event_time(),
+            });
+        }
+    });
+    webview.add_controller(presses);
+
+    window.connect_fullscreened_notify(|w| {
+        if let Some(shell) = shell() {
+            shell.emit(Outbound::Fullscreen {
+                value: w.is_fullscreen(),
+            });
+        }
+    });
+    window.connect_maximized_notify(|w| {
+        if let Some(shell) = shell() {
+            shell.emit(Outbound::WindowState {
+                maximized: w.is_maximized(),
+            });
+        }
+    });
+    window.connect_is_active_notify(|w| {
+        if let (true, Some(shell)) = (w.is_active(), shell()) {
+            shell.webview.grab_focus();
+        }
+    });
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+    let save_later = {
+        let data_dir = data_dir.clone();
+        move |window: &gtk4::Window| {
+            if let Some(id) = pending.borrow_mut().take() {
+                id.remove();
+            }
+            let (window, data_dir, done) = (window.downgrade(), data_dir.clone(), pending.clone());
+            let id = glib::timeout_add_local_once(SETTLE, move || {
+                done.borrow_mut().take();
+                if let Some(window) = window.upgrade() {
+                    placement::save(&data_dir, &placement_of(&window));
+                }
+            });
+            *pending.borrow_mut() = Some(id);
+        }
+    };
+    window.connect_default_width_notify(save_later.clone());
+    window.connect_default_height_notify(save_later.clone());
+    window.connect_maximized_notify(save_later);
+    window.connect_close_request({
+        let data_dir = data_dir.clone();
+        move |window| {
+            placement::save(&data_dir, &placement_of(window));
+            if let Some(shell) = shell() {
+                shell.close();
+            }
+            glib::Propagation::Proceed
+        }
+    });
+
+    let main_loop = glib::MainLoop::new(None, false);
+    SHELL.with(|s| {
+        *s.borrow_mut() = Some(Rc::new(Shell {
+            window: window.clone(),
+            webview: webview.clone(),
+            video,
+            player,
+            external,
+            downloads,
+            press: RefCell::new(None),
+            links: RefCell::new(Inbox::default()),
+            main_loop: main_loop.clone(),
+        }))
+    });
+    if let Some(link) = args.link.clone() {
+        post(UserEvent::Link(link));
+    }
+    platform::listen_links(&data_dir, |link| post(UserEvent::Link(link)));
+    window.present();
+    webview.load_uri(&start_url);
+    main_loop.run();
+    SHELL.with(|s| s.borrow_mut().take());
+}

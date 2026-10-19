@@ -64,6 +64,14 @@ export class TorrentioParser extends StreamParser {
     return folderName;
   }
 
+  protected override getTorrentFile(stream: Stream): string | undefined {
+    return stream.behaviorHints?.filename ?? undefined;
+  }
+
+  protected override getTorrentTitle(stream: Stream): string | undefined {
+    return this.getFolder(stream);
+  }
+
   protected override getFileIdx(
     stream: Stream,
     currentParsedStream: ParsedStream
@@ -339,7 +347,11 @@ export class TorrentioPreset extends Preset {
       return [this.generateAddon(userData, options, [])];
     }
 
-    const usableServices = this.getUsableServices(userData, options.services, options.name);
+    const usableServices = this.getUsableServices(
+      userData,
+      options.services,
+      options.name
+    );
 
     // if no services are usable, return a single addon with no services
     if (!usableServices || usableServices.length === 0) {

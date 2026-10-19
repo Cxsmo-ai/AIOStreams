@@ -38,6 +38,11 @@ class StremthruStoreStreamParser extends StremThruStreamParser {
       ? stream.behaviorHints?.bingeGroup?.match(/[a-fA-F0-9]{40}$/)?.[0]
       : undefined;
   }
+
+  // A store item's stream is always one file of it.
+  protected override getTorrentFile(stream: Stream): string | undefined {
+    return stream.behaviorHints?.filename ?? undefined;
+  }
 }
 
 export class StremthruStorePreset extends StremThruPreset {
@@ -154,7 +159,11 @@ export class StremthruStorePreset extends StremThruPreset {
       return [this.generateAddon(userData, options, undefined)];
     }
 
-    const usableServices = this.getUsableServices(userData, options.services, options.name);
+    const usableServices = this.getUsableServices(
+      userData,
+      options.services,
+      options.name
+    );
     // if no services are usable, throw an error
     if (!usableServices || usableServices.length === 0) {
       throw new Error(

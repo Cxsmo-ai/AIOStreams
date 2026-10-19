@@ -19,11 +19,23 @@ export interface UsenetStreamToken {
   /** Shareable release key (`wd1:`), when the indexer metadata allowed one. */
   releaseKey?: string;
   /**
+   * Search-time indexer name.
+   */
+  indexer?: string;
+  /** Search-time indexer info URL. */
+  infoUrl?: string;
+  /**
    * Username the stream is attributed to, for stream accounting and limits.
    * Absent on tokens minted before this existed; those streams are listed as
    * unidentified and bypass per-user limits and bans.
    */
   owner?: string;
+  /** The title the release was found for. */
+  imdbId?: string;
+  tmdbId?: number;
+  tvdbId?: number;
+  season?: number;
+  episode?: number;
 }
 
 /**
@@ -37,6 +49,13 @@ export function encodeUsenetStreamToken(token: UsenetStreamToken): string {
     throw new Error('failed to encrypt usenet stream token');
   }
   return enc.data;
+}
+
+export function decodeUsenetStreamUrl(
+  url: string
+): UsenetStreamToken | undefined {
+  const token = /\/api\/v1\/usenet\/stream\/([^/?#]+)/.exec(url)?.[1];
+  return token ? decodeUsenetStreamToken(token) : undefined;
 }
 
 /** Inverse of {@link encodeUsenetStreamToken}. Returns undefined on failure. */

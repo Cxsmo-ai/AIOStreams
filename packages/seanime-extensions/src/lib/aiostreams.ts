@@ -239,12 +239,25 @@ class APIError extends Error {
   }
 }
 
+interface FetchResult {
+  status: number;
+  statusText: string;
+  headers: unknown;
+  json(): unknown;
+}
+
+type FetchFn = (url: string, init: RequestInit) => Promise<FetchResult>;
+
 class AIOStreamsAPI {
   private baseUrl: string;
+  // Plugin UI contexts must pass ctx.fetch, as Seanime documents: the global
+  // fetch resolves outside the UI scheduler and randomly corrupts the VM.
   constructor(
     baseUrl: string,
     private uuid: string,
-    private password: string
+    private password: string,
+    readonly variants: string[] = [],
+    private readonly fetchFn: FetchFn = fetch
   ) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
   }
@@ -262,6 +275,10 @@ class AIOStreamsAPI {
         type,
         id: fullId,
         format: true,
+        // Comma separated in one param: the server only reads the first `v`.
+        [VARIANT_QUERY_PARAM]: this.variants.length
+          ? this.variants.join(',')
+          : undefined,
       },
     });
   }
@@ -342,7 +359,7 @@ class AIOStreamsAPI {
       }
     }
 
-    const response = await fetch(url, request);
+    const response = await this.fetchFn(url, request);
 
     if (response.status === 204) {
       return null as T;
@@ -391,11 +408,38 @@ class AIOStreamsAPI {
   }
 }
 
-// supports manifest URLs in the format of <baseUrl>/stremio/<uuid>/<encryptedPassword>/manifest.json
+/** Query parameter, and path segment, that select config variants. */
+const VARIANT_QUERY_PARAM = 'v';
+const VARIANT_PATH_SEGMENT = 'v';
+
+function collectVariants(list: string, into: string[]): void {
+  for (const id of list.split(',')) {
+    const trimmed = id.trim().toLowerCase();
+    if (trimmed && into.indexOf(trimmed) === -1) into.push(trimmed);
+  }
+}
+
+function parseQueryVariants(url: string): string[] {
+  const query = url.split('#')[0].split('?')[1];
+  if (!query) return [];
+
+  const ids: string[] = [];
+  for (const pair of query.split('&')) {
+    const separator = pair.indexOf('=');
+    if (separator === -1 || pair.slice(0, separator) !== VARIANT_QUERY_PARAM) {
+      continue;
+    }
+    collectVariants(decodeURIComponent(pair.slice(separator + 1)), ids);
+  }
+  return ids;
+}
+
+// supports manifest URLs in the format of <baseUrl>/stremio/<uuid>/<encryptedPassword>[/v/<variants>]/manifest.json
 function parseManifestUrl(url: string): {
   baseUrl: string;
   uuid: string;
   encryptedPassword: string;
+  variants: string[];
 } {
   const clean = url.trim();
   if (!clean) throw new Error('Manifest URL is required');
@@ -412,7 +456,7 @@ function parseManifestUrl(url: string): {
   // if url is of alias format e.g <baseUrl>/stremio/u/<alias>/manifest.json
   // throw a more specific error.
   const aliasMatch = parsedUrl.pathname.match(
-    /^\/stremio\/u\/([^/]+)\/manifest\.json$/
+    /^\/stremio\/u\/([^/]+)(?:\/v\/[^/]+)?\/manifest\.json$/
   );
   if (aliasMatch) {
     const alias = aliasMatch[1];
@@ -437,8 +481,13 @@ function parseManifestUrl(url: string): {
     throw new Error('Manifest URL is missing uuid or password token');
   }
 
+  const variants = parseQueryVariants(clean);
+  if (segments[3] === VARIANT_PATH_SEGMENT && segments[4]) {
+    collectVariants(decodeURIComponent(segments[4]), variants);
+  }
+
   const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}`;
-  return { baseUrl, uuid, encryptedPassword };
+  return { baseUrl, uuid, encryptedPassword, variants };
 }
 
 export {

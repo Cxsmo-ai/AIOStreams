@@ -1,5 +1,4 @@
-import { FULL_LANGUAGE_MAPPING } from './language-list.js';
-import { LANGUAGES } from './constants.js';
+import { FULL_LANGUAGE_MAPPING, LANGUAGES } from './language-list.js';
 
 /**
  * Returns the canonical display name for a language entry.
@@ -39,10 +38,13 @@ const LANGUAGE_ALIAS_MAP: Record<string, string> = {
   wel: 'cym',
 };
 
+/** Codes the mapping holds under another language's entry. */
+const SAME_LANGUAGE: Record<string, string> = { fil: 'tgl' };
+
 /** Resolve a deprecated ISO 639-2 alias to its preferred form (lowercased). */
 export function normaliseLangCode(code: string): string {
   const lower = code.toLowerCase().trim();
-  return LANGUAGE_ALIAS_MAP[lower] ?? lower;
+  return LANGUAGE_ALIAS_MAP[lower] ?? SAME_LANGUAGE[lower] ?? lower;
 }
 
 const LANGUAGE_BY_NAME = new Map<string, string>(
@@ -81,6 +83,9 @@ const REGION_ALIASES: Record<string, string> = {
 
 const QUALIFIER_PATTERN = /^(.*\S)\s*\(([^()]+)\)$/;
 const MAX_INPUT_LENGTH = 64;
+
+const NORMALISED_LANGUAGE_CACHE = new Map<string, string | undefined>();
+const NORMALISED_LANGUAGE_CACHE_MAX = 1000;
 
 function toSupportedLanguage(
   entry: (typeof FULL_LANGUAGE_MAPPING)[number] | undefined
@@ -156,6 +161,21 @@ export function convertLangCodeToName(code: string): string | undefined {
  */
 export function normaliseLanguage(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
+  if (value.length > MAX_INPUT_LENGTH) return computeNormalisedLanguage(value);
+
+  const cached = NORMALISED_LANGUAGE_CACHE.get(value);
+  if (cached !== undefined || NORMALISED_LANGUAGE_CACHE.has(value)) {
+    return cached;
+  }
+  const result = computeNormalisedLanguage(value);
+  if (NORMALISED_LANGUAGE_CACHE.size >= NORMALISED_LANGUAGE_CACHE_MAX) {
+    NORMALISED_LANGUAGE_CACHE.clear();
+  }
+  NORMALISED_LANGUAGE_CACHE.set(value, result);
+  return result;
+}
+
+function computeNormalisedLanguage(value: string): string | undefined {
   let raw = value.trim();
   if (raw.length > MAX_INPUT_LENGTH) return undefined;
 
@@ -252,6 +272,28 @@ function computeLanguageCode(language: string): string | undefined {
   return selectedLang.iso_639_1?.toUpperCase();
 }
 
+/**
+ * Convert a language display name to a lower-case ISO 639-2 code ("por"),
+ * the form Jellyfin clients expect on media streams.
+ */
+export function languageToIso6392(language: string): string | undefined {
+  const needle = language.trim().toLowerCase();
+  if (!needle) return undefined;
+  const possible = FULL_LANGUAGE_MAPPING.filter(
+    (lang) =>
+      lang.english_name
+        .split(';')
+        .some((name) => name.split('(')[0].trim().toLowerCase() === needle) ||
+      lang.internal_english_name?.toLowerCase() === needle ||
+      lang.name.toLowerCase() === needle ||
+      lang.iso_639_1?.toLowerCase() === needle ||
+      lang.iso_639_2.toLowerCase() === needle
+  );
+  if (!possible.length) return undefined;
+  const selected = possible.find((lang) => lang.flag_priority) ?? possible[0];
+  return selected.iso_639_2.toLowerCase();
+}
+
 /** Convert an ISO 639-1 code (e.g. "pt") to a display name. */
 export function iso6391ToLanguage(code: string): string | undefined {
   const langs = FULL_LANGUAGE_MAPPING.filter(
@@ -282,6 +324,35 @@ export function iso6392ToIso6391(code: string): string | undefined {
     (lang) => (lang as any).iso_639_2?.toLowerCase() === code.toLowerCase()
   );
   return entry?.iso_639_1 || undefined;
+}
+
+const TAG_LANGUAGE_CACHE = new Map<string, string | undefined>();
+
+/**
+ * The language a BCP 47 or ISO 639 tag names ("es-419" is "Latino"), also
+ * outside LANGUAGES; a region the mapping lacks falls back to the language.
+ */
+export function tagLanguage(tag: string): string | undefined {
+  const key = tag.trim().toLowerCase();
+  if (!key || key.length > MAX_INPUT_LENGTH) return undefined;
+  if (TAG_LANGUAGE_CACHE.has(key)) return TAG_LANGUAGE_CACHE.get(key);
+  const entry = findEntryByCode(key) ?? findEntryByCode(key.split(/[-_]/)[0]);
+  const name = entry && getLanguageDisplayName(entry);
+  if (TAG_LANGUAGE_CACHE.size >= NORMALISED_LANGUAGE_CACHE_MAX) {
+    TAG_LANGUAGE_CACHE.clear();
+  }
+  TAG_LANGUAGE_CACHE.set(key, name);
+  return name;
+}
+
+const BIBLIOGRAPHIC = Object.fromEntries(
+  Object.entries(LANGUAGE_ALIAS_MAP).map(([b, t]) => [t, b])
+);
+
+/** A language's ISO 639-2/B code, the form Jellyfin stores ("ger", not "deu"). */
+export function languageToIso6392B(language: string): string | undefined {
+  const code = languageToIso6392(language);
+  return code && (BIBLIOGRAPHIC[code] ?? code);
 }
 
 const languageEmojiMap: Record<string, string> = {

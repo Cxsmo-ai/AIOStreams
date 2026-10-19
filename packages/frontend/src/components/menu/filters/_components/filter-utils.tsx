@@ -1,4 +1,4 @@
-import { cn } from '../../../ui/core/styling';
+import { cn } from '@aiostreams/ui/core/styling';
 import { PageControls } from '../../../shared/page-controls';
 import {
   RESOLUTIONS,
@@ -73,6 +73,11 @@ export const tabsTriggerClass = cn(
 export const tabsListClass = cn(
   'w-full flex flex-wrap lg:flex-nowrap h-fit xl:h-10',
   'lg:block p-2 lg:p-0'
+);
+
+// display:contents below lg so mobile keeps the flat wrapped pill list
+export const tabsGroupClass = cn(
+  'contents lg:block border-0 bg-transparent lg:border lg:bg-[--paper] overflow-clip p-1'
 );
 
 export const tabsContentClass = cn(

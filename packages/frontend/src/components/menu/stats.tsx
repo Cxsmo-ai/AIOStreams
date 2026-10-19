@@ -9,11 +9,11 @@ import {
   type UserAnalyticsResponse,
   type UserAnalyticsAddon,
 } from '@/lib/api';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Alert } from '@/components/ui/alert';
-import { Card, CardContent } from '../ui/card';
-import { cn } from '../ui/core/styling';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@aiostreams/ui/tabs';
+import { Skeleton } from '@aiostreams/ui/skeleton';
+import { Alert } from '@aiostreams/ui/alert';
+import { Card, CardContent } from '@aiostreams/ui/card';
+import { cn } from '@aiostreams/ui/core/styling';
 
 /**
  * Per-user request stats for the configure-page Stats tab.
@@ -146,7 +146,7 @@ function StatsView({ data }: { data: UserAnalyticsResponse }) {
       <Alert
         intent="info"
         title="No stream requests yet"
-        description="Once Stremio plays something, your stats will start populating. You can refresh this page after watching a few items."
+        description="Once you start requesting streams, your stats will start populating. You can refresh this page after watching a few items."
       />
     );
   }
@@ -250,7 +250,7 @@ function KpiRow({ data }: { data: UserAnalyticsResponse }) {
             <div
               className={cn(
                 'text-2xl font-semibold mt-1',
-                it.alert && 'text-red-400',
+                it.alert && 'text-red-300',
                 it.muted && 'text-[--muted]'
               )}
             >
@@ -335,7 +335,7 @@ function AddonTable({
                   </span>
                 </Td>
                 <Td align="right">
-                  <span className={cn(r.errorRate > 10 && 'text-red-400')}>
+                  <span className={cn(r.errorRate > 10 && 'text-red-300')}>
                     {r.errorRate.toFixed(0)}%
                   </span>
                 </Td>

@@ -28,8 +28,13 @@ import {
   APIError,
 } from './index.js';
 import { assertConfigAccessKey } from './auth.js';
-import { validateVariants } from '../variants/runtime.js';
-import { parseSyncedUrl } from './sync.js';
+import {
+  knownHealthCheckIds,
+  validateConditionalActivation,
+  validateVariants,
+  withOwnAccountLock,
+} from '../variants/runtime.js';
+import { parseSyncedUrl } from './sync/index.js';
 import { ZodError } from 'zod';
 import {
   formatZodError as formatZodErrorImpl,
@@ -158,10 +163,30 @@ export function applyForcedServiceEntries<T extends UserData>(
 }
 
 export interface ValidateConfigOptions {
+  /** Read paths only: variants have already been applied and schema-checked. */
+  skipVariantValidation?: boolean;
   skipErrorsFromAddonsOrProxies?: boolean;
   decryptValues?: boolean;
   increasedManifestTimeout?: boolean;
   bypassManifestCache?: boolean;
+}
+
+// A test selection reads only the expression and the health ids, so a pass stays a pass.
+const passedStreamExpressions = new Set<string>();
+const PASSED_STREAM_EXPRESSIONS_MAX = 5000;
+
+async function testStreamExpression(
+  expression: string,
+  healthIds: string[]
+): Promise<void> {
+  const key = JSON.stringify([[...healthIds].sort(), expression]);
+  if (passedStreamExpressions.has(key)) return;
+  await StreamSelector.testSelect(expression, healthIds);
+  if (passedStreamExpressions.size >= PASSED_STREAM_EXPRESSIONS_MAX) {
+    const oldest = passedStreamExpressions.values().next().value;
+    if (oldest !== undefined) passedStreamExpressions.delete(oldest);
+  }
+  passedStreamExpressions.add(key);
 }
 
 export async function validateConfig(
@@ -299,6 +324,36 @@ export async function validateConfig(
     }
   }
 
+  // A dangling link would degrade the user to the base config at sign-in.
+  const checkLinked = (who: string, linked: string[]) => {
+    if (linked.length > appConfig.userLimits.variants.max) {
+      throw new Error(
+        `${who} links ${linked.length} variants, but the maximum is ${appConfig.userLimits.variants.max}`
+      );
+    }
+    for (const id of linked) {
+      const variant = config.variants?.find((v) => v.id === id);
+      if (!variant) throw new Error(`${who} links to unknown variant "${id}"`);
+      if (variant.enabled === false) {
+        throw new Error(`${who} links to disabled variant "${id}"`);
+      }
+    }
+  };
+  const personas = config.jellyfin?.personas ?? [];
+  checkLinked('The primary user', config.jellyfin?.primary?.variants ?? []);
+  for (const persona of personas) {
+    checkLinked(`Persona "${persona.name}"`, persona.variants ?? []);
+  }
+  const primaryName = config.jellyfin?.primary?.name?.trim().toLowerCase();
+  if (
+    primaryName &&
+    personas.some((p) => p.name.trim().toLowerCase() === primaryName)
+  ) {
+    throw new Error(
+      `A persona and the primary user share the name "${config.jellyfin?.primary?.name}"`
+    );
+  }
+
   // validate max failover attempts against the server limit
   if (
     config.failover?.maxAttempts &&
@@ -367,17 +422,25 @@ export async function validateConfig(
 
   // Static only: a full validateConfig per variant would recurse here and
   // refetch every addon manifest.
-  validateVariants(config, (patched) => {
-    const parsed = UserDataSchema.safeParse(patched);
-    return {
-      success: parsed.success,
-      error: parsed.success ? undefined : parsed.error.issues[0]?.message,
-    };
-  });
+  if (!options?.skipVariantValidation) {
+    validateVariants(config, (patched) => {
+      const parsed = UserDataSchema.safeParse(patched);
+      return {
+        success: parsed.success,
+        error: parsed.success ? undefined : parsed.error.issues[0]?.message,
+      };
+    });
+  }
+
+  await validateConditionalActivation(
+    config,
+    options?.skipErrorsFromAddonsOrProxies
+  );
+  const healthIds = knownHealthCheckIds(config);
 
   if (config.groups?.groupings) {
     for (const group of config.groups.groupings) {
-      await validateGroup(group);
+      await validateGroup(group, healthIds);
     }
   }
 
@@ -387,7 +450,8 @@ export async function validateConfig(
         throw new Error('Missing condition');
       }
       await ExitConditionEvaluator.testEvaluate(
-        config.dynamicAddonFetching.condition
+        config.dynamicAddonFetching.condition,
+        healthIds
       );
     } catch (error) {
       throw new Error(`Invalid dynamic addon fetching condition: ${error}`);
@@ -405,7 +469,7 @@ export async function validateConfig(
 
   for (const expression of expressionsToValidate) {
     try {
-      await StreamSelector.testSelect(expression);
+      await testStreamExpression(expression, healthIds);
     } catch (error) {
       throw new Error(`Invalid stream expression: ${expression}: ${error}`);
     }
@@ -414,7 +478,7 @@ export async function validateConfig(
   // validate precache selector
   if (config.precacheSelector) {
     try {
-      await StreamSelector.testSelect(config.precacheSelector);
+      await testStreamExpression(config.precacheSelector, healthIds);
     } catch (error) {
       throw new Error(`Invalid precache selector: ${error}`);
     }
@@ -993,27 +1057,32 @@ async function validateRegexes(config: UserData, skipErrors: boolean = false) {
 
   if (regexes.length === 0) return;
 
-  const regexAllowed = await RegexAccess.isRegexAllowed(config, regexes);
+  const permitted = await RegexAccess.resolvePermitted(
+    config,
+    RegexAccess.syncedUrlsOf(config)
+  );
+  const { allowed, denied } = RegexAccess.partitionPatterns(regexes, permitted);
 
-  if (!regexAllowed) {
+  if (denied.length > 0) {
     if (!skipErrors) {
-      const allowedPatterns = (await RegexAccess.allowedRegexPatterns())
-        .patterns;
-      const notAllowed = regexes.filter((r) => !allowedPatterns.includes(r));
-      if (notAllowed.length === regexes.length) {
+      if (denied.length === regexes.length) {
         throw new Error(
           'You do not have permission to use regex filters, please remove them from your config'
         );
       }
       throw new Error(
-        `You are only permitted to use specific regex patterns, you have ${notAllowed.length} / ${regexes.length} regexes that are not allowed. Please remove them from your config.`
+        `You are only permitted to use specific regex patterns, you have ${denied.length} / ${regexes.length} regexes that are not allowed. Please remove them from your config.`
       );
     }
-    return;
+    // Serve path: the permitted patterns still apply, the rest are dropped.
+    logger.warn(
+      { uuid: config.uuid, denied: denied.length, total: regexes.length },
+      'dropping regex patterns this config is no longer permitted to use'
+    );
   }
 
   await Promise.all(
-    regexes.map(async (regex) => {
+    allowed.map(async (regex) => {
       try {
         await compileRegex(regex);
       } catch (error: any) {
@@ -1028,56 +1097,28 @@ function validateSyncedRegexUrls(
   config: UserData,
   skipErrors: boolean = false
 ) {
-  const regexAccess = appConfig.userLimits.regex.access;
-  const isUnrestricted =
-    regexAccess === 'all' || (regexAccess === 'trusted' && config.trusted);
-
-  if (isUnrestricted) return;
-
-  const allowedUrls = RegexAccess.getAllowedUrls();
-  const urlsToCheck = [
-    ...(config.syncedIncludedRegexUrls || []),
-    ...(config.syncedExcludedRegexUrls || []),
-    ...(config.syncedRequiredRegexUrls || []),
-    ...(config.syncedPreferredRegexUrls || []),
-    ...(config.syncedRankedRegexUrls || []),
-  ];
-
-  const invalidUrls = urlsToCheck.filter((url) => !allowedUrls.includes(url));
-
-  if (invalidUrls.length > 0) {
-    if (!skipErrors) {
-      throw new Error(
-        `Forbidden URL(s) in regex configuration: ${invalidUrls.join(', ')}`
-      );
-    }
+  if (skipErrors) return;
+  const { denied } = RegexAccess.partition(
+    RegexAccess.syncedUrlsOf(config),
+    config
+  );
+  if (denied.length > 0) {
+    throw new Error(
+      `Forbidden URL(s) in regex configuration: ${denied.map((d) => d.url).join(', ')}`
+    );
   }
 }
 
 function validateSyncedSelUrls(config: UserData, skipErrors: boolean = false) {
-  const selAccess = appConfig.userLimits.sel.access;
-  const isUnrestricted =
-    selAccess === 'all' || (selAccess === 'trusted' && config.trusted);
-
-  if (isUnrestricted) return;
-
-  const allowedUrls = SelAccess.getAllowedUrls();
-  const urlsToCheck = [
-    ...(config.syncedIncludedStreamExpressionUrls || []),
-    ...(config.syncedExcludedStreamExpressionUrls || []),
-    ...(config.syncedRequiredStreamExpressionUrls || []),
-    ...(config.syncedPreferredStreamExpressionUrls || []),
-    ...(config.syncedRankedStreamExpressionUrls || []),
-  ];
-
-  const invalidUrls = urlsToCheck.filter((url) => !allowedUrls.includes(url));
-
-  if (invalidUrls.length > 0) {
-    if (!skipErrors) {
-      throw new Error(
-        `Forbidden URL(s) in stream expression sync configuration: ${invalidUrls.join(', ')}`
-      );
-    }
+  if (skipErrors) return;
+  const { denied } = SelAccess.partition(
+    SelAccess.syncedUrlsOf(config),
+    config
+  );
+  if (denied.length > 0) {
+    throw new Error(
+      `Forbidden URL(s) in stream expression sync configuration: ${denied.map((d) => d.url).join(', ')}`
+    );
   }
 }
 
@@ -1276,7 +1317,7 @@ function validatePreset(preset: PresetObject) {
   }
 }
 
-async function validateGroup(group: Group) {
+async function validateGroup(group: Group, healthIds: string[] = []) {
   if (!group) {
     return;
   }
@@ -1289,7 +1330,10 @@ async function validateGroup(group: Group) {
   // we must be able to parse the condition
   let result;
   try {
-    result = await GroupConditionEvaluator.testEvaluate(group.condition);
+    result = await GroupConditionEvaluator.testEvaluate(
+      group.condition,
+      healthIds
+    );
   } catch (error: any) {
     throw new Error(
       `Your group condition - '${group.condition}' - is invalid: ${error.message}`
@@ -1302,7 +1346,7 @@ async function validateGroup(group: Group) {
   }
 }
 
-function validateOption(
+export function validateOption(
   option: Option,
   value: any,
   decryptValues: boolean = false
@@ -1417,27 +1461,31 @@ function validateOption(
     }
   }
 
-  if (option.type === 'password') {
-    if (isEncrypted(value) && decryptValues) {
-      const { success, data, error } = decryptString(value);
-      if (!success) {
-        throw new Error(
-          `Option ${option.id} is encrypted but failed to decrypt: ${error}`
-        );
-      }
-      value = data;
-    }
-  }
-
   if (option.type === 'url') {
-    if (forcedValue !== undefined) {
-      value = forcedValue;
-    }
     if (typeof value !== 'string') {
       throw new Error(
         `Option ${option.id} must be a string, got ${typeof value}`
       );
     }
+  }
+
+  // Not only passwords: DEFAULT_SERVICE_CREDENTIALS and FORCED_SERVICE_CREDENTIALS
+  // reach the config encrypted whatever the type (getEnvironmentServiceDetails),
+  // e.g. a NzbDAV or AltMount URL.
+  if (
+    (option.type === 'password' ||
+      option.type === 'string' ||
+      option.type === 'url') &&
+    decryptValues &&
+    isEncrypted(value)
+  ) {
+    const { success, data, error } = decryptString(value);
+    if (!success) {
+      throw new Error(
+        `Option ${option.id} is encrypted but failed to decrypt: ${error}`
+      );
+    }
+    value = data;
   }
 
   return value;
@@ -1588,7 +1636,7 @@ const PROXY_FIELDS: (keyof UserData)[] = [
 
 // prettier-ignore
 const METADATA_FIELDS: (keyof UserData)[] = [
-  'tmdbApiKey', 'tmdbAccessToken', 'tvdbApiKey',
+  'tmdbApiKey', 'tmdbAccessToken', 'tvdbApiKey', 'pmdbApiKey',
   'rpdbApiKey', 'topPosterApiKey', 'aioratingsApiKey', 'aioratingsProfileId',
   'openposterdbApiKey', 'openposterdbUrl', 'openposterdbParameters', 'posterService',
   'usePosterRedirectApi', 'usePosterServiceForMeta',
@@ -1598,7 +1646,7 @@ const METADATA_FIELDS: (keyof UserData)[] = [
 const MISC_FIELDS: (keyof UserData)[] = [
   'autoPlay', 'areYouStillThere', 'statistics', 'dynamicAddonFetching',
   'failover', 'serviceWrap', 'cacheAndPlay', 'preloadStreams', 'precacheSelector',
-  'hideErrors', 'hideErrorsForResources', 'addonCategoryColors', 'catalogModifications', 'mergedCatalogs',
+  'hideErrors', 'hideErrorsForResources', 'addonCategoryColors', 'catalogModifications', 'newCatalogsDisabled', 'upstreamCatalogOrder', 'mergedCatalogs',
   'accessKey', 'externalDownloads', 'autoRemoveDownloads', 'checkOwned', 'showChanges',
 ];
 
@@ -1613,7 +1661,7 @@ const BRANDING_FIELDS: (keyof UserData)[] = [
 // so a parent's would target fields the child lacks.
 // prettier-ignore
 const PERSONAL_FIELDS: (keyof UserData)[] = [
-  'appliedTemplates', 'variants',
+  'appliedTemplates', 'variants', 'healthChecks',
 ];
 
 /**
@@ -1791,5 +1839,14 @@ export function mergeConfigs(parent: UserData, child: UserData): UserData {
     }
   }
 
-  return result;
+  // Personas key this config's own rows and name its own variants.
+  if (child.jellyfin?.personas) {
+    result.jellyfin = {
+      ...result.jellyfin,
+      personas: child.jellyfin.personas,
+    };
+  } else if (result.jellyfin?.personas) {
+    result.jellyfin = { ...result.jellyfin, personas: undefined };
+  }
+  return withOwnAccountLock(result, child);
 }

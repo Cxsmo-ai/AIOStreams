@@ -3,6 +3,7 @@ import {
   Env,
   getSimpleTextHash,
   maskSensitiveInfo,
+  requiresOnlyGenre,
 } from '../utils/index.js';
 import { config as appConfig } from '../config/index.js';
 import { constants } from '../utils/index.js';
@@ -490,11 +491,14 @@ export function buildResources(ctx: AIOStreamsContext): void {
       if (
         addon.resources &&
         addon.resources.length > 0 &&
-        !addon.resources.includes(resource.name)
+        !addon.resources.includes(resource.name as Resource)
       ) {
         addonResources = addonResources.filter((r) => r.name !== resource.name);
         continue;
       }
+
+      // Consumed, not served: kept in supportedResources, out of the manifest.
+      if (resource.name === constants.WATCH_STATE_RESOURCE) continue;
 
       const existing = ctx.finalResources.find((r) => r.name === resource.name);
       if (existing) {
@@ -652,37 +656,47 @@ export function buildResources(ctx: AIOStreamsContext): void {
     }
   }
 
-  if (ctx.userData.catalogModifications) {
-    ctx.finalCatalogs = ctx.finalCatalogs
-      .sort((a, b) => {
-        // "What you guys should watch" / tc-watchlist always floats to the very top
-        const aIsWatchlist =
-          a.id.includes('tc-watchlist') ||
-          a.name === 'What you guys should watch';
-        const bIsWatchlist =
-          b.id.includes('tc-watchlist') ||
-          b.name === 'What you guys should watch';
-        if (aIsWatchlist && !bIsWatchlist) return -1;
-        if (!aIsWatchlist && bIsWatchlist) return 1;
-        const aModIndex = ctx.userData.catalogModifications!.findIndex(
-          (mod) => mod.id === a.id && mod.type === a.type
-        );
-        const bModIndex = ctx.userData.catalogModifications!.findIndex(
-          (mod) => mod.id === b.id && mod.type === b.type
-        );
-
-        if (aModIndex === -1 && bModIndex === -1) {
-          return ctx.finalCatalogs.indexOf(a) - ctx.finalCatalogs.indexOf(b);
-        }
-
-        if (aModIndex === -1) return 1;
-        if (bModIndex === -1) return -1;
-
-        return aModIndex - bModIndex;
-      })
+  const newCatalogsDisabled = new Set(ctx.userData.newCatalogsDisabled);
+  const upstreamOrder = new Set(ctx.userData.upstreamCatalogOrder);
+  const modifications = ctx.userData.catalogModifications ?? [];
+  if (
+    ctx.userData.catalogModifications ||
+    newCatalogsDisabled.size ||
+    upstreamOrder.size
+  ) {
+    const upstream = [...ctx.finalCatalogs];
+    const addonOf = (id: string) => id.split('.')[0];
+    // An addon keeping its order places a new catalog after its others.
+    const lastPosition = new Map<string, number>();
+    modifications.forEach((mod, i) => {
+      if (upstreamOrder.has(addonOf(mod.id)))
+        lastPosition.set(addonOf(mod.id), i);
+    });
+    const position = (c: (typeof upstream)[number]) => {
+      if (c.id.includes('tc-watchlist')) return -1;
+      const i = modifications.findIndex(
+        (mod) => mod.id === c.id && mod.type === c.type
+      );
+      if (i !== -1) return i;
+      const last = lastPosition.get(addonOf(c.id));
+      return last === undefined ? Infinity : last + 0.5;
+    };
+    const sorted = upstream.sort(
+      (a, b) =>
+        position(a) - position(b) ||
+        ctx.finalCatalogs.indexOf(a) - ctx.finalCatalogs.indexOf(b)
+    );
+    const queues = new Map<string, typeof upstream>();
+    for (const c of ctx.finalCatalogs) {
+      const addon = addonOf(c.id);
+      if (upstreamOrder.has(addon))
+        queues.set(addon, [...(queues.get(addon) ?? []), c]);
+    }
+    ctx.finalCatalogs = sorted
+      .map((c) => queues.get(addonOf(c.id))?.shift() ?? c)
       .filter((catalog) => {
         if (catalog.id.startsWith('aiostreams.merged.')) {
-          const modification = ctx.userData.catalogModifications!.find(
+          const modification = modifications.find(
             (mod) => mod.id === catalog.id && mod.type === catalog.type
           );
           return modification?.enabled !== false;
@@ -697,13 +711,15 @@ export function buildResources(ctx: AIOStreamsContext): void {
           return false;
         }
 
-        const modification = ctx.userData.catalogModifications!.find(
+        const modification = modifications.find(
           (mod) => mod.id === catalog.id && mod.type === catalog.type
         );
-        return modification?.enabled !== false;
+        if (!modification)
+          return !newCatalogsDisabled.has(catalog.id.split('.')[0]);
+        return modification.enabled !== false;
       })
       .map((catalog) => {
-        const modification = ctx.userData.catalogModifications!.find(
+        const modification = modifications.find(
           (mod) => mod.id === catalog.id && mod.type === catalog.type
         );
         if (modification?.name) {
@@ -719,6 +735,7 @@ export function buildResources(ctx: AIOStreamsContext): void {
         const canDisableSearch = catalog.extra?.some(
           (e) => e.name === 'search' && !e.isRequired
         );
+        const canApplyShowOnHome = requiresOnlyGenre(catalog.extra);
 
         if (modification?.onlyOnDiscover && canApplyOnlyOnDiscover) {
           const genreExtra = catalog.extra?.find((e) => e.name === 'genre');
@@ -737,6 +754,17 @@ export function buildResources(ctx: AIOStreamsContext): void {
               isRequired: true,
             });
           }
+        } else if (modification?.showOnHome && canApplyShowOnHome) {
+          // Sending no genre already means `None`.
+          catalog.extra = catalog.extra!.map((e) =>
+            e.name === 'genre'
+              ? {
+                  ...e,
+                  isRequired: false,
+                  options: e.options?.filter((o) => o !== 'None'),
+                }
+              : e
+          );
         } else if (modification?.onlyOnSearch && canApplyOnlyOnSearch) {
           const searchExtra = catalog.extra?.find((e) => e.name === 'search');
           if (searchExtra) {

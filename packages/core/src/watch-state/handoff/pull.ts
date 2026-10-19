@@ -1,0 +1,1218 @@
+import { z } from 'zod';
+import { config as appConfig } from '../../config/index.js';
+import { createLogger } from '../../logging/logger.js';
+import { makeRequest } from '../../utils/http.js';
+import { readBodyCapped } from '../../utils/safe-fetch.js';
+import { getDb } from '../../db/db.js';
+import { TaskManager } from '../../tasks/index.js';
+import { randomUUID } from 'node:crypto';
+import { sinkProbeMs } from './deliver.js';
+import type { DbDriver } from '../../db/driver/types.js';
+import type { SqlFragment } from '../../db/sql.js';
+import {
+  PlaybackHandoffRepository,
+  type SinkRow,
+} from '../../db/repositories/playback-handoff.js';
+import {
+  WatchStateRepository,
+  type WatchIdentity,
+  type WatchStateRow,
+} from '../../db/repositories/watch-state.js';
+import {
+  WatchAirTimeRepository,
+  type WatchAirTime,
+} from '../../db/repositories/watch-air-times.js';
+import {
+  identityFor,
+  itemKeyFor,
+  scopeOf,
+  seriesKeyOf,
+  type WatchScope,
+} from '../types.js';
+import { matchKeysFor } from '../canonical.js';
+import { bySpelling } from '../lookup.js';
+import { playedThrough } from '../local-provider.js';
+import type { ContentRef } from '../types.js';
+
+const logger = createLogger('playback-pull');
+
+const REQUEST_TIMEOUT_MS = 20_000;
+
+/** A tracker's resume point already passed its own minimum, so imports allow a lower one. */
+const RESUME_MIN_PERCENT = 2;
+
+const StateItemSchema = z.looseObject({
+  type: z.string().optional(),
+  metaId: z.string().min(1),
+  videoId: z.string().min(1),
+  season: z.number().nullable().optional(),
+  episode: z.number().nullable().optional(),
+  positionMs: z.number().optional(),
+  durationMs: z.number().optional(),
+  progressPercent: z.number().optional(),
+  played: z.boolean().optional(),
+  at: z.number().optional(),
+});
+
+const StateNextUpSchema = z.looseObject({
+  type: z.string().optional(),
+  metaId: z.string().min(1),
+  videoId: z.string().min(1),
+  season: z.number().nullable().optional(),
+  episode: z.number().nullable().optional(),
+  at: z.number().optional(),
+  airsAt: z.number().nullable().optional(),
+});
+
+const StateWatchedSchema = z.looseObject({
+  movies: z.array(z.string()).optional(),
+  episodes: z.array(z.string()).optional(),
+  counts: z.record(z.string(), z.unknown()).optional(),
+  nextUp: z.array(StateNextUpSchema).optional(),
+  dropped: z.array(z.string().min(1)).optional(),
+});
+
+/* An unknown kind is dropped rather than failing the whole read. */
+const TitleKindSchema = z.enum(['movie', 'series']).optional().catch(undefined);
+
+const StateWatchlistEntrySchema = z.looseObject({
+  type: z.string().min(1),
+  kind: TitleKindSchema,
+  metaId: z.string().min(1),
+  at: z.number().optional(),
+});
+
+const StateRatingSchema = z.looseObject({
+  type: z.string().min(1),
+  kind: TitleKindSchema,
+  metaId: z.string().min(1),
+  videoId: z.string().min(1).optional(),
+  season: z.number().nullable().optional(),
+  episode: z.number().nullable().optional(),
+  rating: z.number(),
+  at: z.number().optional(),
+});
+
+const PlaybackStateSchema = z.looseObject({
+  version: z.string().optional(),
+  items: z.array(StateItemSchema).optional(),
+  watched: StateWatchedSchema.optional(),
+  watchlist: z.array(StateWatchlistEntrySchema).optional(),
+  ratings: z.array(StateRatingSchema).optional(),
+});
+
+export type PlaybackStatePayload = z.infer<typeof PlaybackStateSchema>;
+
+export interface PullOutcome {
+  /** The addon's version matched ours, so the watched half was not re-read. */
+  unchanged: boolean;
+  items: number;
+  watched: number;
+  watchlist: number;
+  dropped: number;
+  ratings: number;
+  removed: number;
+  skipped: number;
+}
+
+const EMPTY: PullOutcome = {
+  unchanged: true,
+  items: 0,
+  watched: 0,
+  watchlist: 0,
+  dropped: 0,
+  ratings: 0,
+  removed: 0,
+  skipped: 0,
+};
+
+/** Seconds or milliseconds; the contract says seconds but be forgiving. */
+function atMs(at: number | undefined, fallback: number): number {
+  if (!at || !Number.isFinite(at)) return fallback;
+  return Math.round(at > 1e11 ? at : at * 1000);
+}
+
+function episodeKeyOf(videoId: string): string {
+  return `e|${videoId}`;
+}
+
+function watchedKeysOf(watched: z.infer<typeof StateWatchedSchema>): string[] {
+  return [
+    ...(watched.movies ?? []).map((id) => `m|${id}`),
+    ...(watched.episodes ?? []).map(episodeKeyOf),
+  ];
+}
+
+/** Null when no duration is known: a percentage alone is not a position. */
+function positionOf(
+  item: z.infer<typeof StateItemSchema>,
+  existing: WatchStateRow | undefined
+): { positionMs: number; durationMs: number } | null {
+  const durationMs =
+    Math.round(item.durationMs && item.durationMs > 0 ? item.durationMs : 0) ||
+    existing?.durationMs ||
+    0;
+
+  if (item.positionMs != null && item.positionMs > 0) {
+    return { positionMs: Math.round(item.positionMs), durationMs };
+  }
+  if (item.progressPercent != null && item.progressPercent > 0) {
+    if (durationMs <= 0) return null;
+    return {
+      positionMs: Math.round((durationMs * item.progressPercent) / 100),
+      durationMs,
+    };
+  }
+  return null;
+}
+
+/**
+ * A local row inside the echo window is never touched: a tracker stamps our own
+ * report later than we wrote it, so "newer wins" alone reads it back as remote
+ * activity.
+ */
+function mayImport(
+  existing: WatchStateRow | undefined,
+  incomingAt: number,
+  now: number
+): boolean {
+  if (!existing) return true;
+
+  if (existing.origin === 'local') {
+    const echoWindowMs = appConfig.watchState.echoWindowSeconds * 1000;
+    if (now - existing.updatedAt < echoWindowMs) return false;
+    return incomingAt > (existing.lastPlayedAt ?? existing.updatedAt);
+  }
+
+  return incomingAt > (existing.externalAt ?? 0);
+}
+
+/** Trackers hold a rounded percentage of their own runtime, not our position. */
+const SAME_PROGRESS_PERCENT = 2;
+
+function percentOf(positionMs: number, durationMs: number | null | undefined) {
+  return durationMs && durationMs > 0 ? (positionMs / durationMs) * 100 : null;
+}
+
+type MatchKeys = Map<string, string | null>;
+
+/**
+ * Our own rows of each key's item under its other spellings. A tracker can echo
+ * our report under its own id, which as the newer spelling takes the item over.
+ */
+async function ownSpellings(
+  scope: WatchScope,
+  keys: string[],
+  matches: MatchKeys,
+  db: DbDriver
+): Promise<(key: string) => WatchStateRow[]> {
+  const rows = await WatchStateRepository.getSpellings(
+    scope,
+    keys.flatMap((key) => [key, matches.get(key) ?? '']),
+    db
+  );
+  const spellings = bySpelling(rows.filter((row) => row.origin === 'local'));
+  return (key) => {
+    const match = matches.get(key);
+    return [
+      ...(spellings.get(key) ?? []),
+      ...(match ? (spellings.get(match) ?? []) : []),
+    ].filter((row) => row.itemKey !== key);
+  };
+}
+
+function matchedIdentityFrom(
+  videoId: string,
+  opts: {
+    kind: 'movie' | 'episode';
+    type: string;
+    metaId: string;
+    season?: number | null;
+    episode?: number | null;
+  },
+  matches: MatchKeys
+): WatchIdentity {
+  const identity = identityFrom(videoId, opts);
+  return { ...identity, matchKey: matches.get(identity.itemKey) ?? null };
+}
+
+interface ImportResult {
+  written: number;
+  skipped: number;
+  listed: string[];
+  rekeyed: [string, string][];
+}
+
+/**
+ * An unchanged row is not rewritten, so a match key found after it was stored
+ * needs its own write.
+ */
+function staleMatchKeys(
+  existing: Map<string, WatchStateRow>,
+  matches: MatchKeys
+): [string, string][] {
+  const out: [string, string][] = [];
+  for (const [key, row] of existing) {
+    const match = matches.get(key);
+    if (match && match !== row.matchKey) out.push([key, match]);
+  }
+  return out;
+}
+
+/**
+ * Must run before the import transaction opens: the anime database reads on its
+ * own connection, which on SQLite is the one the transaction holds.
+ */
+async function matchKeysFrom(
+  payload: PlaybackStatePayload,
+  listed: Set<string>
+): Promise<MatchKeys> {
+  const refs: ContentRef[] = [];
+  for (const item of payload.items ?? []) {
+    const split = splitVideoId(item.videoId);
+    const isEpisode = item.episode != null || split.episode != null;
+    refs.push({
+      kind: isEpisode ? 'episode' : 'movie',
+      type: item.type || (isEpisode ? 'series' : 'movie'),
+      baseId: item.metaId,
+      season: item.season !== undefined ? item.season : split.season,
+      episode: item.episode !== undefined ? item.episode : split.episode,
+      videoId: item.videoId,
+    });
+  }
+  // Already imported ones have their match key stored.
+  for (const entry of payload.watchlist ?? []) {
+    const ref = watchlistRef(entry);
+    if (!listed.has(itemKeyFor(ref))) refs.push(ref);
+  }
+  for (const entry of payload.ratings ?? []) {
+    const ref = ratingRef(entry);
+    if (!listed.has(itemKeyFor(ref))) refs.push(ref);
+  }
+  for (const id of payload.watched?.movies ?? []) {
+    refs.push({ kind: 'movie', type: 'movie', baseId: id, videoId: id });
+  }
+  for (const videoId of payload.watched?.episodes ?? []) {
+    const split = splitVideoId(videoId);
+    refs.push({
+      kind: 'episode',
+      type: 'series',
+      baseId: split.metaId,
+      season: split.season,
+      episode: split.episode,
+      videoId,
+    });
+  }
+  for (const row of payload.watched?.nextUp ?? []) {
+    if (row.airsAt) refs.push(nextUpRef(row));
+  }
+
+  return matchKeysFor(refs);
+}
+
+function nextUpRef(row: z.infer<typeof StateNextUpSchema>): ContentRef {
+  const split = splitVideoId(row.videoId);
+  return {
+    kind: 'episode',
+    type: row.type || 'series',
+    baseId: row.metaId,
+    season: row.season !== undefined ? row.season : split.season,
+    episode: row.episode !== undefined ? row.episode : split.episode,
+    videoId: row.videoId,
+  };
+}
+
+function airTimesFrom(
+  nextUp: z.infer<typeof StateNextUpSchema>[],
+  matches: MatchKeys
+): WatchAirTime[] {
+  const out = new Map<string, WatchAirTime>();
+  for (const row of nextUp) {
+    const airsAt = atMs(row.airsAt ?? undefined, 0);
+    if (!airsAt) continue;
+    const ref = nextUpRef(row);
+    const identity = matchedIdentityFrom(
+      row.videoId,
+      {
+        kind: 'episode',
+        type: ref.type,
+        metaId: row.metaId,
+        season: ref.season,
+        episode: ref.episode,
+      },
+      matches
+    );
+    const held = out.get(identity.itemKey);
+    if (held && held.airsAt >= airsAt) continue;
+    out.set(identity.itemKey, {
+      itemKey: identity.itemKey,
+      matchKey: identity.matchKey ?? null,
+      seriesKey: seriesKeyOf(row.metaId),
+      mediaType: identity.mediaType,
+      airsAt,
+    });
+  }
+  return [...out.values()];
+}
+
+function identityFrom(
+  videoId: string,
+  opts: {
+    kind: 'movie' | 'episode';
+    type: string;
+    metaId: string;
+    season?: number | null;
+    episode?: number | null;
+  }
+): WatchIdentity {
+  if (opts.kind === 'movie') {
+    return {
+      itemKey: `m|${opts.metaId}`,
+      kind: 'movie',
+      mediaType: opts.type,
+      baseId: opts.metaId,
+      season: null,
+      episode: null,
+      videoId,
+      seriesKey: null,
+    };
+  }
+  return {
+    itemKey: episodeKeyOf(videoId),
+    kind: 'episode',
+    mediaType: opts.type,
+    baseId: opts.metaId,
+    season: opts.season ?? null,
+    episode: opts.episode ?? null,
+    videoId,
+    seriesKey: seriesKeyOf(opts.metaId),
+  };
+}
+
+/** `tt0903747:3:11` -> base `tt0903747`, season 3, episode 11. */
+function splitVideoId(videoId: string): {
+  metaId: string;
+  season: number | null;
+  episode: number | null;
+} {
+  const parts = videoId.split(':');
+  const tail: number[] = [];
+  while (parts.length > 1 && /^\d+$/.test(parts[parts.length - 1])) {
+    // A prefixed id keeps its own numeric segment: kitsu:42323 is the base.
+    if (parts.length === 2 && !/^tt\d+$/.test(parts[0])) break;
+    tail.unshift(Number(parts.pop()));
+  }
+  const metaId = parts.join(':');
+  if (tail.length >= 2) {
+    return { metaId, season: tail[0], episode: tail[1] };
+  }
+  if (tail.length === 1) return { metaId, season: null, episode: tail[0] };
+  return { metaId, season: null, episode: null };
+}
+
+type ImportRow = { identity: WatchIdentity; values: SqlFragment };
+
+async function importItems(
+  scope: WatchScope,
+  sink: SinkRow,
+  items: z.infer<typeof StateItemSchema>[],
+  now: number,
+  db: DbDriver,
+  matches: MatchKeys,
+  watched: ReadonlySet<string>
+): Promise<ImportResult> {
+  if (!items.length) return { written: 0, skipped: 0, listed: [], rekeyed: [] };
+
+  const keys = items.map((i) =>
+    i.episode != null || splitVideoId(i.videoId).episode != null
+      ? episodeKeyOf(i.videoId)
+      : `m|${i.metaId}`
+  );
+  const existingRows = await WatchStateRepository.getMany(scope, keys, db);
+  const ownRows = await ownSpellings(scope, keys, matches, db);
+
+  const rows: ImportRow[] = [];
+  const listed: string[] = [];
+  let skipped = 0;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const key = keys[i];
+    const existing = existingRows.get(key);
+    const at = atMs(item.at, now);
+
+    const position = positionOf(item, existing);
+    const finished =
+      !!position && playedThrough(position.positionMs, position.durationMs);
+    // A paused point never unwatches a title.
+    const played =
+      finished ||
+      item.played === true ||
+      !!existing?.played ||
+      watched.has(key);
+
+    const tooEarly =
+      !!position &&
+      position.durationMs > 0 &&
+      position.positionMs <
+        (position.durationMs *
+          Math.min(RESUME_MIN_PERCENT, appConfig.watchState.minResumePercent)) /
+          100;
+    const positionMs = finished || tooEarly ? 0 : (position?.positionMs ?? 0);
+    const progress = position
+      ? percentOf(position.positionMs, position.durationMs)
+      : null;
+    const sameAs = (row: WatchStateRow) => {
+      const held = percentOf(row.positionMs, row.durationMs);
+      return (
+        row.played === played &&
+        progress !== null &&
+        held !== null &&
+        Math.abs(held - progress) <= SAME_PROGRESS_PERCENT
+      );
+    };
+
+    if (ownRows(key).some((row) => !mayImport(row, at, now) || sameAs(row))) {
+      skipped++;
+      continue;
+    }
+
+    if (!mayImport(existing, at, now)) {
+      skipped++;
+      if (existing) listed.push(key);
+      continue;
+    }
+
+    const isEpisode = key.startsWith('e|');
+    const split = splitVideoId(item.videoId);
+    const identity = matchedIdentityFrom(
+      item.videoId,
+      {
+        kind: isEpisode ? 'episode' : 'movie',
+        // The addon's own type where it gave one, otherwise what we already had.
+        type:
+          item.type || existing?.mediaType || (isEpisode ? 'series' : 'movie'),
+        metaId: item.metaId,
+        season: item.season !== undefined ? item.season : split.season,
+        episode: item.episode !== undefined ? item.episode : split.episode,
+      },
+      matches
+    );
+
+    if (item.played !== true && !position) {
+      skipped++;
+      if (existing) listed.push(key);
+      continue;
+    }
+
+    rows.push({
+      identity,
+      values: WatchStateRepository.importValues(scope, identity, {
+        positionMs,
+        durationMs: position?.durationMs ?? 0,
+        played,
+        lastPlayedAt: at,
+        externalAt: at,
+        sinkId: sink.id,
+        now,
+      }),
+    });
+  }
+  await WatchStateRepository.upsertImports(scope, rows, db);
+  for (const row of rows) listed.push(row.identity.itemKey);
+  return {
+    written: rows.length,
+    skipped,
+    listed,
+    rekeyed: staleMatchKeys(existingRows, matches),
+  };
+}
+
+async function importWatched(
+  scope: WatchScope,
+  sink: SinkRow,
+  watched: z.infer<typeof StateWatchedSchema>,
+  now: number,
+  db: DbDriver,
+  matches: MatchKeys
+): Promise<ImportResult> {
+  const movies = watched.movies ?? [];
+  const episodes = watched.episodes ?? [];
+  const nextUp = watched.nextUp ?? [];
+
+  // Next-up rows name their show's type, which the bare id lists cannot.
+  const typeByMeta = new Map<string, string>();
+  for (const row of nextUp) {
+    if (row.type) typeByMeta.set(row.metaId, row.type);
+  }
+
+  // No time per title, only a last watch per show; a row without one sorts as old.
+  const watchedAt = new Map<string, number>();
+  const noteWatch = (metaId: string, at: unknown) => {
+    if (typeof at !== 'number' || !(at > 0)) return;
+    const ms = atMs(at, 0);
+    if (ms > (watchedAt.get(metaId) ?? 0)) watchedAt.set(metaId, ms);
+  };
+  for (const [metaId, count] of Object.entries(watched.counts ?? {})) {
+    noteWatch(metaId, (count as { at?: unknown } | null)?.at);
+  }
+  for (const row of nextUp) noteWatch(row.metaId, row.at);
+
+  const keys = watchedKeysOf(watched);
+  const existingRows = await WatchStateRepository.getMany(scope, keys, db);
+  const ownRows = await ownSpellings(scope, keys, matches, db);
+
+  const rows: ImportRow[] = [];
+  const listed: string[] = [];
+  let skipped = 0;
+
+  const write = (
+    key: string,
+    identity: WatchIdentity,
+    existing?: WatchStateRow
+  ) => {
+    if (ownRows(key).some((row) => row.played || !mayImport(row, now, now))) {
+      skipped++;
+      return;
+    }
+    const showAt = watchedAt.get(identity.baseId) ?? 0;
+    /* Imported as played, or mid rewatch: marking it seen is enough. */
+    if (
+      existing?.played &&
+      (existing.positionMs > 0 ||
+        (existing.origin === 'import' && existing.sinkId === sink.id))
+    ) {
+      listed.push(key);
+      return;
+    }
+    if (!mayImport(existing, now, now)) {
+      skipped++;
+      if (existing) listed.push(key);
+      return;
+    }
+    rows.push({
+      identity,
+      values: WatchStateRepository.importValues(scope, identity, {
+        positionMs: 0,
+        durationMs: existing?.durationMs ?? 0,
+        played: true,
+        lastPlayedAt: existing?.lastPlayedAt ?? null,
+        sortAt: Math.max(existing?.sortAt ?? 0, showAt),
+        externalAt: now,
+        sinkId: sink.id,
+        now,
+      }),
+    });
+  };
+
+  for (const id of movies) {
+    const key = `m|${id}`;
+    const existing = existingRows.get(key);
+    write(
+      key,
+      matchedIdentityFrom(
+        id,
+        {
+          kind: 'movie',
+          type: typeByMeta.get(id) || existing?.mediaType || 'movie',
+          metaId: id,
+        },
+        matches
+      ),
+      existing
+    );
+  }
+
+  for (const videoId of episodes) {
+    const key = episodeKeyOf(videoId);
+    const existing = existingRows.get(key);
+    const split = splitVideoId(videoId);
+    write(
+      key,
+      matchedIdentityFrom(
+        videoId,
+        {
+          kind: 'episode',
+          type: typeByMeta.get(split.metaId) || existing?.mediaType || 'series',
+          metaId: split.metaId,
+          season: split.season,
+          episode: split.episode,
+        },
+        matches
+      ),
+      existing
+    );
+  }
+
+  await WatchStateRepository.upsertImports(scope, rows, db);
+  for (const row of rows) listed.push(row.identity.itemKey);
+  return {
+    written: rows.length,
+    skipped,
+    listed,
+    rekeyed: staleMatchKeys(existingRows, matches),
+  };
+}
+
+/** Without a `kind`, every non-movie type is a show, as when browsed. */
+function isFilm(entry: { type: string; kind?: 'movie' | 'series' }): boolean {
+  return (entry.kind ?? entry.type) === 'movie';
+}
+
+function watchlistRef(
+  entry: z.infer<typeof StateWatchlistEntrySchema>
+): ContentRef {
+  return isFilm(entry)
+    ? {
+        kind: 'movie',
+        type: entry.type,
+        baseId: entry.metaId,
+        videoId: entry.metaId,
+      }
+    : { kind: 'series', type: entry.type, baseId: entry.metaId };
+}
+
+/**
+ * A favourite toggled here inside the echo window, or set by another addon's
+ * watchlist, is left alone; so is one set here under another spelling.
+ */
+async function importWatchlist(
+  scope: WatchScope,
+  sink: SinkRow,
+  entries: z.infer<typeof StateWatchlistEntrySchema>[],
+  now: number,
+  db: DbDriver,
+  matches: MatchKeys
+): Promise<{ written: number; touched: string[] }> {
+  const identities = entries.map((entry) => {
+    const identity = identityFor(watchlistRef(entry));
+    return {
+      identity: {
+        ...identity,
+        matchKey: matches.get(identity.itemKey) ?? null,
+      },
+      at: atMs(entry.at, now),
+    };
+  });
+  const keysOf = ({ identity }: (typeof identities)[number]) =>
+    identity.matchKey
+      ? [identity.itemKey, identity.matchKey]
+      : [identity.itemKey];
+  const spellings = bySpelling(
+    await WatchStateRepository.getSpellings(
+      scope,
+      identities.flatMap(keysOf),
+      db
+    )
+  );
+  const echoWindowMs = appConfig.watchState.echoWindowSeconds * 1000;
+  const rows: typeof identities = [];
+  const touched: string[] = [];
+  for (const row of identities) {
+    const held = keysOf(row).flatMap((key) => spellings.get(key) ?? []);
+    const mine = held.find((h) => h.favorite && h.favoriteSinkId === sink.id);
+    if (mine) {
+      touched.push(mine.itemKey);
+      continue;
+    }
+    if (held.some((h) => h.favorite && h.favoriteSinkId)) continue;
+    const toggledHere = held.some(
+      (h) =>
+        !h.favoriteSinkId &&
+        h.favoriteAt != null &&
+        now - h.favoriteAt < echoWindowMs
+    );
+    if (toggledHere) continue;
+    if (held.some((h) => h.favorite && h.itemKey !== row.identity.itemKey))
+      continue;
+    rows.push(row);
+  }
+  await WatchStateRepository.upsertWatchlist(scope, sink.id, rows, now, db);
+  return { written: rows.length, touched };
+}
+
+/** A `videoId` other than the meta rates that episode, a `season` that season. */
+function ratingRef(entry: z.infer<typeof StateRatingSchema>): ContentRef {
+  if (entry.videoId && entry.videoId !== entry.metaId) {
+    const split = splitVideoId(entry.videoId);
+    return {
+      kind: 'episode',
+      type: entry.type,
+      baseId: entry.metaId,
+      season: entry.season !== undefined ? entry.season : split.season,
+      episode: entry.episode !== undefined ? entry.episode : split.episode,
+      videoId: entry.videoId,
+    };
+  }
+  if (!isFilm(entry) && entry.season != null)
+    return {
+      kind: 'season',
+      type: entry.type,
+      baseId: entry.metaId,
+      season: entry.season,
+    };
+  return watchlistRef(entry);
+}
+
+type RatingImport = { identity: WatchIdentity; rating: number; at: number };
+
+/** The same rules as {@link importWatchlist}; a changed rating is written again. */
+async function importRatings(
+  scope: WatchScope,
+  sink: SinkRow,
+  entries: z.infer<typeof StateRatingSchema>[],
+  now: number,
+  db: DbDriver,
+  matches: MatchKeys
+): Promise<{ written: number; touched: string[] }> {
+  const byKey = new Map<string, RatingImport>();
+  for (const entry of entries) {
+    if (!(entry.rating >= 0 && entry.rating <= 10)) continue;
+    const identity = identityFor(ratingRef(entry));
+    byKey.set(identity.itemKey, {
+      identity: {
+        ...identity,
+        matchKey: matches.get(identity.itemKey) ?? null,
+      },
+      rating: entry.rating,
+      at: atMs(entry.at, now),
+    });
+  }
+  const existing = await WatchStateRepository.getMany(
+    scope,
+    [...byKey.keys()],
+    db
+  );
+  const echoWindowMs = appConfig.watchState.echoWindowSeconds * 1000;
+  const rows: RatingImport[] = [];
+  const touched: string[] = [];
+  for (const row of byKey.values()) {
+    const held = existing.get(row.identity.itemKey);
+    if (held?.ratingSinkId === sink.id && held.rating === row.rating) {
+      touched.push(row.identity.itemKey);
+      continue;
+    }
+    if (held?.ratingSinkId && held.ratingSinkId !== sink.id) continue;
+    const setHere = held && !held.ratingSinkId && held.ratingAt != null;
+    if (setHere && now - held.ratingAt! < echoWindowMs) continue;
+    rows.push(row);
+  }
+  await WatchStateRepository.upsertRatings(scope, sink.id, rows, now, db);
+  return { written: rows.length, touched };
+}
+
+/** The same rules as {@link importWatchlist}. */
+async function importDropped(
+  scope: WatchScope,
+  sink: SinkRow,
+  ids: string[],
+  now: number,
+  db: DbDriver
+): Promise<{ written: number; touched: string[] }> {
+  const identities = [...new Set(ids)].map((id) =>
+    identityFor({ kind: 'series', type: 'series', baseId: id })
+  );
+  const existing = await WatchStateRepository.getMany(
+    scope,
+    identities.map((i) => i.itemKey),
+    db
+  );
+  const echoWindowMs = appConfig.watchState.echoWindowSeconds * 1000;
+  const rows: WatchIdentity[] = [];
+  const touched: string[] = [];
+  for (const identity of identities) {
+    const held = existing.get(identity.itemKey);
+    if (held?.dropped && held.droppedSinkId === sink.id) {
+      touched.push(identity.itemKey);
+      continue;
+    }
+    if (held?.dropped && held.droppedSinkId) continue;
+    const toggledHere = held && !held.droppedSinkId && held.droppedAt != null;
+    if (toggledHere && now - held.droppedAt! < echoWindowMs) continue;
+    rows.push(identity);
+  }
+  await WatchStateRepository.upsertDropped(scope, sink.id, rows, now, db);
+  return { written: rows.length, touched };
+}
+
+async function fetchState(sink: SinkRow): Promise<PlaybackStatePayload | null> {
+  if (!sink.pullUrl) return null;
+  const url = new URL(sink.pullUrl);
+  if (sink.pullVersion) url.searchParams.set('since', sink.pullVersion);
+
+  const res = await makeRequest(url.toString(), {
+    method: 'GET',
+    timeout: REQUEST_TIMEOUT_MS,
+    headers: { Accept: 'application/json' },
+    // Server-initiated and repeated by design.
+    ignoreRecursion: true,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  /*
+   * Oversized answers fail the whole read and must never be truncated instead:
+   * `watched` is a complete set, so a partial one sweeps everything missing.
+   */
+  const body = await readBodyCapped(
+    res,
+    appConfig.watchState.pullMaxResponseBytes
+  );
+  const parsed = PlaybackStateSchema.safeParse(
+    JSON.parse(body.toString('utf8'))
+  );
+  if (!parsed.success) throw new Error('unreadable state payload');
+
+  const cfg = appConfig.watchState;
+  const watched = parsed.data.watched;
+  const counts: [string, number, number][] = [
+    ['items', parsed.data.items?.length ?? 0, cfg.pullMaxItems],
+    ['movies', watched?.movies?.length ?? 0, cfg.pullMaxWatched],
+    ['episodes', watched?.episodes?.length ?? 0, cfg.pullMaxWatched],
+    ['watchlist', parsed.data.watchlist?.length ?? 0, cfg.pullMaxWatched],
+    ['dropped', watched?.dropped?.length ?? 0, cfg.pullMaxWatched],
+    ['ratings', parsed.data.ratings?.length ?? 0, cfg.pullMaxWatched],
+  ];
+  for (const [what, got, max] of counts) {
+    if (got > max) throw new Error(`${what} list of ${got} exceeds ${max}`);
+  }
+  return parsed.data;
+}
+
+/** How long a claimed read is held before another instance may take it over. */
+function pullLeaseMs(): number {
+  return REQUEST_TIMEOUT_MS + 60_000;
+}
+
+/** Spreads retries out without pushing a sink beyond reach of a recovery. */
+function pullBackoffMs(failures: number): number {
+  return Math.min(60_000 * 2 ** Math.max(0, failures - 1), 6 * 3_600_000);
+}
+
+/**
+ * `watched` is a complete set when present, so an absent block and an empty one
+ * mean different things: absent changes nothing, empty clears every imported row.
+ */
+export async function pullSink(
+  sink: SinkRow,
+  token: string | null = null
+): Promise<PullOutcome> {
+  if (!appConfig.watchState.pullEnabled || !sink.pullUrl) return EMPTY;
+
+  const cfg = appConfig.watchState;
+  const now = Date.now();
+  let payload: PlaybackStatePayload | null;
+  try {
+    payload = await fetchState(sink);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const reauth = /HTTP 40[13]/.test(message);
+    const failures = sink.pullFailures + 1;
+    const disable = !reauth && failures >= cfg.deliveryFailuresBeforeDisable;
+    /* Delivery never touches a read-only addon, so health is set here alone. */
+    await PlaybackHandoffRepository.finishPull(sink.id, token, {
+      at: now,
+      nextPullAt:
+        now + (reauth || disable ? sinkProbeMs() : pullBackoffMs(failures)),
+      error: message,
+      failures,
+      status: reauth ? 'auth_expired' : disable ? 'error' : undefined,
+    });
+    logger.warn(
+      { addon: sink.addonName, err: message, failures },
+      'failed to read watch state from addon'
+    );
+    return EMPTY;
+  }
+  if (!payload) return EMPTY;
+
+  const scope = scopeOf(sink);
+  let items: ImportResult = {
+    written: 0,
+    skipped: 0,
+    listed: [],
+    rekeyed: [],
+  };
+  let watchedWritten = 0;
+  let watchedSkipped = 0;
+  let watchlistWritten = 0;
+  let droppedWritten = 0;
+  let ratingsWritten = 0;
+  let removed = 0;
+  const unchanged = !payload.watched;
+
+  /*
+   * One transaction, so a concurrent read cannot sweep rows this one has
+   * written. The fetch stays outside it: on SQLite a transaction holds the
+   * single connection.
+   */
+  const listKeys = [
+    ...(payload.watchlist ?? []).map((entry) =>
+      itemKeyFor(watchlistRef(entry))
+    ),
+    ...(payload.ratings ?? []).map((entry) => itemKeyFor(ratingRef(entry))),
+  ];
+  const held = listKeys.length
+    ? await WatchStateRepository.getMany(scope, listKeys)
+    : new Map<string, WatchStateRow>();
+  const listed = new Set(
+    [...held.values()]
+      .filter(
+        (row) =>
+          (row.favorite && row.favoriteSinkId === sink.id) ||
+          (row.rating != null && row.ratingSinkId === sink.id)
+      )
+      .map((row) => row.itemKey)
+  );
+  const matches = await matchKeysFrom(payload, listed);
+
+  await getDb().tx(async (tx) => {
+    items = await importItems(
+      scope,
+      sink,
+      payload.items ?? [],
+      now,
+      tx,
+      matches,
+      new Set(payload.watched ? watchedKeysOf(payload.watched) : [])
+    );
+    const imported = new Set(items.listed);
+    await WatchStateRepository.setMatchKeys(scope, items.rekeyed, tx);
+
+    // Always complete, so anything it stopped reporting goes now.
+    removed = await WatchStateRepository.deleteStaleImports(
+      scope,
+      sink.id,
+      now,
+      'resume',
+      imported,
+      tx
+    );
+    removed += await WatchStateRepository.clearStaleRewatches(
+      scope,
+      sink.id,
+      now,
+      imported,
+      tx
+    );
+
+    if (payload.watched) {
+      const res = await importWatched(
+        scope,
+        sink,
+        payload.watched,
+        now,
+        tx,
+        matches
+      );
+      watchedWritten = res.written;
+      watchedSkipped = res.skipped;
+      for (const key of res.listed) imported.add(key);
+      await WatchStateRepository.setMatchKeys(scope, res.rekeyed, tx);
+      await WatchAirTimeRepository.replace(
+        scope,
+        sink.id,
+        airTimesFrom(payload.watched.nextUp ?? [], matches),
+        tx
+      );
+      removed += await WatchStateRepository.deleteStaleImports(
+        scope,
+        sink.id,
+        now,
+        'watched',
+        imported,
+        tx
+      );
+
+      // Complete when present, like the watchlist.
+      if (payload.watched.dropped) {
+        const drops = await importDropped(
+          scope,
+          sink,
+          payload.watched.dropped,
+          now,
+          tx
+        );
+        droppedWritten = drops.written;
+        await WatchStateRepository.touchDropped(
+          scope,
+          sink.id,
+          drops.touched,
+          now,
+          tx
+        );
+        removed += await WatchStateRepository.clearStaleDropped(
+          scope,
+          sink.id,
+          now,
+          tx
+        );
+      }
+    }
+
+    // Complete when present, like `watched`.
+    if (payload.watchlist) {
+      const res = await importWatchlist(
+        scope,
+        sink,
+        payload.watchlist,
+        now,
+        tx,
+        matches
+      );
+      watchlistWritten = res.written;
+      await WatchStateRepository.touchWatchlist(
+        scope,
+        sink.id,
+        res.touched,
+        now,
+        tx
+      );
+      removed += await WatchStateRepository.clearStaleWatchlist(
+        scope,
+        sink.id,
+        now,
+        tx
+      );
+    }
+
+    if (payload.ratings) {
+      const res = await importRatings(
+        scope,
+        sink,
+        payload.ratings,
+        now,
+        tx,
+        matches
+      );
+      ratingsWritten = res.written;
+      await WatchStateRepository.touchRatings(
+        scope,
+        sink.id,
+        res.touched,
+        now,
+        tx
+      );
+      removed += await WatchStateRepository.clearStaleRatings(
+        scope,
+        sink.id,
+        now,
+        tx
+      );
+    }
+  });
+
+  await PlaybackHandoffRepository.finishPull(sink.id, token, {
+    at: now,
+    nextPullAt: Date.now() + cfg.pullIntervalSeconds * 1000,
+    version: payload.version ?? null,
+    failures: 0,
+    status: sink.status === 'connected' ? undefined : 'connected',
+  });
+
+  const outcome: PullOutcome = {
+    unchanged,
+    items: items.written,
+    watched: watchedWritten,
+    watchlist: watchlistWritten,
+    dropped: droppedWritten,
+    ratings: ratingsWritten,
+    removed,
+    skipped: items.skipped + watchedSkipped,
+  };
+  if (
+    outcome.items ||
+    outcome.watched ||
+    outcome.watchlist ||
+    outcome.dropped ||
+    outcome.ratings ||
+    outcome.removed
+  ) {
+    logger.debug({ addon: sink.addonName, ...outcome }, 'imported watch state');
+  }
+  return outcome;
+}
+
+/** The scheduled read. Sinks are created by a request, never by this. */
+export async function pullPlaybackState(): Promise<{
+  sinks: number;
+  items: number;
+  watched: number;
+  removed: number;
+}> {
+  const totals = { sinks: 0, items: 0, watched: 0, removed: 0 };
+  if (!appConfig.watchState.pullEnabled) return totals;
+
+  const cfg = appConfig.watchState;
+  const now = Date.now();
+  const token = `${TaskManager.instanceId}:${randomUUID()}`;
+
+  const activeSince = cfg.pullActiveWithinHours
+    ? now - cfg.pullActiveWithinHours * 3_600_000
+    : 0;
+  const sinks = await PlaybackHandoffRepository.claimPullSinks(
+    token,
+    now,
+    pullLeaseMs(),
+    cfg.pullMaxSinksPerRun,
+    activeSince
+  );
+  if (!sinks.length) return totals;
+
+  const deadline = now + cfg.pullBudgetSeconds * 1000;
+  let next = 0;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(cfg.pullConcurrency, sinks.length) },
+      async () => {
+        for (let i = next++; i < sinks.length; i = next++) {
+          const sink = sinks[i];
+          if (Date.now() >= deadline) {
+            // Released as still due, rather than left for the lease to expire.
+            await PlaybackHandoffRepository.finishPull(sink.id, token, {
+              at: sink.lastPullAt ?? 0,
+              nextPullAt: 0,
+            }).catch(() => undefined);
+            continue;
+          }
+          const outcome = await pullSink(sink, token).catch((error) => {
+            logger.warn(
+              {
+                addon: sink.addonName,
+                err: error instanceof Error ? error.message : String(error),
+              },
+              'watch state read failed'
+            );
+            return EMPTY;
+          });
+          totals.sinks++;
+          totals.items += outcome.items;
+          totals.watched += outcome.watched;
+          totals.removed += outcome.removed;
+        }
+      }
+    )
+  );
+  return totals;
+}
+
+/**
+ * Never awaited by a shelf: a slow addon must not delay one.
+ *
+ * The claim is the staleness check; see {@link PlaybackHandoffRepository.claimPullSink}.
+ */
+export function refreshSinkIfStale(sink: SinkRow): void {
+  if (!appConfig.watchState.pullEnabled || !sink.pullUrl) return;
+  const token = `${TaskManager.instanceId}:${randomUUID()}`;
+  const now = Date.now();
+  const staleBefore = now - appConfig.watchState.pullTtlSeconds * 1000;
+  void (async () => {
+    const claimed = await PlaybackHandoffRepository.claimPullSink(
+      sink.id,
+      token,
+      now,
+      pullLeaseMs(),
+      staleBefore
+    );
+    if (!claimed) return;
+    await pullSink(sink, token);
+  })().catch(() => undefined);
+}

@@ -4,8 +4,8 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-} from '@/components/ui/card';
-import { cn } from '@/components/ui/core/styling';
+} from '@aiostreams/ui/card';
+import { cn } from '@aiostreams/ui/core/styling';
 import React, { useRef, useState } from 'react';
 
 type SettingsCardProps = {
@@ -35,7 +35,7 @@ export function SettingsNavCard({ title, children }: SettingsCardProps) {
       <div
         ref={cardRef}
         onMouseMove={handleMouseMove}
-        className="lg:p-2 lg:border lg:rounded-[--radius] lg:bg-gray-950/70 contents lg:block relative group/settings-nav"
+        className="contents lg:block relative group/settings-nav"
         // className=" contents lg:block relative group/settings-nav overflow-hidden"
       >
         {/* <div

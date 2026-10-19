@@ -386,7 +386,7 @@ export const presetsSchema = {
   }),
   marvelUniverse: basicPreset({
     label: 'Marvel Universe',
-    default: ['https://addon-marvel.onrender.com'],
+    default: ['https://addon-marvel.gonp.deno.net'],
     envBase: 'MARVEL_UNIVERSE_URL',
     timeoutEnv: 'DEFAULT_MARVEL_CATALOG_TIMEOUT',
     userAgentEnv: 'DEFAULT_MARVEL_CATALOG_USER_AGENT',
@@ -465,7 +465,7 @@ export const presetsSchema = {
   }),
   webstreamr: basicPreset({
     label: 'WebStreamr',
-    default: ['https://webstreamr.hayd.uk'],
+    default: ['https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club'],
     envBase: 'WEBSTREAMR_URL',
     timeoutEnv: 'DEFAULT_WEBSTREAMR_TIMEOUT',
     userAgentEnv: 'DEFAULT_WEBSTREAMR_USER_AGENT',
@@ -504,6 +504,15 @@ export const presetsSchema = {
     envBase: 'USA_TV_URL',
     timeoutEnv: 'DEFAULT_USA_TV_TIMEOUT',
     userAgentEnv: 'DEFAULT_USA_TV_USER_AGENT',
+  }),
+  usaTvNext: basicPreset({
+    label: 'USA TV Next',
+    default: [
+      'https://raw.githubusercontent.com/yowmamasita/usa-tv-next/main/manifest.json',
+    ],
+    envBase: 'USA_TV_NEXT_URL',
+    timeoutEnv: 'DEFAULT_USA_TV_NEXT_TIMEOUT',
+    userAgentEnv: 'DEFAULT_USA_TV_NEXT_USER_AGENT',
   }),
   argentinaTv: basicPreset({
     label: 'Argentina TV',

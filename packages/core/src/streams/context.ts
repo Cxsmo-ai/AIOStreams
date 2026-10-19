@@ -7,9 +7,12 @@ import {
   AnimeEntry,
   IdParser,
   ParsedId,
+  RegexAccess,
   createLogger,
   getSeaDexInfoHashes,
   enrichParsedIdWithAnimeEntry,
+  getTmdbEpisode,
+  type PermittedPatterns,
 } from '../utils/index.js';
 import { SeaDexResult } from '../utils/seadex.js';
 import {
@@ -17,6 +20,7 @@ import {
   isNonAnimeAbsoluteEligible,
 } from '../builtins/utils/general.js';
 import { iso6391ToLanguage } from '../utils/languages.js';
+import { config as appConfig } from '../config/index.js';
 
 const logger = createLogger('stream-context');
 
@@ -57,6 +61,8 @@ export interface ExpressionContext {
   malId?: number;
   // SeaDex availability
   hasSeaDex?: boolean;
+  /** Health check results for this request, backing `health('<id>')`. */
+  health?: Record<string, boolean>;
 }
 /**
  * StreamContext encapsulates all request-specific data that can be shared
@@ -98,6 +104,8 @@ export class StreamContext {
   // public readonly yearWithinTitle: string | undefined;
   // public readonly yearWithinTitleRegex: RegExp | undefined;
 
+  private _permittedPatterns: Promise<PermittedPatterns> | undefined;
+
   // User data reference
   private readonly userData: UserData;
 
@@ -123,30 +131,28 @@ export class StreamContext {
 
   /**
    * Create a StreamContext for a request.
-   * This performs initial synchronous lookups from the AnimeDatabase.
+   * This performs the initial AnimeDatabase lookup for the request.
    */
-  public static create(
+  public static async create(
     type: string,
     id: string,
     userData: UserData
-  ): StreamContext {
+  ): Promise<StreamContext> {
     const start = Date.now();
     const parsedId = IdParser.parse(id, type);
     let isAnime = id.startsWith('kitsu');
 
     const animeDb = AnimeDatabase.getInstance();
-    if (animeDb.isAnime(id)) {
-      isAnime = true;
-    }
 
     let animeEntry: AnimeEntry | null = null;
     if (parsedId) {
-      animeEntry = animeDb.getEntryById(
+      animeEntry = await animeDb.getEntryById(
         parsedId.type,
         parsedId.value,
         parsedId.season ? Number(parsedId.season) : undefined,
         parsedId.episode ? Number(parsedId.episode) : undefined
       );
+      if (animeEntry) isAnime = true;
 
       // Enrich parsedId with anime entry data if available and no season specified
       if (animeEntry && !parsedId.season) {
@@ -407,16 +413,11 @@ export class StreamContext {
         let seasonNumber = originalSeason;
         let episodeNumber = Number(this.parsedId.episode);
         if (this.isAnime && this.animeEntry) {
-          seasonNumber = this.animeEntry.tmdb?.seasonNumber ?? seasonNumber;
-          if (this.animeEntry.tmdb?.fromEpisode) {
-            const fromEpisode = Number(this.animeEntry.tmdb.fromEpisode);
-            if (
-              seasonNumber !== originalSeason ||
-              episodeNumber < fromEpisode
-            ) {
-              episodeNumber = fromEpisode + episodeNumber - 1;
-            }
-          }
+          ({ seasonNumber, episodeNumber } = getTmdbEpisode(
+            this.parsedId,
+            this.animeEntry,
+            metadata.seasons ?? []
+          ));
           logger.debug(
             {
               originalSeason,
@@ -509,6 +510,14 @@ export class StreamContext {
     this.startSeaDexFetch();
     this.startReleaseDatesFetch();
     this.startEpisodeDetailsFetch();
+  }
+
+  public getPermittedPatterns(): Promise<PermittedPatterns> {
+    this._permittedPatterns ??= RegexAccess.resolvePermitted(
+      this.userData,
+      RegexAccess.syncedUrlsOf(this.userData)
+    );
+    return this._permittedPatterns;
   }
 
   /**
@@ -613,8 +622,12 @@ export class StreamContext {
   }
 
   private computeAgeInDays(): number | undefined {
-    if (this.type === 'series' && this._episodeDetails?.airDate) {
-      return this.getDaysSince(this._episodeDetails.airDate);
+    const episodeDate =
+      this.type === 'series'
+        ? this._episodeDetails?.airDate || this._metadata?.episodeReleased
+        : undefined;
+    if (episodeDate) {
+      return this.getDaysSince(episodeDate);
     } else if (this._metadata?.releaseDate) {
       return this.getDaysSince(this._metadata.releaseDate);
     }
@@ -668,6 +681,8 @@ export class StreamContext {
 
     return {
       userData: this.userData,
+      addonName: appConfig.branding.addonName,
+      onWarning: (message) => logger.warn(message),
       type: this.type,
       isAnime: this.isAnime,
       queryType: this.queryType,
@@ -747,6 +762,7 @@ export class StreamContext {
       hasSeaDex: !!(
         this._seadex?.allHashes?.size || this._seadex?.allGroups?.size
       ),
+      health: this.userData.healthResults,
     };
   }
 }

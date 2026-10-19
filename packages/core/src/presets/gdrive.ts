@@ -21,12 +21,6 @@ export class GDriveParser extends StreamParser {
       throw new Error(stream.description ?? 'Unknown error');
     }
   }
-  protected getDuration(
-    stream: Stream,
-    currentParsedStream: ParsedStream
-  ): number | undefined {
-    return (stream as any).duration as number | undefined;
-  }
 }
 
 export class GDrivePreset extends Preset {
@@ -152,7 +146,7 @@ export class GDrivePreset extends Preset {
       ID: 'stremio-gdrive',
       NAME: 'Stremio GDrive',
       DESCRIPTION: 'Access content from your Google Drive in Stremio!',
-      LOGO: `https://upload.wikimedia.org/wikipedia/commons/thumb/1/12/Google_Drive_icon_%282020%29.svg/1200px-Google_Drive_icon_%282020%29.svg.png`,
+      LOGO: `https://upload.wikimedia.org/wikipedia/commons/thumb/1/12/Google_Drive_icon_%282020%29.svg/1280px-Google_Drive_icon_%282020%29.svg.png`,
       URL: [`${appConfig.bootstrap.internalUrl}/builtins/gdrive`],
       TIMEOUT:
         appConfig.builtins.gdrive.timeout ?? appConfig.presets.defaultTimeout,

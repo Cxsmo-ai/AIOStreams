@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { PageControls } from '../shared/page-controls';
 import { PageWrapper } from '../shared/page-wrapper';
 import { SettingsCard } from '../shared/settings-card';
-import { Combobox } from '../ui/combobox';
+import { Combobox } from '@aiostreams/ui/combobox';
 import { useUserData, useParentInheritance } from '@/context/userData';
 import { InheritedBadge } from '../shared/inherited-badge';
-import { IconButton } from '../ui/button';
+import { IconButton } from '@aiostreams/ui/button';
 import { MenuTabs } from '../shared/menu-tabs';
 import {
   SORT_CRITERIA,
@@ -37,7 +37,7 @@ import {
   Tv,
   Star,
 } from 'lucide-react';
-import { cn } from '../ui/core/styling';
+import { cn } from '@aiostreams/ui/core/styling';
 import type { UserData } from '@aiostreams/core';
 
 type SortCriteriaItem = {
@@ -364,7 +364,7 @@ function SourcePill({ sortKey }: { sortKey: SortKey }) {
         'text-xs px-1.5 py-0.5 rounded border font-medium shrink-0',
         isGlobal
           ? 'bg-violet-500/10 text-violet-400 border-violet-500/20'
-          : 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+          : 'bg-blue-500/10 text-blue-300 border-blue-400/20'
       )}
     >
       {SORT_KEY_LABEL[sortKey]}
@@ -476,7 +476,7 @@ function SortPreviewCard() {
 
               {/* Warning: cached/uncached sorts are defined but split mode isn't active */}
               {!info.splitActive && (info.cachedKey || info.uncachedKey) && (
-                <div className="ml-5 flex items-start gap-1.5 text-xs text-yellow-500/80">
+                <div className="ml-5 flex items-start gap-1.5 text-xs text-yellow-400/80">
                   <MinusCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
                   <span>
                     Cached sorts are defined but inactive — make{' '}
@@ -695,7 +695,7 @@ function Content() {
       <span className="flex items-center gap-1.5">
         {name}
         {active && (
-          <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block" />
+          <span className="w-1.5 h-1.5 rounded-full bg-blue-300 inline-block" />
         )}
       </span>
     );

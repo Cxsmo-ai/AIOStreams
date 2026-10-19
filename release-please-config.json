@@ -16,7 +16,10 @@
         "compose.yaml",
         "release-please-config.json",
         "packages/seanime-extensions",
-        "packages/seanime-extension"
+        "packages/seanime-extension",
+        "packages/desktop",
+        "packages/smart-tv",
+        "packages/android"
       ],
       "pull-request-title-pattern": "chore: release ${version}"
     },
@@ -42,6 +45,39 @@
           "jsonpath": "$.version"
         }
       ]
+    },
+    "packages/desktop": {
+      "release-type": "simple",
+      "component": "desktop",
+      "include-component-in-tag": true,
+      "include-v-in-tag": true,
+      "pull-request-title-pattern": "chore(desktop): release ${version}",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value == 'aiostreams-desktop' || @.name.value == 'aiostreams-desktop-core')].version"
+        }
+      ]
+    },
+    "packages/smart-tv": {
+      "release-type": "node",
+      "component": "smart-tv",
+      "include-component-in-tag": true,
+      "include-v-in-tag": true,
+      "pull-request-title-pattern": "chore(smart-tv): release ${version}"
+    },
+    "packages/android": {
+      "release-type": "simple",
+      "component": "android",
+      "include-component-in-tag": true,
+      "include-v-in-tag": true,
+      "pull-request-title-pattern": "chore(android): release ${version}"
     }
   }
 }

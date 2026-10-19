@@ -8,6 +8,7 @@ import {
   PlaybackInfo,
   DebridFile,
   DebridError,
+  TitleMetadata,
 } from './base.js';
 import {
   ServiceId,
@@ -20,8 +21,9 @@ import {
   selectFileInTorrentOrNZB,
   buildResolveKey,
   hashNzbUrl,
+  parseFileNames,
+  selectableFileNames,
 } from './utils.js';
-import { parseTorrentTitleCached } from '../parser/title.js';
 import { fetch } from 'undici';
 import { basename } from 'path';
 
@@ -57,6 +59,24 @@ export const AltmountConfig = z.object({
   webdavPassword: z.string().optional(),
   aiostreamsAuth: z.string().optional(),
 });
+
+/**
+ * Form body for AltMount's native /api/nzb/streams. AltMount refuses to guess
+ * which episode of a season pack to serve and answers 400 "Episode not
+ * specified" unless season and episode are sent, so pass them whenever the
+ * request is for an episode. Movies have neither and send only the NZB URL.
+ */
+export function altmountStreamsBody(
+  nzb: string,
+  metadata?: TitleMetadata
+): URLSearchParams {
+  const body = new URLSearchParams({ nzb_url: nzb });
+  if (metadata?.season != null && metadata?.episode != null) {
+    body.set('season', String(metadata.season));
+    body.set('episode', String(metadata.episode));
+  }
+  return body;
+}
 
 export class AltmountService extends UsenetStreamService {
   readonly serviceName: ServiceId = 'altmount';
@@ -152,7 +172,7 @@ export class AltmountService extends UsenetStreamService {
     }
 
     try {
-      const body = new URLSearchParams({ nzb_url: nzb });
+      const body = altmountStreamsBody(nzb, metadata);
 
       const response = await fetch(`${this.altmountBaseUrl}/api/nzb/streams`, {
         method: 'POST',
@@ -216,9 +236,8 @@ export class AltmountService extends UsenetStreamService {
         selectedFile = debridFiles[0];
       } else {
         const title = filename || basename(nzb);
-        const allStrings = [title, ...debridFiles.map((f) => f.name ?? '')];
-        const parsedFilesMap = new Map(
-          allStrings.map((s) => [s, parseTorrentTitleCached(s)])
+        const parsedFilesMap = await parseFileNames(
+          selectableFileNames(title, debridFiles)
         );
 
         const nzbInfo = {

@@ -78,6 +78,8 @@ export default defineConfig({
       '/api': backendBaseUrl,
       // the nab endpoint test button posts to /builtins/<namespace>/test
       '/builtins': backendBaseUrl,
+      // also covers /jellyfin-web, the web app's assets
+      '/jellyfin': backendBaseUrl,
     },
   },
   tools: {

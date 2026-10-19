@@ -22,7 +22,9 @@ export type TaskCategory =
   | 'users'
   | 'templates'
   | 'analytics'
-  | 'usenet';
+  | 'usenet'
+  | 'community'
+  | 'jellyfin';
 
 export interface TaskContext {
   signal?: AbortSignal;
@@ -299,7 +301,12 @@ class TaskManagerImpl {
     try {
       // An on-demand run is not due by the schedule; the request is the reason.
       owned = await (manual
-        ? TaskStateRepository.claimNow(id, this.instance, now, now + CLAIM_TTL_MS)
+        ? TaskStateRepository.claimNow(
+            id,
+            this.instance,
+            now,
+            now + CLAIM_TTL_MS
+          )
         : TaskStateRepository.claimDue(
             id,
             this.instance,
@@ -457,6 +464,12 @@ class TaskManagerImpl {
   /** Definitions and this replica's own view; no database read. */
   get(id: string): TaskDefinition | undefined {
     return this.tasks.get(id)?.def;
+  }
+
+  /** Whether a task has finished without error on any replica. */
+  async hasSucceeded(id: string): Promise<boolean> {
+    const runs = await TaskStateRepository.listRuns();
+    return runs.some((r) => r.taskId === id && r.lastStatus === 'ok');
   }
 
   /** Every task, merged with what the rest of the cluster has recorded. */

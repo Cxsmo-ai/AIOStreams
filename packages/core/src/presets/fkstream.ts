@@ -80,7 +80,7 @@ export class FKStreamPreset extends StremThruPreset {
     return {
       ID: 'fkstream',
       NAME: 'FKStream',
-      LOGO: 'https://raw.githubusercontent.com/Dydhzo/fkstream/refs/heads/main/fkstream/assets/fkstream-logo.jpg',
+      LOGO: 'https://gitlab.com/10ho/fkstream/-/raw/main/fkstream/assets/fkstream-logo.jpg',
       URL: appConfig.presets.fkstream.url,
       TIMEOUT:
         appConfig.presets.fkstream.defaultTimeout ??
@@ -108,7 +108,11 @@ export class FKStreamPreset extends StremThruPreset {
       return [this.generateAddon(userData, options, undefined)];
     }
 
-    const usableServices = this.getUsableServices(userData, options.services, options.name);
+    const usableServices = this.getUsableServices(
+      userData,
+      options.services,
+      options.name
+    );
     // if no services are usable, use p2p
     if (!usableServices || usableServices.length === 0) {
       return [this.generateAddon(userData, options, undefined)];

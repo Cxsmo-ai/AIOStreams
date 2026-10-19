@@ -17,6 +17,7 @@ import {
   NabAddonConfig,
   parseNabParsedFileInfo,
 } from '../base/nab/addon.js';
+import { ageInHoursSince } from '../utils/general.js';
 import { BuiltinProxy, createProxy } from '../../proxy/index.js';
 import type { BuiltinServiceId } from '../../utils/index.js';
 import type { Stream } from '../../db/index.js';
@@ -186,10 +187,7 @@ export class NewznabAddon extends BaseNabAddon<NewznabAddonConfig, NewznabApi> {
       if (typeof result.newznab?.usenetdate === 'string') {
         date = result.newznab.usenetdate;
       }
-      const age = Math.ceil(
-        Math.abs(new Date().getTime() - new Date(date).getTime()) /
-          (1000 * 60 * 60)
-      );
+      const age = date ? ageInHoursSince(date) : undefined;
       const parsedMediaInfo = parseNabParsedFileInfo({
         audioLanguages: result.newznab?.language,
         subtitleLanguages: result.newznab?.subs,
@@ -212,6 +210,8 @@ export class NewznabAddon extends BaseNabAddon<NewznabAddonConfig, NewznabApi> {
           0,
         type: 'usenet',
         parsedMediaInfo,
+        // As Prowlarr does: https://github.com/Prowlarr/Prowlarr/blob/3c6e1d97ac485a70cc9d4063dd5d17af7a77584d/src/NzbDrone.Core/Indexers/Definitions/Newznab/NewznabRssParser.cs#L123-L126
+        infoUrl: result.comments?.replace(/#comments$/, ''),
       };
 
       const keySize =
@@ -263,7 +263,6 @@ export class NewznabAddon extends BaseNabAddon<NewznabAddonConfig, NewznabApi> {
       }
       for (let i = 0; i < nzbs.length; i++) {
         nzbs[i].nzb = proxiedUrls[i];
-        nzbs[i].hash = hashNzbUrl(nzbs[i].nzb);
       }
     }
     return nzbs;

@@ -1,23 +1,23 @@
 import { useEffect, useState } from 'react';
 import { useUserData } from '@/context/userData';
 import { useStatus } from '@/context/status';
-import { useDisclosure } from '@/hooks/disclosure';
+import { useDisclosure } from '@aiostreams/ui/hooks/disclosure';
 import { resolveRegexPatterns, resolveStreamExpressions } from '@/lib/api';
 import { toast } from 'sonner';
-import { cn } from '../../../ui/core/styling';
-import { IconButton } from '../../../ui/button';
-import { Button } from '../../../ui/button';
-import { TextInput } from '../../../ui/text-input';
-import { NumberInput } from '../../../ui/number-input';
-import { Tooltip } from '../../../ui/tooltip';
-import { Modal } from '../../../ui/modal';
-import { Checkbox } from '../../../ui/checkbox';
+import { cn } from '@aiostreams/ui/core/styling';
+import { IconButton } from '@aiostreams/ui/button';
+import { Button } from '@aiostreams/ui/button';
+import { TextInput } from '@aiostreams/ui/text-input';
+import { NumberInput } from '@aiostreams/ui/number-input';
+import { Tooltip } from '@aiostreams/ui/tooltip';
+import { Modal } from '@aiostreams/ui/modal';
+import { Checkbox } from '@aiostreams/ui/checkbox';
 import {
   Disclosure,
   DisclosureItem,
   DisclosureTrigger,
   DisclosureContent,
-} from '../../../ui/disclosure';
+} from '@aiostreams/ui/disclosure';
 import {
   FaRegTrashAlt,
   FaPlus,
@@ -142,7 +142,7 @@ export function SyncedPatterns({
   if (fetchError && syncedValues.length === 0) {
     return (
       <div className="px-3 pb-3">
-        <div className="rounded border border-red-500/30 bg-red-500/5 p-2 text-xs text-red-400">
+        <div className="rounded border border-red-400/30 bg-red-500/5 p-2 text-xs text-red-300">
           <span className="font-medium">Error: </span>
           {fetchError}
         </div>
@@ -157,7 +157,7 @@ export function SyncedPatterns({
   return (
     <div className="px-3 pb-3 space-y-2">
       {fetchError && (
-        <div className="rounded border border-yellow-500/30 bg-yellow-500/5 p-2 text-xs text-yellow-400">
+        <div className="rounded border border-yellow-400/30 bg-yellow-500/5 p-2 text-xs text-yellow-400">
           <span className="font-medium">Warning: </span>
           {fetchError}
         </div>
@@ -374,7 +374,7 @@ export function SyncedPatterns({
                           icon={<FaUndo className="text-xs" />}
                           intent="alert-subtle"
                           onClick={handleReset}
-                          className="h-[38px] w-[38px] border border-red-500/20 hover:border-red-500/50 transition-colors shadow-sm"
+                          className="h-[38px] w-[38px] border border-red-400/20 hover:border-red-400/50 transition-colors shadow-sm"
                         />
                       }
                     >
@@ -700,10 +700,9 @@ export function SyncedUrlInputs({
     if (urls.length === 0) return;
 
     const abortController = new AbortController();
-    const credentials =
-      userData.uuid && password
-        ? { uuid: userData.uuid, password: password }
-        : undefined;
+    const credentials = userData.uuid
+      ? { uuid: userData.uuid, password }
+      : undefined;
 
     // Mark all URLs as loading
     setFetchedData((prev) => {

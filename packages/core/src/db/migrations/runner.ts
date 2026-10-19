@@ -1,5 +1,6 @@
 import type { DbDriver } from '../driver/types.js';
 import { createLogger } from '../../logging/logger.js';
+import { ConfigStartupError } from '../../config/settings-store.js';
 import { MIGRATIONS, type Migration } from './index.js';
 
 const logger = createLogger('database');
@@ -35,11 +36,48 @@ async function tableExists(driver: DbDriver, table: string): Promise<boolean> {
   return !!row && (row as { reg: unknown }).reg !== null;
 }
 
-async function getAppliedIds(driver: DbDriver): Promise<Set<number>> {
-  const rows = await driver.query<{ id: number | string }>(
-    `SELECT id FROM _migrations`
+async function getApplied(driver: DbDriver): Promise<Map<number, string>> {
+  const rows = await driver.query<{ id: number | string; name: string }>(
+    `SELECT id, name FROM _migrations`
   );
-  return new Set(rows.map((r) => Number(r.id)));
+  return new Map(rows.map((r) => [Number(r.id), String(r.name)]));
+}
+
+/** A name never changes once published, so a mismatch means a foreign build. */
+function assertNotForeign(applied: Map<number, string>): void {
+  const knownNames = new Set(MIGRATIONS.map((m) => m.name));
+  const conflicts = [...applied.entries()].filter(
+    ([, name]) => !knownNames.has(name)
+  );
+  if (!conflicts.length) return;
+
+  const detail = conflicts
+    .map(([id, name]) => `  ${id}: unrecognized migration "${name}"`)
+    .join('\n');
+  throw new ConfigStartupError(
+    'This database was migrated by a different build of AIOStreams and cannot ' +
+      `be used with this one:\n${detail}\n` +
+      'Point DATABASE_URI at a fresh database, or go back to the build that created it.'
+  );
+}
+
+/**
+ * Upstream migrations are assigned fork-local IDs 900012–900039 to preserve
+ * IDs already published by this fork. An upstream database may therefore
+ * record the same stable migration name under its original numeric ID.
+ * Custom migrations retain strict ID+name identity because some historical
+ * local IDs reused a name at a different ID.
+ */
+function isMigrationApplied(
+  migration: Migration,
+  applied: Map<number, string>
+): boolean {
+  if (applied.get(migration.id) === migration.name) return true;
+  return (
+    migration.id >= 900012 &&
+    migration.id <= 900039 &&
+    [...applied.values()].includes(migration.name)
+  );
 }
 
 async function withMigrationLock<T>(
@@ -96,9 +134,9 @@ export async function getMigrationStatus(driver: DbDriver): Promise<{
   applied: Migration[];
   pending: Migration[];
 }> {
-  const appliedIds = await getAppliedIds(driver);
-  const applied = MIGRATIONS.filter((m) => appliedIds.has(m.id));
-  const pending = MIGRATIONS.filter((m) => !appliedIds.has(m.id));
+  const appliedRows = await getApplied(driver);
+  const applied = MIGRATIONS.filter((m) => isMigrationApplied(m, appliedRows));
+  const pending = MIGRATIONS.filter((m) => !isMigrationApplied(m, appliedRows));
   return { applied, pending };
 }
 
@@ -113,12 +151,18 @@ export async function runMigrations(driver: DbDriver): Promise<void> {
   return withMigrationLock(driver, async () => {
     await ensureMigrationsTable(driver);
 
-    const applied = await getAppliedIds(driver);
+    const appliedRows = await getApplied(driver);
+    assertNotForeign(appliedRows);
+    // Migration names are stable identities. IDs may differ between the
+    // upstream project and this fork, so recognize already-applied upstream
+    // migrations by name rather than re-running non-idempotent DDL (for
+    // example SQLite ALTER TABLE ADD COLUMN migrations).
+    const applied = new Set(appliedRows.keys());
 
     // v2 detection: if baseline isn't marked applied but the v2 tables
     // are already present, mark it applied without re-running.
     const baseline = MIGRATIONS[0];
-    if (!applied.has(baseline.id) && (await tableExists(driver, 'users'))) {
+    if (!isMigrationApplied(baseline, appliedRows) && (await tableExists(driver, 'users'))) {
       logger.info(
         `Detected pre-existing v2 schema; marking baseline migration as applied`
       );
@@ -127,9 +171,10 @@ export async function runMigrations(driver: DbDriver): Promise<void> {
         baseline.name,
       ]);
       applied.add(baseline.id);
+      appliedRows.set(baseline.id, baseline.name);
     }
 
-    const pending = MIGRATIONS.filter((m) => !applied.has(m.id));
+    const pending = MIGRATIONS.filter((m) => !isMigrationApplied(m, appliedRows));
     if (pending.length === 0) {
       logger.debug('No pending migrations');
       return;

@@ -1,4 +1,16 @@
 import app from './app.js';
+import {
+  attachJellyfinWebSocket,
+  registerJellyfinTasks,
+} from './routes/jellyfin/index.js';
+import {
+  startMetricsHistory,
+  settleMetricsHistory,
+  stopMetricsHistory,
+} from './utils/system-metrics.js';
+import { attachPartyRelay, closePartyRelay } from './party/relay.js';
+import { startNfsShare, stopNfsShare } from './nfs.js';
+import { startFuseMount, stopFuseMount } from './fuse.js';
 
 import {
   Env,
@@ -6,17 +18,22 @@ import {
   createLogger,
   initDb,
   initialiseConfig,
+  installPrivateAddressGuard,
   closeDb,
   UserRepository,
   logStartupInfo,
   Cache,
+  sharedBackend,
   RegexAccess,
   SelAccess,
   AnimeDatabase,
   ConfigStartupError,
+  arrConfigured,
   ProwlarrAddon,
   HarbrrAddon,
   TemplateManager,
+  CommunityService,
+  CommunityFederation,
   SeaDexDataset,
   SceneMappingDataset,
   IdMappingDataset,
@@ -26,16 +43,24 @@ import {
   initialiseOidc,
   startAnalytics,
   stopAnalytics,
+  ConfigSessionRepository,
+  AppReportRepository,
   TaskManager,
   instanceId,
+  flushWatchState,
+  flushPendingIds,
   drainUsenetMetrics,
   pruneUsenetMetrics,
+  runLibraryRecheck,
+  runUsenetArrQueueCleanup,
   requeueInterruptedInspects,
+  backfillProxiedNzbAliases,
   flushAllDiskCaches,
   ReleaseBlocklistRemoteService,
   ReleaseBlocklistPublishService,
   flushStreamSessions,
   pruneStreamSessions,
+  pruneMediaInfoProbes,
   recoverStreamSessions,
   streamRegistry,
 } from '@aiostreams/core';
@@ -46,6 +71,7 @@ async function initialiseDatabase() {
   try {
     await initDb(appConfig.bootstrap.databaseUri);
     await initialiseConfig();
+    installPrivateAddressGuard();
   } catch (error) {
     if (error instanceof ConfigStartupError) throw error;
     logger.error('Failed to initialise database:', error);
@@ -73,6 +99,44 @@ function registerPruneTask() {
         appConfig.tasks.pruning.maxDays
       );
       return { ok: true, message: `pruned ${n} users` };
+    },
+  });
+}
+
+function registerConfigSessionTask() {
+  TaskManager.register({
+    id: 'prune-config-sessions',
+    label: 'Prune expired sign-in sessions',
+    description: 'Deletes remembered configuration sign-ins that have expired.',
+    category: 'users',
+    kind: 'scheduled',
+    intervalMs: 60 * 60 * 1000,
+    enabled: true,
+    destructive: false,
+    multiReplica: 'single',
+    run: async () => {
+      const n = await ConfigSessionRepository.prune();
+      return { ok: true, message: `pruned ${n} sessions` };
+    },
+  });
+}
+
+function registerAppReportTask() {
+  TaskManager.register({
+    id: 'prune-app-reports',
+    label: 'Prune app reports',
+    description: 'Deletes reports from the apps older than their retention.',
+    category: 'users',
+    kind: 'scheduled',
+    intervalMs: 6 * 60 * 60 * 1000,
+    enabled: true,
+    destructive: false,
+    multiReplica: 'single',
+    run: async () => {
+      const n = await AppReportRepository.prune(
+        appConfig.appReports.retention * 1000
+      );
+      return { ok: true, message: `pruned ${n} reports` };
     },
   });
 }
@@ -114,6 +178,26 @@ const USENET_METRICS_RETENTION_DAYS = 400;
 
 function registerUsenetTasks() {
   TaskManager.register({
+    id: 'usenet-proxied-aliases',
+    label: 'Alias proxied NZBs by their source',
+    description:
+      'Keys library entries added through the NZB proxy by the URL behind it, ' +
+      'so they keep matching after the proxy credential changes. Runs at ' +
+      'startup until it has succeeded once.',
+    category: 'usenet',
+    kind: 'manual',
+    enabled: true,
+    destructive: false,
+    multiReplica: 'single',
+    run: async () => {
+      const { proxied, added } = await backfillProxiedNzbAliases();
+      return {
+        ok: true,
+        message: `${added} aliases added for ${proxied} proxied nzbs`,
+      };
+    },
+  });
+  TaskManager.register({
     id: 'usenet-metrics-drain',
     label: 'Flush usenet provider metrics',
     description:
@@ -145,6 +229,40 @@ function registerUsenetTasks() {
       const n = await pruneUsenetMetrics(USENET_METRICS_RETENTION_DAYS);
       return { ok: true, message: `pruned ${n} metric rows` };
     },
+  });
+  TaskManager.register({
+    id: 'usenet-library-recheck',
+    label: 'Recheck usenet library',
+    description:
+      'Re-verifies library entries against your providers on a schedule keyed ' +
+      'to how old each post is, so a release taken down after it was added is ' +
+      'marked failed instead of staying playable on paper. Does nothing until ' +
+      'the recheck scope is turned on in the usenet settings.',
+    category: 'usenet',
+    kind: 'scheduled',
+    intervalMs: 5 * 60_000,
+    enabled: true,
+    destructive: false,
+    multiReplica: 'single',
+    // Scope is read at run time, so switching it on takes effect immediately.
+    run: async (ctx) => runLibraryRecheck({ signal: ctx?.signal }),
+  });
+  TaskManager.register({
+    id: 'arr-queue-cleanup',
+    label: 'Clean up stuck Sonarr/Radarr imports',
+    description:
+      'Looks through the queues of your Sonarr/Radarr instances for downloads ' +
+      'AIOStreams handed over that they could not import, and acts on the ' +
+      'reason they gave: replace a bad release, push an import through, or ' +
+      'clear a stale entry. Does nothing until queue cleanup is turned on in ' +
+      'the Sonarr/Radarr settings.',
+    category: 'usenet',
+    kind: 'scheduled',
+    intervalMs: 5 * 60_000,
+    enabled: true,
+    destructive: true,
+    multiReplica: 'single',
+    run: async () => runUsenetArrQueueCleanup(),
   });
 }
 
@@ -182,6 +300,21 @@ function registerStreamTasks() {
     run: async () => {
       const n = await pruneStreamSessions();
       return { ok: true, message: `pruned ${n} rows` };
+    },
+  });
+  TaskManager.register({
+    id: 'media-info-probes-prune',
+    label: 'Prune media info probes',
+    description: 'Deletes probe attempts older than 30 days.',
+    category: 'data-sync',
+    kind: 'scheduled',
+    intervalMs: 24 * 60 * 60_000,
+    enabled: true,
+    destructive: false,
+    multiReplica: 'single',
+    run: async () => {
+      const { deleted } = await pruneMediaInfoProbes();
+      return { ok: true, message: `pruned ${deleted} rows` };
     },
   });
 }
@@ -268,6 +401,8 @@ async function initialiseProwlarr() {
 async function initialiseTemplates() {
   try {
     await TemplateManager.loadTemplates();
+    await CommunityService.registerTrustedOnBoot();
+    CommunityFederation.initialise();
   } catch (error) {
     logger.error('Failed to initialise templates:', error);
   }
@@ -282,6 +417,7 @@ async function initialiseAuth() {
 
 async function start() {
   try {
+    startMetricsHistory();
     await initialiseDatabase();
     // Before anything registers a task: it is the identity runs are recorded
     // under.
@@ -297,17 +433,28 @@ async function start() {
     SelAccess.initialise();
     await initialiseProwlarr();
     registerPruneTask();
+    registerConfigSessionTask();
+    registerAppReportTask();
     registerCacheTasks();
     registerUsenetTasks();
     registerStreamTasks();
     registerReleaseBlocklistTasks();
+    registerJellyfinTasks();
     // Otherwise sessions from the last run stay active forever.
     await recoverStreamSessions().catch((error) =>
       logger.warn('Failed to recover orphaned stream sessions:', error)
     );
     void requeueInterruptedInspects();
+    void TaskManager.hasSucceeded('usenet-proxied-aliases')
+      .then((done) =>
+        done ? undefined : TaskManager.runNow('usenet-proxied-aliases')
+      )
+      .catch((error) => logger.warn('Failed to alias proxied nzbs:', error));
     await initialiseAuth();
+    await sharedBackend().start();
     startAnalytics();
+    await startNfsShare();
+    await startFuseMount();
     const server = app.listen(appConfig.bootstrap.port, (error) => {
       if (error) {
         logger.error('Failed to start server:', error);
@@ -316,7 +463,10 @@ async function start() {
       logger.info(
         `Server running on port ${appConfig.bootstrap.port}: ${JSON.stringify(server.address())}`
       );
+      settleMetricsHistory();
     });
+    attachJellyfinWebSocket(server);
+    attachPartyRelay(server);
   } catch (error) {
     if (error instanceof ConfigStartupError) throw error;
     logger.error('Failed to start server:', error);
@@ -326,11 +476,20 @@ async function start() {
 
 async function shutdown() {
   TaskManager.stopAll();
+  stopMetricsHistory();
+  await stopFuseMount().catch(() => undefined);
+  await stopNfsShare().catch(() => undefined);
   // Write live sessions out so the next boot doesn't reclaim them as stale.
   streamRegistry.closeAll('stale');
   await flushStreamSessions().catch(() => undefined);
   await stopAnalytics().catch(() => undefined);
   await flushAllDiskCaches().catch(() => undefined);
+  await flushWatchState().catch(() => undefined);
+  await flushPendingIds().catch(() => undefined);
+  await closePartyRelay();
+  await sharedBackend()
+    .stop()
+    .catch(() => undefined);
   await Cache.close();
   RegexAccess.cleanup();
   SelAccess.cleanup();

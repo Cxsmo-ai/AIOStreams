@@ -25,11 +25,17 @@ import {
   UsenetLibraryPage,
   UsenetStatsPage,
   UsenetProvidersPage,
-  UsenetSettingsPage,
+  MediaInfoPage,
+  ReportsPage,
+  CommunityLayout,
+  CommunityPendingPage,
+  CommunityPublishedPage,
+  CommunityBlocksPage,
 } from './routes/dashboard-pages';
 import { SplashscreenPage } from './routes/splashscreen-page';
 import { ConfigureRoute } from './routes/configure-route';
 import { OAuthCallback } from './routes/oauth-callback';
+import { PartyInvitePage } from './routes/party-invite-page';
 import { sessionQuery, statusQuery } from './lib/queries';
 import { queryClient } from './lib/query-client';
 import type { StatusResponse } from '@aiostreams/core';
@@ -77,6 +83,12 @@ const splashscreenRoute = createRoute({
   component: SplashscreenPage,
 });
 
+const partyInviteRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/party/join',
+  component: PartyInvitePage,
+});
+
 // Auth gate for the configure routes: if the instance is protected, a valid
 // session is required. Also pre-fetches status so the page renders immediately.
 async function configureBeforeLoad({
@@ -110,6 +122,13 @@ const stremioConfigureRoute = createRoute({
 const stremioConfigureAuthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/stremio/$uuid/$encryptedPassword/configure',
+  beforeLoad: configureBeforeLoad,
+  component: ConfigureRoute,
+});
+
+const stremioConfigureVariantRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/stremio/$uuid/$encryptedPassword/v/$variantSelector/configure',
   beforeLoad: configureBeforeLoad,
   component: ConfigureRoute,
 });
@@ -218,6 +237,38 @@ const dashboardStreamsBansRoute = createRoute({
   component: StreamsBansPage,
 });
 
+const dashboardCommunityRoute = createRoute({
+  getParentRoute: () => dashboardRoute,
+  path: 'community',
+  component: CommunityLayout,
+});
+
+const dashboardCommunityIndexRoute = createRoute({
+  getParentRoute: () => dashboardCommunityRoute,
+  path: '/',
+  beforeLoad: () => {
+    throw redirect({ to: '/dashboard/community/pending' });
+  },
+});
+
+const dashboardCommunityPendingRoute = createRoute({
+  getParentRoute: () => dashboardCommunityRoute,
+  path: 'pending',
+  component: CommunityPendingPage,
+});
+
+const dashboardCommunityPublishedRoute = createRoute({
+  getParentRoute: () => dashboardCommunityRoute,
+  path: 'published',
+  component: CommunityPublishedPage,
+});
+
+const dashboardCommunityBlocksRoute = createRoute({
+  getParentRoute: () => dashboardCommunityRoute,
+  path: 'blocks',
+  component: CommunityBlocksPage,
+});
+
 const dashboardUsersRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: 'users',
@@ -289,34 +340,45 @@ const dashboardUsenetLibraryRoute = createRoute({
   component: UsenetLibraryPage,
 });
 
+// `?nzb=<hash>` narrows the files to one NZB, as the usenet library links it.
+const dashboardMediaInfoRoute = createRoute({
+  getParentRoute: () => dashboardRoute,
+  path: 'media-info',
+  validateSearch: (search: Record<string, unknown>): { nzb?: string } => ({
+    nzb: optionalString(search.nzb),
+  }),
+  component: MediaInfoPage,
+});
+
+const dashboardReportsRoute = createRoute({
+  getParentRoute: () => dashboardRoute,
+  path: 'reports',
+  component: ReportsPage,
+});
+
 const dashboardUsenetStatsRoute = createRoute({
   getParentRoute: () => dashboardUsenetRoute,
   path: 'stats',
   component: UsenetStatsPage,
 });
 
+// Provider accounts keep their own page: the editor is a substantial thing in
+// its own right (add / test / speed-test / order), not a settings field.
 const dashboardUsenetProvidersRoute = createRoute({
   getParentRoute: () => dashboardUsenetRoute,
   path: 'providers',
   component: UsenetProvidersPage,
 });
 
-const dashboardUsenetSettingsRoute = createRoute({
-  getParentRoute: () => dashboardUsenetRoute,
-  path: 'settings',
-  validateSearch: (search: Record<string, unknown>): { field?: string } => ({
-    field: optionalString(search.field),
-  }),
-  component: UsenetSettingsPage,
-});
-
 const routeTree = rootRoute.addChildren([
   indexRoute,
   stremioConfigureRoute,
   stremioConfigureAuthRoute,
+  stremioConfigureVariantRoute,
   loginRoute,
   oauthGdriveRoute,
   splashscreenRoute,
+  partyInviteRoute,
   dashboardRoute.addChildren([
     dashboardIndexRoute,
     dashboardAnalyticsRoute,
@@ -344,7 +406,14 @@ const routeTree = rootRoute.addChildren([
       dashboardUsenetLibraryRoute,
       dashboardUsenetStatsRoute,
       dashboardUsenetProvidersRoute,
-      dashboardUsenetSettingsRoute,
+    ]),
+    dashboardMediaInfoRoute,
+    dashboardReportsRoute,
+    dashboardCommunityRoute.addChildren([
+      dashboardCommunityIndexRoute,
+      dashboardCommunityPendingRoute,
+      dashboardCommunityPublishedRoute,
+      dashboardCommunityBlocksRoute,
     ]),
   ]),
 ]);

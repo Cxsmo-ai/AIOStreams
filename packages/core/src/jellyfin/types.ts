@@ -1,0 +1,185 @@
+import type { ParsedFile } from '../db/schemas.js';
+import type { TitleMetadata } from '../debrid/base.js';
+import type { MediaInfoIdentity } from '../media-info/lookup.js';
+
+/**
+ * What a Jellyfin item id stands for. `t` is always the Stremio type used
+ * for meta requests; `i` the meta id; `v` the exact video id for episodes.
+ */
+export type JellyfinDescriptor =
+  | { k: 'view'; t: string; c: string }
+  | { k: 'genre'; t: string; c: string; g: string }
+  | { k: 'movie'; t: string; i: string; p?: string }
+  | { k: 'series'; t: string; i: string }
+  | { k: 'boxset'; t: string; i: string }
+  | { k: 'season'; t: string; i: string; s: number }
+  | { k: 'episode'; t: string; i: string; s: number; e: number; v: string }
+  | { k: 'person'; n: string; i?: string }
+  | { k: 'source'; h: string };
+
+export type PersonDescriptor = Extract<JellyfinDescriptor, { k: 'person' }>;
+
+export type ContentDescriptor = Extract<
+  JellyfinDescriptor,
+  { k: 'movie' | 'series' | 'boxset' | 'season' | 'episode' }
+>;
+
+export interface SubtitleTrack {
+  id: string;
+  url: string;
+  lang: string;
+  source: 'stream' | 'addon';
+  title?: string;
+  forced?: boolean;
+  hearingImpaired?: boolean;
+}
+
+/** Additive extension object for AIOStreams-aware clients. */
+export interface AiostreamsSourceExtension {
+  name: string;
+  description: string;
+  addon: string;
+  service?: string;
+  cached?: boolean;
+  proxied?: boolean;
+  resolution?: string;
+  quality?: string;
+  encode?: string;
+  visualTags: string[];
+  audioTags: string[];
+  audioChannels: string[];
+  languages: string[];
+  size?: number;
+  seeders?: number;
+  age?: number;
+  releaseGroup?: string;
+  indexer?: string;
+  mediaInfoQuality?: string;
+  filename?: string;
+  folderName?: string;
+  editions?: string[];
+  /** The expressions and regexes it matched, named as the formatter names them. */
+  seMatched?: string;
+  rseMatched?: string[];
+  regexMatched?: string;
+  rankedRegexMatched?: string[];
+  seadex?: 'best' | 'alt';
+  externalUrl?: string;
+  /** A YouTube video, which the client opens itself. */
+  ytId?: string;
+  type: string;
+  /** Stremio's: the next episode's version with the same group plays on. */
+  bingeGroup?: string;
+  /** The version's own id, as the first version's `Id` is the item's. Set when sent. */
+  id?: string;
+}
+
+export interface MediaSourceRecord {
+  msid: string;
+  url: string;
+  requestHeaders?: Record<string, string>;
+  filename?: string;
+  container: string;
+  size?: number;
+  bitrate?: number;
+  durationMs?: number;
+  label: string;
+  parsedFile?: ParsedFile;
+  subtitles: SubtitleTrack[];
+  subtitlesEnriched?: boolean;
+  mediaInfo?: MediaInfoIdentity;
+  videoHash?: string;
+  live: boolean;
+  /** Carries text only: an addon notice, a pipeline error or a statistic. */
+  notice?: boolean;
+  /** Offered only to clients that support it. */
+  needs?: keyof PlaySupport;
+  extension: AiostreamsSourceExtension;
+}
+
+/** What a client can play beyond a plain URL, as it says in PlaybackInfo. */
+export interface PlaySupport {
+  /** Sends a version's `RequiredHttpHeaders`. */
+  headers?: boolean;
+  youtube?: boolean;
+}
+
+export interface PlaybackMemo {
+  uuid: string;
+  encryptedPassword: string;
+  itemId: string;
+  descriptor: ContentDescriptor;
+  /** Stremio type and id used for the stream request. */
+  type: string;
+  videoId: string;
+  psid: string;
+  sources: MediaSourceRecord[];
+  addonSubtitles: SubtitleTrack[];
+  /** The requested title, for its original language and a pack's probed files. */
+  titleMetadata?: TitleMetadata;
+  runtimeMs?: number;
+  createdAt: number;
+}
+
+export interface MemoPointer {
+  uuid: string;
+  encryptedPassword: string;
+  itemId: string;
+  persona?: string;
+  /** Only on the pointers to a play session. */
+  scope?: string;
+}
+
+export type ImageKind = 'Primary' | 'Backdrop' | 'Logo' | 'Thumb';
+export type ItemImages = Partial<Record<ImageKind, string>>;
+
+export interface UserItemDataDto {
+  PlaybackPositionTicks: number;
+  PlayCount: number;
+  IsFavorite: boolean;
+  Likes?: boolean;
+  /** 0 to 10. */
+  Rating?: number;
+  Played: boolean;
+  LastPlayedDate?: string;
+  PlayedPercentage?: number;
+  UnplayedItemCount?: number;
+  Key: string;
+  ItemId: string;
+}
+
+export interface QueryResult<T> {
+  Items: T[];
+  TotalRecordCount: number;
+  StartIndex: number;
+}
+
+/** Only the fields we populate; everything else stays absent. */
+export interface JellyfinItem {
+  Id: string;
+  Name: string;
+  ServerId: string;
+  Type: string;
+  IsFolder: boolean;
+  [key: string]: unknown;
+}
+
+export interface JellyfinMediaStream {
+  Index: number;
+  Type: 'Video' | 'Audio' | 'Subtitle';
+  [key: string]: unknown;
+}
+
+export interface JellyfinMediaSource {
+  Id: string;
+  Name: string;
+  Path: string;
+  Protocol: string;
+  MediaStreams: JellyfinMediaStream[];
+  [key: string]: unknown;
+}
+
+export interface DeviceProfile {
+  SubtitleProfiles?: { Format?: string; Method?: string }[];
+  [key: string]: unknown;
+}

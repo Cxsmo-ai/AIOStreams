@@ -41,10 +41,15 @@ class Provider {
   }
 
   async smartSearch(opts: AnimeSmartSearchOptions): Promise<AnimeTorrent[]> {
-    const { baseUrl, uuid, encryptedPassword } = parseManifestUrl(
+    const { baseUrl, uuid, encryptedPassword, variants } = parseManifestUrl(
       this.aiostreamsManifestUrl
     );
-    const aiostreams = new AIOStreamsAPI(baseUrl, uuid, encryptedPassword);
+    const aiostreams = new AIOStreamsAPI(
+      baseUrl,
+      uuid,
+      encryptedPassword,
+      variants
+    );
     const type = opts.media.format === 'TV' ? 'series' : 'movie';
 
     let id: ParsedId | null = null;

@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.10.2](https://github.com/Viren070/AIOStreams/compare/seanime-extensions-v0.10.1...seanime-extensions-v0.10.2) (2026-09-17)
+
+
+### Bug Fixes
+
+* **seanime-extensions/plugin:** load on Android and iOS servers ([99a5f47](https://github.com/Viren070/AIOStreams/commit/99a5f479395238ddf52a8f99ed571660de944fee))
+* **seanime-extensions/plugin:** show results when not logged in to AniList ([743aa81](https://github.com/Viren070/AIOStreams/commit/743aa813fabf8b6c1e873d0e1be68996717519dc))
+* **seanime-extensions/plugin:** use ctx.fetch to prevent VM panics ([208e840](https://github.com/Viren070/AIOStreams/commit/208e84067a54bb9204f247d6468d7653b75016c0))
+
+## [0.10.1](https://github.com/Viren070/AIOStreams/compare/seanime-extensions-v0.10.0...seanime-extensions-v0.10.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **seanime-extensions:** support parsing path based variant selectors ([5e64202](https://github.com/Viren070/AIOStreams/commit/5e642023d32502be032a2d5602b62dcd2022ae75))
+
+## [0.10.0](https://github.com/Viren070/AIOStreams/compare/seanime-extensions-v0.9.0...seanime-extensions-v0.10.0) (2026-08-09)
+
+
+### Features
+
+* **seanime-extensions:** support variants ([234b580](https://github.com/Viren070/AIOStreams/commit/234b58018a4fb27770a6c0013faf7b4c4e13ab96))
+
+
+### Bug Fixes
+
+* **seanime-extensions:** keep manifest query params on resource requests ([fc969bb](https://github.com/Viren070/AIOStreams/commit/fc969bbfb31fc1530046b0b07865407ef88fa6f2))
+
 ## [0.9.0](https://github.com/Viren070/AIOStreams/compare/seanime-extensions-v0.8.3...seanime-extensions-v0.9.0) (2026-07-08)
 
 

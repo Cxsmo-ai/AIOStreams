@@ -1,15 +1,21 @@
-import { ParsedStream, UserData } from '../db/schemas.js';
+import {
+  MEDIA_INFO_QUALITY_TIERS,
+  ParsedStream,
+  UserData,
+} from '../db/schemas.js';
 import {
   createLogger,
   DSU,
   getSimpleTextHash,
   constants,
+  hasTrackLists,
 } from '../utils/index.js';
 import StreamUtils, { shouldPassthroughStage } from './utils.js';
 import { shouldProxyStream } from './proxifier.js';
 import { isExternalDebridFailover } from '../main/play-chain.js';
 import { PLAYBACK_PATH_PREFIX } from '../debrid/utils.js';
 import { arrayMerge } from '../parser/merge.js';
+import { stripRepostSuffixes } from '../parser/title.js';
 
 type MergeOptions = NonNullable<NonNullable<UserData['deduplicator']>['merge']>;
 type FailoverVariant = NonNullable<ParsedStream['failoverVariants']>[number];
@@ -168,7 +174,9 @@ class StreamDeduplicator {
       const currentStreamKeyStrings: string[] = [];
 
       if (deduplicationKeys.includes('filename') && stream.filename) {
-        let normalisedFilename = stream.filename
+        // Strip repost suffixes first: in `Name.mkv-xpost` the extension is
+        // only at the end once the suffix is gone.
+        let normalisedFilename = stripRepostSuffixes(stream.filename)
           .replace(
             /(mkv|mp4|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|3gp|3g2|m2ts|ts|vob|ogv|ogm|divx|xvid|rm|rmvb|asf|mxf|mka|mks|mk3d|webm|f4v|f4p|f4a|f4b)$/i,
             ''
@@ -666,8 +674,11 @@ class StreamDeduplicator {
   }
 
   /**
-   * Accuracy-aware merge of parsed `languages`/`subtitles` plus actual subtitle
-   * tracks.
+   * Merge parsed `languages`/`subtitles` plus actual subtitle tracks from
+   * sources at the best mediaInfoQuality tier present, discarding lower
+   * tiers. If nobody has a tier, merges everything as a best effort. A probe
+   * describes the whole file, so at that tier languages and tracks are copied
+   * from one probed source instead of unioned, the first with track lists.
    */
   private mergeLanguagesAndSubtitles(
     winner: ParsedStream,
@@ -675,25 +686,48 @@ class StreamDeduplicator {
     fields: readonly string[]
   ): void {
     const sources = [winner, ...others].filter((s) => s.parsedFile);
-    const accurate = sources.filter(
-      (s) =>
-        (s.parsedFile?.languages?.length ?? 0) > 0 &&
-        (s.parsedFile?.subtitles?.length ?? 0) > 0
-    );
-    const pool = accurate.length > 0 ? accurate : sources;
+    const bestTier = this.bestMediaInfoQualityTier(sources);
+    const pool = bestTier
+      ? sources.filter((s) => s.parsedFile?.mediaInfoQuality === bestTier)
+      : sources;
 
     if (winner.parsedFile) {
+      const probed =
+        bestTier === 'probe'
+          ? (pool.find((s) => hasTrackLists(s.parsedFile)) ?? pool[0])
+              .parsedFile
+          : undefined;
       if (fields.includes('languages')) {
-        winner.parsedFile.languages = arrayMerge(
-          [],
-          pool.flatMap((s) => s.parsedFile?.languages ?? [])
-        );
+        if (probed) {
+          winner.parsedFile.languages = probed.languages ?? [];
+          winner.parsedFile.audioTracks = probed.audioTracks;
+        } else {
+          winner.parsedFile.languages = arrayMerge(
+            [],
+            pool.flatMap((s) => s.parsedFile?.languages ?? [])
+          );
+        }
       }
       if (fields.includes('subtitles')) {
-        winner.parsedFile.subtitles = arrayMerge(
-          [],
-          pool.flatMap((s) => s.parsedFile?.subtitles ?? [])
-        );
+        if (probed) {
+          winner.parsedFile.subtitles = probed.subtitles;
+          winner.parsedFile.subtitleTracks = probed.subtitleTracks;
+        } else {
+          winner.parsedFile.subtitles = arrayMerge(
+            [],
+            pool.flatMap((s) => s.parsedFile?.subtitles ?? [])
+          );
+        }
+      }
+
+      if (
+        probed &&
+        (fields.includes('languages') || fields.includes('subtitles'))
+      ) {
+        winner.parsedFile.videoIndex = probed.videoIndex;
+      }
+      if (bestTier && bestTier !== winner.parsedFile.mediaInfoQuality) {
+        winner.parsedFile.mediaInfoQuality = bestTier;
       }
     }
 
@@ -712,6 +746,28 @@ class StreamDeduplicator {
       }
       if (merged.length > 0) winner.subtitles = merged;
     }
+  }
+
+  /** Rank of a mediaInfoQuality tier; unranked (undefined) is the lowest rung. */
+  private mediaInfoQualityRank(q?: string): number {
+    const i = MEDIA_INFO_QUALITY_TIERS.indexOf(q as never);
+    return i === -1 ? MEDIA_INFO_QUALITY_TIERS.length : i;
+  }
+
+  /** Best mediaInfoQuality tier present among `sources`, if any. */
+  private bestMediaInfoQualityTier(
+    sources: ParsedStream[]
+  ): (typeof MEDIA_INFO_QUALITY_TIERS)[number] | undefined {
+    return sources.reduce<
+      (typeof MEDIA_INFO_QUALITY_TIERS)[number] | undefined
+    >(
+      (best, s) =>
+        this.mediaInfoQualityRank(s.parsedFile?.mediaInfoQuality) <
+        this.mediaInfoQualityRank(best)
+          ? s.parsedFile?.mediaInfoQuality
+          : best,
+      undefined
+    );
   }
 }
 

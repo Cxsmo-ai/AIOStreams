@@ -2,6 +2,7 @@ import {
   createLogger,
   getTimeTakenSincePoint,
   ExtrasParser,
+  firstGenre,
   getSimpleTextHash,
   maskSensitiveInfo,
   userScopeKey,
@@ -53,6 +54,39 @@ export function convertDiscoverDeepLinks(
   });
 }
 
+/** Names collection sources `<instanceId>.<catalogId>`, dropping addons this configuration lacks. */
+export function withQualifiedCollection<T extends MetaPreview>(
+  ctx: Pick<AIOStreamsContext, 'addons' | 'manifests'>,
+  instanceId: string,
+  item: T
+): T {
+  if (!item.collection?.sources?.length) return item;
+  const ownerOf = (addonId: string | null | undefined) => {
+    if (!addonId) return instanceId;
+    const url = addonId.replace(/\/manifest\.json$/, '');
+    return ctx.addons.find(
+      (a) =>
+        a.instanceId &&
+        (ctx.manifests[a.instanceId]?.id === addonId ||
+          a.manifestUrl.replace(/\/manifest\.json$/, '') === url)
+    )?.instanceId;
+  };
+  const sources = item.collection.sources.flatMap((source) => {
+    const owner = ownerOf(source.addonId);
+    return owner
+      ? [
+          {
+            type: source.type,
+            catalogId: `${owner}.${source.catalogId}`,
+            genre: source.genre,
+          },
+        ]
+      : [];
+  });
+  // A copy: the addon's response may be the cached object itself.
+  return { ...item, collection: { ...item.collection, sources } };
+}
+
 export async function fetchRawCatalogItems(
   ctx: AIOStreamsContext,
   addonInstanceId: string,
@@ -101,6 +135,16 @@ export async function fetchRawCatalogItems(
     actualType = modification.type;
   }
 
+  const genreExtra = getCatalogExtras(
+    ctx,
+    addonInstanceId,
+    catalogId,
+    actualType
+  )?.find((e) => e.name === 'genre');
+  if (genreExtra?.isRequired && !parsedExtras?.genre && !parsedExtras?.search) {
+    parsedExtras = new ExtrasParser(parsedExtras?.toString());
+    parsedExtras.genre = firstGenre(genreExtra);
+  }
   if (parsedExtras?.genre === 'None') {
     parsedExtras.genre = undefined;
   }
@@ -168,7 +212,12 @@ export async function fetchRawCatalogItems(
       },
       'received catalog'
     );
-    return { success: true, items: catalog };
+    return {
+      success: true,
+      items: catalog.map((item) =>
+        withQualifiedCollection(ctx, addonInstanceId, item)
+      ),
+    };
   } catch (error) {
     return {
       success: false,
@@ -473,8 +522,11 @@ export async function getMergedCatalog(
 
   const parsedExtras = new ExtrasParser(extras);
   const requestedSkip = parsedExtras.skip || 0;
-  const isSearchRequest = !!parsedExtras.search;
   const requestedGenre = parsedExtras.genre;
+  // A source asked for an extra it doesn't declare ignores it and lists its usual items.
+  const mustDeclare = parsedExtras
+    .names()
+    .filter((name) => name !== 'skip' && name !== 'genre');
 
   const extrasForCacheKey = new ExtrasParser(extras);
   extrasForCacheKey.skip = undefined;
@@ -538,10 +590,13 @@ export async function getMergedCatalog(
         catalogType
       );
 
-      if (isSearchRequest && !catalogExtras?.some((e) => e.name === 'search')) {
+      const unsupported = mustDeclare.find(
+        (name) => !catalogExtras?.some((e) => e.name === name)
+      );
+      if (unsupported) {
         logger.debug(
-          { encodedCatalogId, catalog: mergedCatalog.name },
-          'skipping merged catalog source: no search support'
+          { encodedCatalogId, catalog: mergedCatalog.name, extra: unsupported },
+          'skipping merged catalog source: extra not supported'
         );
         return {
           encodedCatalogId,
@@ -618,7 +673,12 @@ export async function getMergedCatalog(
       const requiredExtras = catalogExtras?.filter((e) => e.isRequired);
       if (requiredExtras && requiredExtras.length > 0) {
         for (const reqExtra of requiredExtras) {
-          if (!sourceExtras.has(reqExtra.name)) {
+          // fetchRawCatalogItems fills the genre, but not for a search.
+          const fallback =
+            reqExtra.name === 'genre' &&
+            !sourceExtras.search &&
+            firstGenre(reqExtra);
+          if (!sourceExtras.has(reqExtra.name) && !fallback) {
             logger.debug(
               {
                 encodedCatalogId,

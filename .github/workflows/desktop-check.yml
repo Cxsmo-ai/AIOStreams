@@ -1,0 +1,67 @@
+name: Desktop Check
+
+on:
+  pull_request:
+    paths: &crates
+      - 'packages/desktop/Cargo.*'
+      - 'packages/desktop/app/**'
+      - 'packages/desktop/core/**'
+      - 'packages/desktop/about.*'
+      - '.github/workflows/desktop-check.yml'
+  push:
+    branches: [main]
+    paths: *crates
+  workflow_dispatch:
+
+# A newer push replaces a check still running on the same branch.
+concurrency:
+  group: desktop-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_ABOUT_VERSION: 0.9.2
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, macos-15]
+    defaults:
+      run:
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install GTK 4 and WebKitGTK 6
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/desktop
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      # about.toml names the packaged targets, so one runner checks them all. The
+      # result changes only with the crates, the config or the template.
+      - id: licences
+        if: runner.os == 'Linux'
+        uses: actions/cache@v6
+        with:
+          path: packages/desktop/third-party-licenses.html
+          key: licence-check-${{ env.CARGO_ABOUT_VERSION }}-${{ hashFiles('packages/desktop/Cargo.lock', 'packages/desktop/about.toml', 'packages/desktop/about.hbs') }}
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux' && steps.licences.outputs.cache-hit != 'true'
+        with:
+          tool: cargo-about@${{ env.CARGO_ABOUT_VERSION }}
+      - name: Check the crates' licences
+        if: runner.os == 'Linux' && steps.licences.outputs.cache-hit != 'true'
+        run: cargo about generate about.hbs -o third-party-licenses.html

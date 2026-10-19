@@ -37,6 +37,19 @@ export enum AnimeSeason {
 export type IdValue = string | number;
 
 /**
+ * Reduce numeric-string ids (`'123'`) and equivalent numbers (`123`) to one
+ * canonical key.
+ */
+export function canonicalIdValue(v: IdValue): IdValue {
+  if (typeof v === 'string') {
+    if (v === '') return v;
+    const n = Number(v);
+    if (Number.isInteger(n) && String(n) === v) return n;
+  }
+  return v;
+}
+
+/**
  * Single anidb-season → tvdb/tmdb-season mapping rule from the Anime-List XML
  * (`anime-list-master.xml`), preserved for episode-range disambiguation.
  */
@@ -51,6 +64,8 @@ export interface AnimeListMapping {
 }
 
 export interface ImdbHints {
+  /** IMDb show the season/episode hints are coordinates in. */
+  id?: string;
   title?: string;
   /** Season number on IMDb where this canonical record starts. */
   fromSeason?: number;
@@ -178,6 +193,7 @@ export interface AnimeEntry {
   mappings?: AnimeEntryMappings;
   type: AnimeType;
   imdb?: {
+    id?: string;
     seasonNumber?: number;
     fromEpisode?: number;
     nonImdbEpisodes?: number[];
@@ -200,6 +216,7 @@ export interface AnimeEntry {
     seasonNumber: number | null;
     seasonId: number | null;
     fromEpisode?: number | null;
+    absoluteOrder?: boolean;
   };
   title?: string;
   animeSeason?: { season: AnimeSeason; year: number | null };

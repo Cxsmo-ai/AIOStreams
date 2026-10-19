@@ -47,6 +47,11 @@ class CometStreamParser extends StreamParser {
     }
   }
 
+  // Comet names the torrent here; it picks the file only at playback.
+  protected override getTorrentTitle(stream: Stream): string | undefined {
+    return stream.behaviorHints?.filename ?? undefined;
+  }
+
   protected isInfoStream(stream: Stream): string | undefined {
     const str = 'Sync debrid account library now';
     if (stream.description?.includes(str)) {
@@ -200,7 +205,11 @@ export class CometPreset extends StremThruPreset {
       return [this.generateAddon(userData, options, [])];
     }
 
-    const usableServices = this.getUsableServices(userData, options.services, options.name);
+    const usableServices = this.getUsableServices(
+      userData,
+      options.services,
+      options.name
+    );
     // if no services are usable, use p2p
     if (!usableServices || usableServices.length === 0) {
       return [this.generateAddon(userData, options, [])];

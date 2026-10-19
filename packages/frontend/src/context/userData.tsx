@@ -11,8 +11,19 @@ import {
 } from '../../../core/src/utils/constants';
 import { useStatus } from './status';
 import { applyServiceMetadata } from './service-status';
-
-const USER_DATA_KEY = 'aiostreams-user-data';
+import { computeUserDataDiff } from '../utils/diff/userData';
+import {
+  clearDrafts,
+  isDraftOptOut,
+  migrateLegacyDraft,
+  pruneExpiredLocalDrafts,
+  readDraftFor,
+  readSessionDraft,
+  setDraftOptOut,
+  writeLocalDraft,
+  writeSessionDraft,
+  type Draft,
+} from '@/lib/drafts';
 
 export function applyMigrations(config: any): UserData {
   // Keep TorrentClaw credentials in the global service, never in marketplace
@@ -570,6 +581,100 @@ export const DefaultUserData: UserData = {
   checkOwned: true,
 };
 
+type Status = NonNullable<ReturnType<typeof useStatus>['status']>;
+
+/** Defaults are for a fresh configuration only. Must not mutate its input. */
+function applyStatusSettings(
+  data: UserData,
+  status: Status,
+  fillDefaults: boolean
+): UserData {
+  const forced = status.settings.forced.proxy;
+  const defaults = fillDefaults ? status.settings.defaults.proxy : undefined;
+  const services = status.settings.services;
+  const proxy = data.proxy;
+
+  const next: UserData = { ...data };
+  next.proxy = {
+    ...proxy,
+    enabled: forced.enabled ?? proxy?.enabled ?? defaults?.enabled ?? undefined,
+    id: (forced.id ??
+      proxy?.id ??
+      defaults?.id ??
+      (fillDefaults ? 'builtin' : undefined)) as
+      | 'builtin'
+      | 'mediaflow'
+      | 'stremthru'
+      | undefined,
+    url: forced.url ?? proxy?.url ?? defaults?.url ?? undefined,
+    publicUrl:
+      forced.publicUrl ?? proxy?.publicUrl ?? defaults?.publicUrl ?? undefined,
+    publicIp:
+      forced.publicIp ?? proxy?.publicIp ?? defaults?.publicIp ?? undefined,
+    credentials:
+      forced.credentials ??
+      proxy?.credentials ??
+      defaults?.credentials ??
+      undefined,
+    proxiedServices:
+      forced.proxiedServices ??
+      proxy?.proxiedServices ??
+      defaults?.proxiedServices ??
+      (fillDefaults ? [] : undefined),
+  };
+
+  next.services = (data.services ?? []).map((service) => {
+    const serviceMeta = services[service.id];
+    if (!serviceMeta) return service;
+    const credentials = { ...service.credentials };
+    serviceMeta.credentials.forEach((credential) => {
+      if (credential.forced) {
+        credentials[credential.id] = credential.forced;
+      } else if (
+        fillDefaults &&
+        credential.default &&
+        credentials[credential.id] === undefined
+      ) {
+        credentials[credential.id] = credential.default;
+      }
+    });
+    const withMetadata = applyServiceMetadata(service, serviceMeta);
+    return {
+      ...withMetadata,
+      credentials,
+      enabled: fillDefaults
+        ? serviceMeta.credentials.every(
+            (credential) =>
+              credential.forced ||
+              credential.default ||
+              credentials[credential.id] !== undefined
+          )
+        : withMetadata.enabled,
+    };
+  });
+
+  return next;
+}
+
+export function resolveDraft(draft: Draft, status: Status | null): UserData {
+  // migrations mutate, and the draft is still held
+  const restored = applyMigrations(structuredClone(draft.data));
+  return status ? applyStatusSettings(restored, status, false) : restored;
+}
+
+// Must agree with the review diff, or a draft can open with nothing in it.
+function sameConfig(a: UserData, b: UserData): boolean {
+  return computeUserDataDiff(a, b).diffs.length === 0;
+}
+
+/** Whether a configuration holds work worth offering to restore. */
+function hasWork(data: UserData): boolean {
+  return (
+    (data.presets ?? []).length > 0 ||
+    (data.services ?? []).some((service) => service.enabled)
+  );
+}
+
 interface UserDataContextType {
   userData: UserData;
   setUserData: (data: ((prev: UserData) => UserData | null) | null) => void;
@@ -579,6 +684,14 @@ interface UserDataContextType {
   setPassword: (password: string | null) => void;
   encryptedPassword: string | null;
   setEncryptedPassword: (encryptedPassword: string | null) => void;
+  /** Edits past this point count as a draft; matching it again clears one. */
+  setBaseline: (data: UserData) => void;
+  /** Null unless it belongs to the configuration currently held. */
+  pendingDraft: Draft | null;
+  restoreDraft: () => void;
+  discardDraft: () => void;
+  /** Discards the draft and stops keeping drafts on this browser. */
+  disableDrafts: () => void;
 }
 
 const UserDataContext = React.createContext<UserDataContextType | undefined>(
@@ -588,16 +701,28 @@ const UserDataContext = React.createContext<UserDataContextType | undefined>(
 export function UserDataProvider({ children }: { children: React.ReactNode }) {
   const { status } = useStatus();
 
-  // Initialize userData from local storage or apply default
-  const [userData, setUserData] = React.useState<UserData>(() => {
-    try {
-      const stored = localStorage.getItem(USER_DATA_KEY);
-      const data = stored ? JSON.parse(stored) : DefaultUserData;
-      return applyMigrations(data);
-    } catch {
-      return DefaultUserData;
+  // Only a same-tab reload restores silently; anything older is offered.
+  const [boot] = React.useState(() => {
+    migrateLegacyDraft(hasWork);
+    pruneExpiredLocalDrafts();
+    const session = readSessionDraft();
+    if (session && session.uuid === null) {
+      try {
+        return { initial: applyMigrations(session.data), pending: null };
+      } catch {
+        /* fall through to the prompt */
+      }
     }
+    return {
+      initial: DefaultUserData,
+      pending: readDraftFor(null),
+    };
   });
+
+  const [userData, setUserData] = React.useState<UserData>(boot.initial);
+  const [pendingDraft, setPendingDraft] = React.useState<Draft | null>(
+    boot.pending
+  );
 
   const [uuid, setUuid] = React.useState<string | null>(null);
   const [password, setPassword] = React.useState<string | null>(null);
@@ -605,10 +730,17 @@ export function UserDataProvider({ children }: { children: React.ReactNode }) {
     string | null
   >(null);
 
-  // Effect to persist userData to local storage
-  React.useEffect(() => {
-    localStorage.setItem(USER_DATA_KEY, JSON.stringify(userData));
-  }, [userData]);
+  // Last configuration known to be saved; a draft exists only while it differs.
+  const baselineRef = React.useRef<UserData>(DefaultUserData);
+  const anonBaselineRef = React.useRef<UserData>(DefaultUserData);
+  const [baselineReady, setBaselineReady] = React.useState(false);
+  // A save leaves userData untouched, so this re-runs the draft check.
+  const [baselineVersion, setBaselineVersion] = React.useState(0);
+
+  const setBaseline = React.useCallback((data: UserData) => {
+    baselineRef.current = data;
+    setBaselineVersion((v) => v + 1);
+  }, []);
 
   const statusApplied = React.useRef(false);
 
@@ -616,67 +748,132 @@ export function UserDataProvider({ children }: { children: React.ReactNode }) {
     if (!status || statusApplied.current) return;
     statusApplied.current = true;
 
-    const forced = status.settings.forced;
-    const defaults = status.settings.defaults;
-    const services = status.settings.services;
+    // The baseline takes the same overlay, or defaults read as unsaved edits.
+    // A configuration can load before status does.
+    const anonBaseline = applyStatusSettings(DefaultUserData, status, true);
+    const overlay = (data: UserData) =>
+      data === DefaultUserData
+        ? anonBaseline
+        : applyStatusSettings(data, status, false);
+    anonBaselineRef.current = anonBaseline;
+    baselineRef.current = overlay(baselineRef.current);
+    setUserData(overlay);
+    setBaselineReady(true);
+  }, [status]);
 
-    setUserData((prev) => {
-      const newData = { ...prev };
-      newData.proxy = {
-        ...newData.proxy,
-        enabled: forced.proxy.enabled ?? defaults.proxy?.enabled ?? undefined,
-        id: (forced.proxy.id ?? defaults.proxy?.id ?? 'builtin') as
-          | 'builtin'
-          | 'mediaflow'
-          | 'stremthru'
-          | undefined,
-        url: forced.proxy.url ?? defaults.proxy?.url ?? undefined,
-        publicUrl:
-          forced.proxy.publicUrl ?? defaults.proxy?.publicUrl ?? undefined,
-        publicIp:
-          forced.proxy.publicIp ?? defaults.proxy?.publicIp ?? undefined,
-        credentials:
-          forced.proxy.credentials ?? defaults.proxy?.credentials ?? undefined,
-        proxiedServices:
-          forced.proxy.proxiedServices ?? defaults.proxy?.proxiedServices ?? [],
-      };
+  // The identity is unknown at boot, so a configuration's draft is picked up
+  // once its uuid arrives, and is never offered to any other identity.
+  const draftIdentity = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (draftIdentity.current === uuid) return;
+    draftIdentity.current = uuid;
+    const draft = readDraftFor(uuid);
+    let differs = false;
+    try {
+      differs = !!draft && !sameConfig(resolveDraft(draft, status), userData);
+    } catch {
+      /* unusable draft */
+    }
+    setPendingDraft(differs ? draft : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uuid]);
 
-      newData.services = (newData.services ?? []).map((service) => {
-        const serviceMeta = services[service.id];
-        if (!serviceMeta) return service;
-        return applyServiceMetadata(service, serviceMeta);
-      });
+  React.useEffect(() => {
+    if (!baselineReady) return;
+    const handle = setTimeout(() => {
+      if (sameConfig(userData, baselineRef.current)) {
+        clearDrafts(uuid);
+        return;
+      }
+      writeSessionDraft(userData, uuid, userData.addonName);
+      writeLocalDraft(userData, uuid, userData.addonName);
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [userData, uuid, baselineReady, baselineVersion]);
 
-      return newData;
+  const restoreDraft = React.useCallback(() => {
+    setPendingDraft((draft) => {
+      if (draft) {
+        try {
+          const restored = resolveDraft(draft, status);
+          setUserData(() => restored);
+        } catch {
+          /* unusable draft; drop it rather than breaking the page */
+        }
+      }
+      return null;
     });
   }, [status]);
 
-  const safeSetUserData = (
-    data: ((prev: UserData) => UserData | null) | null
-  ) => {
-    if (data === null) {
-      setUserData(DefaultUserData);
-    } else {
-      setUserData((prev) => {
-        const result = data(prev);
-        return result === null ? DefaultUserData : result;
-      });
-    }
-  };
+  const discardDraft = React.useCallback(() => {
+    setPendingDraft((draft) => {
+      if (draft) clearDrafts(draft.uuid);
+      return null;
+    });
+  }, []);
+
+  const applicableDraft =
+    pendingDraft && pendingDraft.uuid === uuid ? pendingDraft : null;
+
+  const disableDrafts = React.useCallback(() => {
+    setDraftOptOut();
+    setPendingDraft((draft) => {
+      if (draft) clearDrafts(draft.uuid);
+      return null;
+    });
+  }, []);
+
+  // Clearing means signing out; resetting to the baseline writes no draft.
+  const safeSetUserData = React.useCallback(
+    (data: ((prev: UserData) => UserData | null) | null) => {
+      const reset = () => {
+        baselineRef.current = anonBaselineRef.current;
+        return anonBaselineRef.current;
+      };
+      if (data === null) {
+        setUserData(reset);
+      } else {
+        setUserData((prev) => {
+          const result = data(prev);
+          return result === null ? reset() : result;
+        });
+      }
+    },
+    []
+  );
+
+  const value = React.useMemo(
+    () => ({
+      userData,
+      setUserData: safeSetUserData,
+      uuid,
+      setUuid,
+      password,
+      setPassword,
+      encryptedPassword,
+      setEncryptedPassword,
+      setBaseline,
+      pendingDraft: applicableDraft,
+      restoreDraft,
+      discardDraft,
+      disableDrafts,
+    }),
+    [
+      userData,
+      safeSetUserData,
+      uuid,
+      password,
+      encryptedPassword,
+      setBaseline,
+      applicableDraft,
+      restoreDraft,
+      discardDraft,
+      disableDrafts,
+    ]
+  );
 
   return (
-    <UserDataContext.Provider
-      value={{
-        userData,
-        setUserData: safeSetUserData,
-        uuid,
-        setUuid,
-        password,
-        setPassword,
-        encryptedPassword,
-        setEncryptedPassword,
-      }}
-    >
+    <UserDataContext.Provider value={value}>
       {children}
     </UserDataContext.Provider>
   );

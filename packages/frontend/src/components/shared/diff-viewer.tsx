@@ -7,9 +7,9 @@ import React, {
 } from 'react';
 import { DiffItem, formatValue } from '../../utils/diff/diff';
 import { calculateLineDiff, LineDiff } from '../../utils/diff/text';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs/tabs';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@aiostreams/ui/tabs';
 import { ChevronUp, ChevronDown } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Button } from '@aiostreams/ui/button';
 import { toast } from 'sonner';
 
 export interface DiffAnnotation {
@@ -107,7 +107,7 @@ export function DiffViewer({
 
   return (
     <div className="w-full mt-4">
-      <Tabs defaultValue="visual" className="w-full">
+      <Tabs defaultValue="visual" className="w-full" animated={false}>
         <TabsList className="mb-4 grid w-full grid-cols-2">
           <TabsTrigger value="visual">Visual</TabsTrigger>
           <TabsTrigger value="json">Raw JSON</TabsTrigger>
@@ -161,7 +161,7 @@ export function DiffViewer({
                         <div className="text-xs text-[--muted] uppercase">
                           Old
                         </div>
-                        <div className="p-2 bg-red-900/20 text-red-200 rounded break-all border border-red-900/30 font-mono text-xs whitespace-pre-wrap">
+                        <div className="p-2 bg-red-600/20 text-red-200 rounded break-all border border-red-600/30 font-mono text-xs whitespace-pre-wrap">
                           {format(diff.oldValue)}
                         </div>
                       </div>
@@ -316,7 +316,7 @@ function JsonDiffContent({ textDiffs }: { textDiffs: LineDiff[] }) {
                 line.type === 'add'
                   ? 'bg-green-900/20 text-green-300'
                   : line.type === 'remove'
-                    ? 'bg-red-900/20 text-red-300'
+                    ? 'bg-red-600/20 text-red-300'
                     : 'text-gray-400'
               } ${idx === changeIndices[currentChangeIndex] ? 'ring-1 ring-blue-500/50' : ''}`}
             >

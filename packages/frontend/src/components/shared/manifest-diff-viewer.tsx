@@ -4,7 +4,7 @@ import {
   computeManifestDiff,
   manifestValueFormatter,
 } from '../../utils/diff/manifest';
-import { Alert } from '../ui/alert';
+import { Alert } from '@aiostreams/ui/alert';
 
 interface ManifestDiffViewerProps {
   oldManifest: any;
@@ -133,7 +133,7 @@ export function ManifestChangeSummary({
       : 'info';
 
   const alertDescription = hasCritical
-    ? 'Reinstall required - some changes will not take effect in Stremio until you reinstall.'
+    ? 'Reinstall required - some changes will not take effect until you reinstall.'
     : hasWarning
       ? 'Reinstall recommended to apply all changes correctly.'
       : 'No significant changes - reinstall is not required for expected functionality.';

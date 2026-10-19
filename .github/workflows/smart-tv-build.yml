@@ -1,0 +1,170 @@
+name: Smart TV Build
+
+# Packages the web app for LG (webOS) and Samsung (Tizen) TVs, at the version in
+# packages/smart-tv/package.json.
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: The smart-tv-v* release to attach the packages to, if any
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  # The page both packages hold, built once.
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          version=$(jq -r .version packages/smart-tv/package.json)
+          if [ -n "$RELEASE" ] && [ "$RELEASE" != "smart-tv-v$version" ]; then
+            echo "::error::$RELEASE does not match packages/smart-tv/package.json ($version)"
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter "@aiostreams/web..."
+      - run: pnpm -F @aiostreams/web build:standalone
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smart-tv-web
+          path: packages/web/dist-standalone
+          retention-days: 1
+
+  webos:
+    needs: web
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IPK: aiostreams-webos-${{ needs.web.outputs.version }}.ipk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @aiostreams/smart-tv
+      - uses: actions/download-artifact@v8
+        with:
+          name: smart-tv-web
+          path: packages/web/dist-standalone
+      - working-directory: packages/smart-tv
+        run: |
+          node scripts/build.mjs webos
+          mv out/*.ipk "out/$IPK"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.IPK }}
+          path: packages/smart-tv/out/${{ env.IPK }}
+          compression-level: 0
+      - if: inputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: gh release upload "$RELEASE" "packages/smart-tv/out/$IPK" --clobber
+
+  tizen:
+    needs: web
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WGT: aiostreams-tizen-${{ needs.web.outputs.version }}.wgt
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @aiostreams/smart-tv
+      - uses: actions/download-artifact@v8
+        with:
+          name: smart-tv-web
+          path: packages/web/dist-standalone
+      - working-directory: packages/smart-tv
+        run: |
+          node scripts/build.mjs tizen
+          mv out/AIOStreams.wgt "out/$WGT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.WGT }}
+          path: packages/smart-tv/out/${{ env.WGT }}
+          compression-level: 0
+      - if: inputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: gh release upload "$RELEASE" "packages/smart-tv/out/$WGT" --clobber
+
+  # A release also refreshes the rolling `smart-tv` release, the newest packages under
+  # names that stay the same, and the Homebrew Channel repository on `smart-tv-feed`.
+  feed:
+    needs: [web, webos, tizen]
+    if: inputs.release != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE: ${{ inputs.release }}
+      VERSION: ${{ needs.web.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            packages/smart-tv/feed-release.md
+            packages/smart-tv/webos/appinfo.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: aiostreams-*
+          merge-multiple: true
+          path: feed
+      - run: |
+          repo="https://github.com/${{ github.repository }}"
+          raw="https://raw.githubusercontent.com/${{ github.repository }}"
+          cp "feed/aiostreams-webos-$VERSION.ipk" feed/aiostreams-webos.ipk
+          cp "feed/aiostreams-tizen-$VERSION.wgt" feed/aiostreams-tizen.wgt
+          # The repository points at this release's own copy, which never changes under its hash.
+          jq -n \
+            --slurpfile app packages/smart-tv/webos/appinfo.json \
+            --arg version "$VERSION" \
+            --arg ipk "$repo/releases/download/$RELEASE/aiostreams-webos-$VERSION.ipk" \
+            --arg sha256 "$(sha256sum feed/aiostreams-webos.ipk | cut -d' ' -f1)" \
+            --arg icon "$raw/main/packages/smart-tv/webos/largeIcon.png" \
+            --arg source "$repo" \
+            '$app[0] as $a | {packages: [{
+              id: $a.id, title: $a.title, iconUri: $icon,
+              shortDescription: "The AIOStreams app for LG TVs.",
+              manifest: {
+                id: $a.id, version: $version, type: $a.type, title: $a.title, iconUri: $icon,
+                sourceUrl: $source, rootRequired: false, ipkUrl: $ipk, ipkHash: {sha256: $sha256}
+              }
+            }]}' >feed/apps.json
+          # The channel fetches it across origins, which release downloads refuse.
+          mkdir branch && cp feed/apps.json branch/
+          git -C branch init -q
+          git -C branch add apps.json
+          git -C branch -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -qm "webOS repository for $RELEASE"
+          git -C branch push -qf "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}" HEAD:refs/heads/smart-tv-feed
+          sed -e "s|@BASE@|$repo/releases/download/smart-tv|g" \
+            -e "s|@REPOSITORY@|$raw/smart-tv-feed/apps.json|g" \
+            packages/smart-tv/feed-release.md >notes.md
+          if gh release view smart-tv >/dev/null 2>&1; then
+            gh release edit smart-tv --title "TV apps" --notes-file notes.md
+          else
+            gh release create smart-tv --latest=false --title "TV apps" --notes-file notes.md
+          fi
+          gh release upload smart-tv feed/aiostreams-webos.ipk feed/aiostreams-tizen.wgt --clobber

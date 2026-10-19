@@ -20,12 +20,18 @@ import {
   encodeUsenetStreamToken,
   libraryEntryToDownload,
   addUsenetNzb,
+  deleteUsenetLibraryEntry,
   resolveFileList,
   selectStreamFile,
+  warmUsenetStreamTarget,
   toDebridFiles,
   shouldSkipDegraded,
   hasRecentStreamActivity,
+  type UsenetStreamToken,
 } from '../usenet/integration/index.js';
+import { storedFileInfo, storedFilesByPost } from '../media-info/lookup.js';
+import type { MediaInfoRecord } from '../media-info/record.js';
+import { toWireMediaInfo } from '../media-info/wire.js';
 import {
   ReleaseBlocklistRepository,
   UsenetLibraryRepository,
@@ -119,6 +125,10 @@ export class NativeUsenetService implements UsenetDebridService {
       }
     );
 
+    const probed = await storedFilesByPost(
+      [...library.values()].map((e) => e.nzbHash)
+    ).catch(() => new Map<string, Map<string, MediaInfoRecord>>());
+
     const policy = appConfig.usenet.damagePolicy;
     return nzbs.map(({ name, hash }) => {
       const entry = hash ? library.get(hash) : undefined;
@@ -134,8 +144,12 @@ export class NativeUsenetService implements UsenetDebridService {
           library: true,
         };
       }
+      const posted = entry ? probed.get(entry.nzbHash) : undefined;
       const files: DebridFile[] | undefined = entry?.files.length
-        ? toDebridFiles(entry.files)
+        ? toDebridFiles(entry.files).map((file) => {
+            const info = storedFileInfo(posted, file);
+            return info ? { ...file, mediaInfo: toWireMediaInfo(info) } : file;
+          })
         : undefined;
       return {
         id: hash ?? name ?? 'unknown',
@@ -352,16 +366,32 @@ export class NativeUsenetService implements UsenetDebridService {
         await reserveTorrentClawNzbBytes(selected.size ?? 0);
       }
     }
-    const token = encodeUsenetStreamToken({
+    const streamToken: UsenetStreamToken = {
       nzb: playbackInfo.nzb,
       hash: contentHash,
       fileIndex: selected.index,
       innerPath: selected.path,
       filename: chosenFilename,
       releaseKey: playbackInfo.releaseKey,
+      indexer: playbackInfo.indexer,
+      infoUrl: playbackInfo.infoUrl,
       owner: this.owner,
-    });
+      imdbId: playbackInfo.metadata?.imdbId ?? undefined,
+      tmdbId: playbackInfo.metadata?.tmdbId ?? undefined,
+      tvdbId: playbackInfo.metadata?.tvdbId ?? undefined,
+      season: playbackInfo.metadata?.season,
+      episode: playbackInfo.metadata?.episode,
+    };
+    const token = encodeUsenetStreamToken(streamToken);
 
+    warmUsenetStreamTarget({
+      nzb: playbackInfo.nzb,
+      hash: contentHash,
+      fileIndex: selected.index,
+      innerPath: selected.path,
+      providers,
+      options,
+    });
     const url = `${appConfig.bootstrap.baseUrl}/api/v1/usenet/stream/${token}`;
     logger.debug(
       {
@@ -436,7 +466,7 @@ export class NativeUsenetService implements UsenetDebridService {
   async removeNzb(nzbId: string): Promise<void> {
     this.assertAuthorised();
     const resolved = await UsenetLibraryRepository.getResolved(nzbId);
-    await UsenetLibraryRepository.delete(resolved?.entry.nzbHash ?? nzbId);
+    await deleteUsenetLibraryEntry(resolved?.entry.nzbHash ?? nzbId);
   }
 
   /**

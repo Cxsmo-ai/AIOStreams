@@ -1,30 +1,45 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { MergedCatalog } from '@aiostreams/core';
 import { useStatus } from '@/context/status';
 import { useUserData } from '@/context/userData';
 import { SettingsCard } from '../../../shared/settings-card';
-import { Button, CloseButton, IconButton } from '../../../ui/button';
-import { Modal } from '../../../ui/modal';
-import { TextInput } from '../../../ui/text-input';
-import { Combobox } from '../../../ui/combobox';
-import { Select } from '../../../ui/select';
-import { Alert } from '../../../ui/alert';
+import { Button, CloseButton, IconButton } from '@aiostreams/ui/button';
+import { Modal } from '@aiostreams/ui/modal';
+import { TextInput } from '@aiostreams/ui/text-input';
+import { Combobox } from '@aiostreams/ui/combobox';
+import { Select } from '@aiostreams/ui/select';
+import { Alert } from '@aiostreams/ui/alert';
 import {
   ConfirmationDialog,
   useConfirmationDialog,
-} from '../../../shared/confirmation-dialog';
+} from '@aiostreams/ui/shared/confirmation-dialog';
 import {
   Accordion,
   AccordionTrigger,
   AccordionContent,
   AccordionItem,
-} from '../../../ui/accordion';
+} from '@aiostreams/ui/accordion';
 import { LuMerge } from 'react-icons/lu';
 import { BiEdit, BiTrash } from 'react-icons/bi';
 import { FaPlus } from 'react-icons/fa';
 import { toast } from 'sonner';
 
-export function MergedCatalogsCard() {
+/** Opens the editor from elsewhere. */
+export type MergeRequest =
+  | { kind: 'new'; catalogs: { id: string; type: string }[] }
+  | { kind: 'edit'; id: string };
+
+export const encodeMergeSource = (c: { id: string; type: string }) =>
+  `id=${encodeURIComponent(c.id)}&type=${encodeURIComponent(c.type)}`;
+
+export function MergedCatalogsCard({
+  request,
+  onRequestHandled,
+}: {
+  request?: MergeRequest | null;
+  /** Clears the request, so a remount doesn't open the editor again. */
+  onRequestHandled?: () => void;
+}) {
   const { userData, setUserData } = useUserData();
   const { status } = useStatus();
   const maxMergedCatalogSources =
@@ -78,7 +93,7 @@ export function MergedCatalogsCard() {
   const allCatalogs = (userData.catalogModifications || [])
     .filter((c) => !c.id.startsWith('aiostreams.merged.')) // Exclude merged catalogs from being selected as sources
     .map((c) => ({
-      value: `id=${encodeURIComponent(c.id)}&type=${encodeURIComponent(c.type)}`,
+      value: encodeMergeSource(c),
       name: c.name || c.id,
       catalogType: c.type,
       addonName: c.addonName || 'Unknown Addon',
@@ -169,6 +184,23 @@ export function MergedCatalogsCard() {
     setExpandedAddons(new Set());
     setModalOpen(true);
   };
+
+  useEffect(() => {
+    if (!request) return;
+    onRequestHandled?.();
+    if (request.kind === 'edit') {
+      const merged = userData.mergedCatalogs?.find(
+        (mc) => mc.id === request.id
+      );
+      if (merged) openEditModal(merged);
+      return;
+    }
+    openAddModal();
+    const types = new Set(request.catalogs.map((c) => c.type));
+    if (types.size === 1) setType([...types][0]);
+    setSelectedCatalogs(request.catalogs.map(encodeMergeSource));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request]);
 
   const handleSave = () => {
     if (!name.trim()) {
@@ -551,7 +583,7 @@ export function MergedCatalogsCard() {
                                 </div>
                                 <div className="flex items-center gap-1.5 flex-shrink-0">
                                   {catalog.isDisabled && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-800/20 border border-orange-500/50 text-orange-300">
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-500/20 border border-orange-500/50 text-orange-300">
                                       Disabled
                                     </span>
                                   )}

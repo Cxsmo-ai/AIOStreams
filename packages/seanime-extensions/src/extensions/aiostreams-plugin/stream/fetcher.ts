@@ -141,8 +141,9 @@ export class StreamFetcher {
     } catch (err) {
       log.warn('manifest URL invalid/missing', err);
       if (!opts.silent) {
+        const msg = err instanceof Error ? err.message : String(err);
         this.ctx.toast.error(
-          'AIOStreams manifest URL is invalid or missing. Configure it in the extension settings.'
+          `AIOStreams manifest URL is invalid or missing: ${msg}`
         );
       }
       return null;
@@ -150,7 +151,9 @@ export class StreamFetcher {
     return new AIOStreamsAPI(
       creds.baseUrl,
       creds.uuid,
-      creds.encryptedPassword
+      creds.encryptedPassword,
+      creds.variants,
+      (url, init) => this.ctx.fetch(url, init as $ui.FetchOptions)
     );
   }
 
@@ -227,7 +230,7 @@ export class StreamFetcher {
     }
 
     const lookup = buildLookup(originalId, parsedId, anime, mediaType);
-    const cacheKey = StreamCache.keyFor(parsedId);
+    const cacheKey = StreamCache.keyFor(parsedId, api.variants);
 
     const base = {
       episodeInfo,
@@ -360,7 +363,7 @@ export class StreamFetcher {
     const sessionId = this.setSessionId();
     this.resetDownloadSession();
 
-    this.panel.wvState.set({
+    this.panel.setState({
       results: [],
       loading: true,
       error: null,
@@ -496,7 +499,7 @@ export class StreamFetcher {
   }
 
   private applyResultsToPanel(state: WebviewState): void {
-    this.panel.wvState.set(state);
+    this.panel.setState(state);
   }
 
   refreshLastQuery(): void {

@@ -10,9 +10,12 @@ import { baseOptions, CacheKeyRequestOptions, Preset } from './preset.js';
 import { createLogger, getSimpleTextHash } from '../utils/index.js';
 import { constants, ServiceId } from '../utils/index.js';
 import { config as appConfig } from '../config/index.js';
-import { StreamParser } from '../parser/index.js';
+import { StreamParser, getRegexForTextAfterEmojis } from '../parser/index.js';
 
 const logger = createLogger('core');
+
+const FILE_LINE = getRegexForTextAfterEmojis(['📄']);
+const TITLE_LINE = getRegexForTextAfterEmojis(['📂']);
 
 class MediaFusionStreamParser extends StreamParser {
   protected get sizeK(): 1024 | 1000 {
@@ -43,8 +46,8 @@ class MediaFusionStreamParser extends StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): string | undefined {
-    const nameRegex = this.getRegexForTextAfterEmojis(['📂']);
-    const filenameRegex = this.getRegexForTextAfterEmojis(['📄']);
+    const nameRegex = getRegexForTextAfterEmojis(['📂']);
+    const filenameRegex = getRegexForTextAfterEmojis(['📄']);
 
     const name = stream.description?.match(nameRegex)?.[1];
     const filename = stream.description?.match(filenameRegex)?.[1];
@@ -55,6 +58,15 @@ class MediaFusionStreamParser extends StreamParser {
     }
 
     return undefined;
+  }
+
+  // Both lines come from this preset's own description template.
+  protected override getTorrentFile(stream: Stream): string | undefined {
+    return stream.description?.match(FILE_LINE)?.[1];
+  }
+
+  protected override getTorrentTitle(stream: Stream): string | undefined {
+    return stream.description?.match(TITLE_LINE)?.[1];
   }
 
   protected override getFolderSize(
@@ -100,7 +112,7 @@ class MediaFusionStreamParser extends StreamParser {
   ): string | undefined {
     const indexer = super.getIndexer(stream, currentParsedStream);
     const contributor = stream.description?.match(
-      this.getRegexForTextAfterEmojis(['🧑‍💻'])
+      getRegexForTextAfterEmojis(['🧑‍💻'])
     )?.[1];
     let indexerParts = [];
     if (indexer) {
@@ -117,7 +129,7 @@ class MediaFusionStreamParser extends StreamParser {
     currentParsedStream: ParsedStream
   ): string[] {
     const languages = super.getLanguages(stream, currentParsedStream);
-    const regex = this.getRegexForTextAfterEmojis(['🌐']);
+    const regex = getRegexForTextAfterEmojis(['🌐']);
     const languagesString = stream.description?.match(regex)?.[1];
     if (languagesString) {
       return languages.concat(
@@ -149,6 +161,7 @@ export class MediaFusionPreset extends Preset {
       constants.PIKPAK_SERVICE,
       constants.SEEDR_SERVICE,
       constants.EASYNEWS_SERVICE,
+      constants.TORRIN_SERVICE,
     ];
 
     const supportedResources = [

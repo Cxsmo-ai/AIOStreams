@@ -1,0 +1,83 @@
+[package]
+name = "aiostreams-desktop"
+description = "The AIOStreams app in a native window, playing through mpv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aiostreams-desktop"
+path = "src/main.rs"
+
+[dependencies]
+aiostreams-desktop-core.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+base64 = "0.22"
+velopack = "1.2"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tao.workspace = true
+wry.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Foundation",
+  "Media",
+  "Storage_Streams",
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_WinRT",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+] }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_DataExchange",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Controls_Dialogs",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "0.11", features = ["v4_14"] }
+webkit6 = { version = "0.6", features = ["v2_42"] }
+libc = "0.2"
+libloading.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-quartz-core = { version = "0.3", features = ["objc2-open-gl", "objc2-core-video"] }
+objc2-open-gl = "0.3"
+objc2-core-video = "0.3"
+objc2-core-foundation = "0.3"
+dispatch2 = "0.3"
+block2 = "0.6"
+objc2-media-player = { version = "0.3", default-features = false, features = [
+  "std",
+  "block2",
+  "objc2-app-kit",
+  "objc2-core-foundation",
+  "MPMediaItem",
+  "MPNowPlayingInfoCenter",
+  "MPRemoteCommand",
+  "MPRemoteCommandCenter",
+  "MPRemoteCommandEvent",
+] }
+muda = "0.17"
+libc = "0.2"
+libloading.workspace = true
+
+[build-dependencies]
+winresource = "0.1"

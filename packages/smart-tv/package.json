@@ -1,0 +1,14 @@
+{
+  "name": "@aiostreams/smart-tv",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:webos": "pnpm -F @aiostreams/web build:standalone && node scripts/build.mjs webos",
+    "build:tizen": "pnpm -F @aiostreams/web build:standalone && node scripts/build.mjs tizen"
+  },
+  "devDependencies": {
+    "@webos-tools/cli": "^3.2.6",
+    "fflate": "^0.8.3"
+  }
+}

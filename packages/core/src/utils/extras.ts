@@ -1,4 +1,33 @@
-import { Extras, ExtrasSchema } from '../db/schemas.js';
+import { Extras, ExtrasSchema, type Manifest } from '../db/schemas.js';
+
+type CatalogExtra = NonNullable<Manifest['catalogs'][number]['extra']>[number];
+
+/** Only a genre is required, and it offers one to fall back on. */
+export function requiresOnlyGenre(extra: CatalogExtra[] | undefined): boolean {
+  const required = (extra ?? []).filter((e) => e.isRequired);
+  return (
+    required.length === 1 &&
+    required[0].name === 'genre' &&
+    !!firstGenre(required[0])
+  );
+}
+
+export function firstGenre(
+  extra: CatalogExtra | undefined
+): string | undefined {
+  return extra?.options?.find(
+    (o): o is string => typeof o === 'string' && o.length > 0
+  );
+}
+
+/** Values are percent-encoded, so a `&` inside one survives the split; a bare `%` stays literal. */
+function decodeValue(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 export class ExtrasParser {
   private extras: Partial<Extras>;
@@ -13,8 +42,8 @@ export class ExtrasParser {
     }
     const extrasObject = Object.fromEntries(
       extras.split('&').map((e) => {
-        const [key, value] = e.split('=');
-        return [key, encodeURIComponent(value)];
+        const [key, ...value] = e.split('=');
+        return [key, encodeURIComponent(decodeValue(value.join('=')))];
       })
     );
 
@@ -52,6 +81,12 @@ export class ExtrasParser {
 
   public has(key: keyof Extras): boolean {
     return key in this.extras && this.extras[key] !== undefined;
+  }
+
+  public names(): string[] {
+    return Object.entries(this.extras)
+      .filter(([_, value]) => value !== undefined)
+      .map(([key]) => key);
   }
 
   public toString(): string {

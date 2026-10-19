@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { constants, ServiceId, Cache, appConfig } from '../utils/index.js';
+import { registerLockErrorClass } from '../utils/lock-error-registry.js';
 import { WD1_KEY_REGEX } from '../release-blocklist/keys.js';
 export { TorboxRouteSchema } from './torbox-route-schema.js';
 import { TorboxRouteSchema } from './torbox-route-schema.js';
@@ -78,6 +79,7 @@ export class DebridError extends Error {
     }
   }
 }
+registerLockErrorClass(DebridError);
 
 export const convertStatusCodeToError = (code: number): DebridError['code'] => {
   switch (code) {
@@ -179,6 +181,7 @@ const DebridFileSchema = z.object({
   size: z.number(),
   mimeType: z.string().optional(),
   mediaInfo: z.record(z.string(), z.unknown()).optional(),
+  videoHash: z.string().optional(),
   link: z.string().optional(),
   path: z.string().optional(),
   index: z.number().optional(),
@@ -214,11 +217,18 @@ const TitleMetadataSchema = z.object({
   country: z.string().optional(),
   season: z.number().optional(),
   episode: z.number().optional(),
+  imdbId: z.string().nullable().optional(),
+  tmdbId: z.number().nullable().optional(),
+  tvdbId: z.number().nullable().optional(),
   absoluteEpisode: z.number().optional(),
   relativeAbsoluteEpisode: z.number().optional(),
+  // the same episode as tvdb numbers it, when that differs
+  tvdbSeason: z.number().optional(),
+  tvdbEpisode: z.number().optional(),
   // local air dates ('YYYY-MM-DD') of the requested episode for date-based shows
   airDates: z.array(z.string()).optional(),
   isDateBased: z.boolean().optional(),
+  originalLanguage: z.string().optional(),
 });
 
 const BasePlaybackInfoSchema = z.object({
@@ -261,6 +271,7 @@ const UsenetInfoSchema = BaseFileInfoSchema.extend({
   quotaBucket: z.enum(['torrentclaw']).optional(),
   quotaReservationKey: z.string().min(1).max(256).optional(),
   quotaBytes: z.number().nonnegative().optional(),
+  infoUrl: z.string().optional(),
   type: z.literal('usenet'),
 });
 

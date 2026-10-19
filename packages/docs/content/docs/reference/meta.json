@@ -4,6 +4,10 @@
     "stream-expressions",
     "config-expressions",
     "custom-formatter",
-    "templates"
+    "templates",
+    "addon-protocol",
+    "jellyfin-extensions",
+    "web-app-css",
+    "version-badges"
   ]
 }

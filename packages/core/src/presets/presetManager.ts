@@ -39,6 +39,7 @@ import { WebStreamrPreset } from './webstreamr.js';
 import { TMDBAddonPreset } from './tmdb.js';
 import { TorrentsDbPreset } from './torrentsDb.js';
 import { USATVPreset } from './usaTv.js';
+import { USATVNextPreset } from './usaTvNext.js';
 import { ArgentinaTVPreset } from './argentinaTv.js';
 import { OpenSubtitlesV3PlusPreset } from './opensubtitles-v3-plus.js';
 import { DeepbridOpenSubtitlesPreset } from './deepbridOpenSubtitles.js';
@@ -62,6 +63,7 @@ import { TorznabPreset } from './torznab.js';
 import { AStreamPreset } from './aStream.js';
 import { ZileanPreset } from './zilean.js';
 import { AnimeToshoPreset } from './animetosho.js';
+import { AnimeToshoNewPreset } from './animeToshoNew.js';
 import { NewznabPreset } from './newznab.js';
 import { UnarrIndexerPreset } from './unarrIndexer.js';
 import { NewshostingIndexerPreset } from './newshostingIndexer.js';
@@ -73,6 +75,9 @@ import { NZBHydraPreset } from './nzbhydra.js';
 import { KnabenPreset } from './knaben.js';
 import { LibraryPreset } from './library.js';
 import { EztvPreset } from './eztv.js';
+import { TheRARBGPreset } from './therarbg.js';
+import { ThePirateBayPreset } from './thePirateBay.js';
+import { TsukihimePreset } from './tsukihime.js';
 import { BitmagnetPreset } from './bitmagnet.js';
 import { BrazucaTorrentsPreset } from './brazucaTorrents.js';
 import { SootioPreset } from './sootio.js';
@@ -85,6 +90,7 @@ import { StreamNZBPreset } from './streamnzb.js';
 import { DavexPreset } from './davex.js';
 import { HdHubPreset } from './hdhub.js';
 import { KuratoPreset } from './kurato.js';
+import { PenguPlayPreset } from './penguplay.js';
 import { BaguettioPreset } from './baguettio.js';
 import { Preset } from './index.js';
 
@@ -108,10 +114,14 @@ let PRESET_LIST: string[] = [
   'knaben',
   'library',
   'eztv',
+  'therarbg',
+  'the-pirate-bay',
+  'tsukihime',
   'torrent-galaxy',
   'bitmagnet',
   'seadex',
   'animetosho',
+  'anime-tosho-new',
   'neko-bt',
   'prowlarr',
   'harbrr',
@@ -136,6 +146,7 @@ let PRESET_LIST: string[] = [
   'streamnzb',
   'davex',
   'dmm-cast',
+  'penguplay',
   'nuvio-streams',
   'webstreamr',
   'hdhub',
@@ -145,6 +156,7 @@ let PRESET_LIST: string[] = [
   'yastream',
   'streamasia',
   'usa-tv',
+  'usa-tv-next',
   'argentina-tv',
   'debridio-tv',
   'debridio-watchtower',
@@ -255,6 +267,8 @@ export class PresetManager {
         return FKStreamPreset;
       case 'flix-streams':
         return FlixStreamsPreset;
+      case 'penguplay':
+        return PenguPlayPreset;
       case 'anime-kitsu':
         return AnimeKitsuPreset;
       case 'nuvio-streams':
@@ -285,6 +299,8 @@ export class PresetManager {
         return TorrentsDbPreset;
       case 'usa-tv':
         return USATVPreset;
+      case 'usa-tv-next':
+        return USATVNextPreset;
       case 'argentina-tv':
         return ArgentinaTVPreset;
       case 'brazuca-torrents':
@@ -331,6 +347,8 @@ export class PresetManager {
         return ZileanPreset;
       case 'animetosho':
         return AnimeToshoPreset;
+      case 'anime-tosho-new':
+        return AnimeToshoNewPreset;
       case 'neko-bt':
         return NekoBtPreset;
       case 'prowlarr':
@@ -347,6 +365,12 @@ export class PresetManager {
         return LibraryPreset;
       case 'eztv':
         return EztvPreset;
+      case 'therarbg':
+        return TheRARBGPreset;
+      case 'the-pirate-bay':
+        return ThePirateBayPreset;
+      case 'tsukihime':
+        return TsukihimePreset;
       case 'bitmagnet':
         return BitmagnetPreset;
       case 'seadex':
