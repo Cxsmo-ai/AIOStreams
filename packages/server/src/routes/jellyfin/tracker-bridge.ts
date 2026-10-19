@@ -8,8 +8,12 @@ import {
   type TrackerRecord,
   TrackerRecordSchema,
   createLogger,
-  UserRepository,
   config as appConfig,
+  type ContentRef,
+  type PlaybackEventKind,
+  type WatchStateRow,
+  type JellyfinItem,
+  type ListChangeInput,
 } from '@aiostreams/core';
 import {
   resolveLinkedAdapters,
@@ -17,13 +21,7 @@ import {
   flushScrobbleOutbox,
   defaultProviderApiFor,
 } from '../api/tracking.js';
-import type {
-  JellyfinRequestContext,
-  ContentRef,
-  PlaybackEventKind,
-  WatchStateRow,
-} from './handoff.js';
-import type { JellyfinItem } from './types.js';
+import type { JellyfinRequestContext } from './context.js';
 import { idsFor } from './handoff.js';
 import type { TrackerScrobbleEvent } from '../api/tracker-providers.js';
 
@@ -292,7 +290,7 @@ export async function reportPlaybackToMergedTracker(
         ? 100
         : 0;
 
-    const user = await UserRepository.getUser(userUuid).catch(() => null);
+    const user = (ctx.userData as any);
     const { adapters } = resolveLinkedAdapters(user);
 
     if (adapters.length > 0) {
@@ -495,7 +493,7 @@ export async function reportRatingToMergedTracker(
 
 export async function reportListChangeToMergedTracker(
   ctx: JellyfinRequestContext,
-  kind: 'added' | 'removed',
+  kind: ListChangeInput['kind'],
   ref: ContentRef,
   item?: JellyfinItem | null
 ): Promise<void> {
@@ -517,22 +515,25 @@ export async function reportListChangeToMergedTracker(
     const primaryId =
       providerIds['imdb'] ||
       (providerIds['tmdb'] ? `tmdb:${providerIds['tmdb']}` : ref.baseId);
+    const isDropped = kind === 'dropped' || kind === 'undropped';
+    const isRemoval = kind === 'unwatchlisted' || kind === 'undropped';
+    const targetState = isDropped ? 'dropped' : 'watchlist';
     const recordId =
       ref.kind === 'movie'
-        ? `movie:imdb:${primaryId}|watchlist`
-        : `series:imdb:${primaryId}|watchlist`;
+        ? `movie:imdb:${primaryId}|${targetState}`
+        : `series:imdb:${primaryId}|${targetState}`;
 
     const title =
       item?.Name || (ref.kind === 'movie' ? 'Movie' : 'Series');
 
-    if (kind === 'removed') {
+    if (isRemoval) {
       const tombstone: TrackerRecord = TrackerRecordSchema.parse({
         id: recordId,
         kind: ref.kind === 'movie' ? 'movie' : 'series',
         ids: providerIds,
         title,
         state: 'deleted',
-        deletedState: 'watchlist',
+        deletedState: targetState,
         updatedAt: now,
         origin: 'jellyfin',
       });
@@ -551,7 +552,7 @@ export async function reportListChangeToMergedTracker(
         kind: ref.kind === 'movie' ? 'movie' : 'series',
         ids: providerIds,
         title,
-        state: 'watchlist',
+        state: targetState,
         updatedAt: now,
         origin: 'jellyfin',
       });
