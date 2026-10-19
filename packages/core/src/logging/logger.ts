@@ -4,6 +4,13 @@ import { Writable } from 'stream';
 import { formatMilliseconds } from '../utils/time.js';
 import { redactForLog, redactLogField } from './redact.js';
 import { logRingBuffer } from './ring-buffer.js';
+import {
+  LEGACY_LOG_LEVELS,
+  LOG_LEVELS,
+  normaliseLevel,
+  type LogLevel,
+} from './levels.js';
+export { LEGACY_LOG_LEVELS, LOG_LEVELS, normaliseLevel } from './levels.js';
 
 export interface Logger {
   trace(...args: LogArgs): void;
@@ -24,54 +31,10 @@ export interface Logger {
 export type LogArg = unknown;
 type LogArgs = LogArg[];
 
-type Level = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+type Level = LogLevel;
 export type LogFormat = 'json' | 'text';
 
-/** The levels pino actually emits, and the only ones offered in the UI. */
-export const LOG_LEVELS = [
-  'trace',
-  'debug',
-  'info',
-  'warn',
-  'error',
-  'fatal',
-] as const;
-
-/** Winston-era aliases. Still accepted so existing deployments keep booting. */
-export const LEGACY_LOG_LEVELS = [
-  'verbose',
-  'silly',
-  'http',
-  'warning',
-] as const;
-
 // --- Pino root setup ------------------------------------------------------
-
-export function normaliseLevel(raw: string | undefined): Level {
-  if (!raw) return 'info';
-  const v = raw.toLowerCase();
-  switch (v) {
-    case 'silly':
-      return 'trace';
-    case 'verbose':
-      return 'debug';
-    case 'http':
-      return 'info';
-    case 'warning':
-      return 'warn';
-  }
-  if (
-    v === 'trace' ||
-    v === 'debug' ||
-    v === 'info' ||
-    v === 'warn' ||
-    v === 'error' ||
-    v === 'fatal'
-  ) {
-    return v;
-  }
-  return 'info';
-}
 
 export function normaliseFormat(raw: string | undefined): LogFormat {
   return (raw || '').toLowerCase() === 'text' ? 'text' : 'json';

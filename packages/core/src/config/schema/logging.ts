@@ -4,7 +4,7 @@ import {
   LEGACY_LOG_LEVELS,
   LOG_LEVELS,
   normaliseLevel,
-} from '../../logging/logger.js';
+} from '../../logging/levels.js';
 
 export const loggingSchema = {
   logLevel: {
