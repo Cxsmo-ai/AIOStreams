@@ -757,7 +757,7 @@ export class TorrentClawStreamParser extends StreamParser {
       .match(/[\u{1F1E6}-\u{1F1FF}]{2}/gu);
     const languages = [
       ...(flags
-        ?.map((flag) => this.convertFlagToLanguage(flag))
+        ?.map((flag) => convertFlagToLanguage(flag))
         .filter((language): language is string => Boolean(language)) || []),
       ...(metadata?.languages || [])
         .map((language) => this.language(language))
