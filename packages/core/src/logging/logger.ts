@@ -334,55 +334,14 @@ export function createLogger(module: string): Logger {
   // Logger modules are imported by configuration/database modules, while
   // redaction itself consults configuration. Resolve the root logger lazily
   // so that this harmless import cycle cannot read `root` before initialisation.
-  class DeferredLogger implements Logger {
-    private delegate: Logger | undefined;
-
-    private get target(): Logger {
-      this.delegate ??= wrap(root.child({ module }));
-      return this.delegate;
-    }
-
-    trace(...args: LogArgs): void { this.target.trace(...args); }
-    debug(...args: LogArgs): void { this.target.debug(...args); }
-    info(...args: LogArgs): void { this.target.info(...args); }
-    warn(...args: LogArgs): void { this.target.warn(...args); }
-    error(...args: LogArgs): void { this.target.error(...args); }
-    fatal(...args: LogArgs): void { this.target.fatal(...args); }
-    verbose(...args: LogArgs): void { this.target.verbose(...args); }
-    silly(...args: LogArgs): void { this.target.silly(...args); }
-    http(...args: LogArgs): void { this.target.http(...args); }
-    child(bindings: Record<string, unknown>): Logger {
-      return new BoundDeferredLogger(this, bindings);
-    }
-  }
-
-  class BoundDeferredLogger implements Logger {
-    private delegate: Logger | undefined;
-
-    constructor(
-      private readonly parent: Logger,
-      private readonly bindings: Record<string, unknown>
-    ) {}
-
-    private get target(): Logger {
-      this.delegate ??= this.parent.child(this.bindings);
-      return this.delegate;
-    }
-    trace(...args: LogArgs): void { this.target.trace(...args); }
-    debug(...args: LogArgs): void { this.target.debug(...args); }
-    info(...args: LogArgs): void { this.target.info(...args); }
-    warn(...args: LogArgs): void { this.target.warn(...args); }
-    error(...args: LogArgs): void { this.target.error(...args); }
-    fatal(...args: LogArgs): void { this.target.fatal(...args); }
-    verbose(...args: LogArgs): void { this.target.verbose(...args); }
-    silly(...args: LogArgs): void { this.target.silly(...args); }
-    http(...args: LogArgs): void { this.target.http(...args); }
-    child(bindings: Record<string, unknown>): Logger {
-      return this.target.child(bindings);
-    }
-  }
-
-  return new DeferredLogger();
+  let delegate: Logger | undefined;
+  return new Proxy(Object.create(null) as Logger, {
+    get(_target, property: keyof Logger) {
+      delegate ??= wrap(root.child({ module }));
+      const value = delegate[property];
+      return typeof value === 'function' ? value.bind(delegate) : value;
+    },
+  });
 }
 
 /**
