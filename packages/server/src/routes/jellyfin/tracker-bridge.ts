@@ -279,7 +279,10 @@ export async function reportPlaybackToMergedTracker(
 
     const title =
       opts.item?.Name || (ref.kind === 'movie' ? 'Movie' : 'Episode');
-    const year = opts.item?.ProductionYear;
+    const year =
+      typeof opts.item?.ProductionYear === 'number'
+        ? opts.item.ProductionYear
+        : undefined;
     const isPlayed = Boolean(opts.played ?? opts.row?.played);
     const positionMs = opts.positionMs ?? opts.row?.positionMs ?? 0;
     const durationMs = opts.durationMs || opts.row?.durationMs || 0;
@@ -295,9 +298,9 @@ export async function reportPlaybackToMergedTracker(
 
     if (adapters.length > 0) {
       let action: 'start' | 'pause' | 'stop' = 'start';
-      if (kind === 'stop') action = 'stop';
-      else if (kind === 'progress' || kind === 'pause') action = 'pause';
-      else if (kind === 'start' || kind === 'resume') action = 'start';
+      if (kind === 'pause') action = 'pause';
+      else if (kind === 'played' || isPlayed) action = 'stop';
+      else if (kind === 'start') action = 'start';
 
       const scrobbleEvent: TrackerScrobbleEvent = {
         eventId: randomUUID(),
