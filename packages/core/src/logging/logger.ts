@@ -331,7 +331,34 @@ export const logger: Logger = wrap(root);
  * compatibility with v2.
  */
 export function createLogger(module: string): Logger {
-  return wrap(root.child({ module }));
+  // Logger modules are imported by configuration/database modules, while
+  // redaction itself consults configuration. Resolve the root logger lazily
+  // so that this harmless import cycle cannot read `root` before initialisation.
+  let child: Logger | undefined;
+  const getChild = (): Logger => (child ??= wrap(root.child({ module })));
+  return {
+    trace: (...args) => getChild().trace(...args),
+    debug: (...args) => getChild().debug(...args),
+    info: (...args) => getChild().info(...args),
+    warn: (...args) => getChild().warn(...args),
+    error: (...args) => getChild().error(...args),
+    fatal: (...args) => getChild().fatal(...args),
+    verbose: (...args) => getChild().verbose(...args),
+    silly: (...args) => getChild().silly(...args),
+    http: (...args) => getChild().http(...args),
+    child: (bindings) => ({
+      trace: (...args) => getChild().child(bindings).trace(...args),
+      debug: (...args) => getChild().child(bindings).debug(...args),
+      info: (...args) => getChild().child(bindings).info(...args),
+      warn: (...args) => getChild().child(bindings).warn(...args),
+      error: (...args) => getChild().child(bindings).error(...args),
+      fatal: (...args) => getChild().child(bindings).fatal(...args),
+      verbose: (...args) => getChild().child(bindings).verbose(...args),
+      silly: (...args) => getChild().child(bindings).silly(...args),
+      http: (...args) => getChild().child(bindings).http(...args),
+      child: (nested) => getChild().child(bindings).child(nested),
+    }),
+  };
 }
 
 /**
