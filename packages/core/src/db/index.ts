@@ -73,6 +73,7 @@ export {
   getTorrentClawNzbQuotaStatus,
   TORRENTCLAW_NZB_MONTHLY_LIMIT_BYTES,
 } from './repositories/torrentclaw-nzb-quota.js';
+export {
   ConfigSessionRepository,
   type ConfigSessionCredentials,
   type IssuedConfigSession,
