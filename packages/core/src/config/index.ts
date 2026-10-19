@@ -174,7 +174,7 @@ export type ConfigChangeListener = SettingsChangeListener<
 export type AppConfig = typeof config;
 export type { RuntimeConfigMetadata } from './types.js';
 export { bootstrap, SettingsStore };
-export { ConfigStartupError } from './settings-store.js';
+export { ConfigStartupError } from './startup-error.js';
 export {
   describeSettings,
   type SettingsUiHint,

@@ -1,4 +1,5 @@
 import { z, ZodError } from 'zod';
+import { ConfigStartupError } from './startup-error.js';
 import { SettingsRepository } from '../db/repositories/settings.js';
 import { createLogger } from '../logging/logger.js';
 import { formatZodError } from '../utils/format-zod-error.js';
@@ -68,17 +69,6 @@ function makeUninitialisedSectionProxy(sectionName: string): unknown {
       },
     }
   );
-}
-
-/**
- * Thrown from {@link SettingsStore} when env-supplied or built-in default
- * values fail schema validation at startup.
- */
-export class ConfigStartupError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ConfigStartupError';
-  }
 }
 
 interface FieldEntry {

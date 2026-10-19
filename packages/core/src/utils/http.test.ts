@@ -86,6 +86,8 @@ test('private URL policy blocks local targets by default but preserves the exact
     ),
     false
   );
+});
+
 describe('parseRetryAfter', () => {
   test('parses delay-seconds', () => {
     assert.equal(parseRetryAfter('120'), 120);

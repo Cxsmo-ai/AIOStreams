@@ -1,6 +1,6 @@
 import type { DbDriver } from '../driver/types.js';
 import { createLogger } from '../../logging/logger.js';
-import { ConfigStartupError } from '../../config/settings-store.js';
+import { ConfigStartupError } from '../../config/startup-error.js';
 import { MIGRATIONS, type Migration } from './index.js';
 
 const logger = createLogger('database');

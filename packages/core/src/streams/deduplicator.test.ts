@@ -196,6 +196,8 @@ test('Smart Detect never joins native AIOStreams to the TorBox/Deepbrid domain',
     'native',
     'torbox',
   ]);
+});
+
 function makeStream(
   mediaInfoQuality: 'probe' | 'indexer' | 'addon' | undefined,
   languages: string[],
