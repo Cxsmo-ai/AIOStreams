@@ -31,6 +31,12 @@ import {
   type JellyfinRequestContext,
 } from './context.js';
 import { itemFromDescriptor } from './items.js';
+import {
+  syncTrackerRecordsToWatchState,
+  reportPlaybackToMergedTracker,
+  reportRatingToMergedTracker,
+  reportListChangeToMergedTracker,
+} from './tracker-bridge.js';
 
 const logger = createLogger('jellyfin');
 
@@ -380,7 +386,7 @@ export async function listTrackers(
  * A tracker keys on the show, so an episode or season reports the series
  * item's ids and never its own; the series meta is cached by the episode build.
  */
-async function idsFor(
+export async function idsFor(
   ctx: JellyfinRequestContext,
   ref: ContentRef,
   item?: JellyfinItem | null
@@ -418,6 +424,7 @@ export async function reportPlayback(
     sessionStartedAt?: number;
   } = {}
 ): Promise<void> {
+  void reportPlaybackToMergedTracker(ctx, kind, ref, opts).catch(() => undefined);
   if (!appConfig.watchState.reportEnabled) return;
   try {
     const sinks = await sinksFor(ctx);
@@ -456,6 +463,7 @@ export async function reportListChange(
   ref: ContentRef,
   item?: JellyfinItem | null
 ): Promise<void> {
+  void reportListChangeToMergedTracker(ctx, kind, ref, item).catch(() => undefined);
   if (!appConfig.watchState.reportEnabled) return;
   if (ref.kind === 'episode') return;
   try {
@@ -485,6 +493,7 @@ export async function reportRating(
   rating: number | null,
   item?: JellyfinItem | null
 ): Promise<void> {
+  void reportRatingToMergedTracker(ctx, ref, rating, item).catch(() => undefined);
   if (!appConfig.watchState.reportEnabled) return;
   try {
     const sinks = await sinksFor(ctx);
@@ -567,6 +576,7 @@ const REFRESH_KEYS_MAX = 20_000;
 
 /** Never awaited: a shelf answers from what is stored, never from the addon. */
 export function refreshWatchState(ctx: JellyfinRequestContext): void {
+  void syncTrackerRecordsToWatchState(ctx.watch).catch(() => undefined);
   if (!appConfig.watchState.pullEnabled) return;
   const key = `${ctx.watch.uuid}|${ctx.watch.persona}`;
   const now = Date.now();

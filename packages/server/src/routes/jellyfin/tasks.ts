@@ -7,7 +7,9 @@ import {
   sweepIdleWatchSessions,
   TaskManager,
   WatchStateRepository,
+  getDb,
 } from '@aiostreams/core';
+import { syncTrackerRecordsToWatchState } from './tracker-bridge.js';
 
 const ID_MAP_MAX_AGE_MS = 180 * 24 * 3600 * 1000;
 const DAY_MS = 24 * 3600 * 1000;
@@ -108,6 +110,40 @@ export function registerJellyfinTasks(): void {
       return {
         ok: true,
         message: `delivered ${delivered}, retrying ${retried}, gave up on ${failed}`,
+      };
+    },
+  });
+
+  TaskManager.register({
+    id: 'jellyfin-tracker-bridge-sync',
+    label: 'Sync merged tracker records to Jellyfin',
+    description:
+      'Synchronizes progress, watched states, favorites, and ratings from the AIOStreams merged tracker database into the Jellyfin watch state for all active users.',
+    category: 'jellyfin',
+    kind: 'scheduled',
+    intervalMs: 60 * 1000,
+    enabled: true,
+    destructive: false,
+    multiReplica: 'single',
+    run: async () => {
+      if (appConfig.jellyfin.trackerBridgeEnabled === false) {
+        return { ok: true, message: 'tracker bridge is disabled' };
+      }
+      const db = getDb();
+      const users = await db.query<{ uuid: string }>(
+        'SELECT DISTINCT user_uuid as uuid FROM tracker_records'
+      );
+      let totalImported = 0;
+      for (const { uuid } of users) {
+        const { imported } = await syncTrackerRecordsToWatchState(
+          { uuid, persona: '' },
+          db
+        );
+        totalImported += imported;
+      }
+      return {
+        ok: true,
+        message: `synced ${totalImported} tracker records across ${users.length} user(s)`,
       };
     },
   });

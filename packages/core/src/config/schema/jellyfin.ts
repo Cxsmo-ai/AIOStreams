@@ -18,6 +18,16 @@ export const jellyfinSchema = {
     requiresRestart: false,
     secret: false,
   },
+  trackerBridgeEnabled: {
+    schema: z.boolean(),
+    default: true,
+    label: 'Enable merged tracker bridge',
+    description:
+      'Synchronizes playback and watch state between Jellyfin and the AIOStreams merged tracker system (WeTrakr, Floppy, Nuvio). Jellyfin playback scrobbles to linked trackers, and tracker records appear in Continue Watching and Next Up.',
+    env: 'JELLYFIN_TRACKER_BRIDGE_ENABLED',
+    requiresRestart: false,
+    secret: false,
+  },
   version: {
     schema: z
       .string()

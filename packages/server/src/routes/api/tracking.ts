@@ -12,6 +12,7 @@ import {
   makeTrackerTombstone,
   parseTrackerCursor,
   requestWeTrakrApi,
+  requestFloppyApi,
   WeTrakrRateLimitError,
   type DbDriver,
 } from '@aiostreams/core';
@@ -263,7 +264,7 @@ type TrackerScrobbleOutboxRow = {
   attempt_count: number | string;
 };
 
-type LinkedTrackerAdapter = {
+export type LinkedTrackerAdapter = {
   adapter: TrackerProviderAdapter;
   authRef: string;
 };
@@ -272,7 +273,7 @@ type LinkedTrackerAdapter = {
  * Persist live playback events before provider fan-out. Stable event IDs make
  * a retry safe for adapters that forward an idempotency key to the provider.
  */
-async function enqueueScrobbleEvents(
+export async function enqueueScrobbleEvents(
   tx: DbDriver,
   userUuid: string,
   adapters: LinkedTrackerAdapter[],
@@ -287,7 +288,7 @@ async function enqueueScrobbleEvents(
   }
 }
 
-async function flushScrobbleOutbox(
+export async function flushScrobbleOutbox(
   db: DbDriver,
   userUuid: string,
   adapters: LinkedTrackerAdapter[],
@@ -645,6 +646,47 @@ async function flushProviderOutbox(
   };
 }
 
+export function resolveLinkedAdapters(
+  user: { trackerProviders?: Record<string, TrackerProviderLink> } | null,
+  providerAdapters: TrackerProviderAdapter[] = defaultTrackerProviderAdapters
+): { adapters: LinkedTrackerAdapter[]; unsupported: string[] } {
+  const configured = user?.trackerProviders ?? {};
+  const active = Object.entries(configured).filter(
+    ([, link]) => Boolean(link?.authRef) && link.enabled !== false
+  );
+  const adapters = active.flatMap(([id, link]) => {
+    const adapter = providerAdapters.find((candidate) => candidate.id === id);
+    return adapter && link.authRef
+      ? [{ adapter, authRef: link.authRef }]
+      : [];
+  });
+  const unsupported = active
+    .filter(
+      ([id]) => !providerAdapters.some((candidate) => candidate.id === id)
+    )
+    .map(([id]) => id);
+  return { adapters, unsupported };
+}
+
+export function defaultProviderApiFor(
+  adapter: TrackerProviderAdapter,
+  requestProviderApi?: TrackerProviderApiRequest
+): TrackerProviderApiRequest {
+  if (adapter.requestApi) return adapter.requestApi;
+  if (requestProviderApi) return requestProviderApi;
+  if (adapter.id === 'wetrakr') {
+    return (authRef, path, init) => requestWeTrakrApi(authRef, path, init);
+  }
+  if (adapter.id === 'floppy') {
+    return (authRef, path, init) => requestFloppyApi(authRef, path, init);
+  }
+  return async () => {
+    throw new Error(
+      `Tracker provider ${adapter.id} has no configured API transport`
+    );
+  };
+}
+
 /** Factory keeps the mounted API testable without weakening production auth. */
 export function createTrackerRouter(
   dependencies: TrackerRouterDependencies = {
@@ -708,22 +750,7 @@ export function createTrackerRouter(
   function linkedAdapters(
     user: { trackerProviders?: Record<string, TrackerProviderLink> } | null
   ) {
-    const configured = user?.trackerProviders ?? {};
-    const active = Object.entries(configured).filter(
-      ([, link]) => Boolean(link?.authRef) && link.enabled !== false
-    );
-    const adapters = active.flatMap(([id, link]) => {
-      const adapter = providerAdapters.find((candidate) => candidate.id === id);
-      return adapter && link.authRef
-        ? [{ adapter, authRef: link.authRef }]
-        : [];
-    });
-    const unsupported = active
-      .filter(
-        ([id]) => !providerAdapters.some((candidate) => candidate.id === id)
-      )
-      .map(([id]) => id);
-    return { adapters, unsupported };
+    return resolveLinkedAdapters(user, providerAdapters);
   }
 
   router.post('/refresh', async (req, res, next) => {
