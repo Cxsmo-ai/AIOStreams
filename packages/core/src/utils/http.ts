@@ -22,7 +22,7 @@ import {
 import { socksDispatcher } from 'fetch-socks';
 import { createLogger } from '../logging/logger.js';
 import { resolveHeaderPreset } from './header-presets.js';
-import { isUnsafeRemoteUrl } from '../release-blocklist/url-safety.js';
+import { isUnsafeRemoteUrl } from './url-safety.js';
 import { PrivateAddressError } from './private-addresses.js';
 
 const logger = createLogger('http');

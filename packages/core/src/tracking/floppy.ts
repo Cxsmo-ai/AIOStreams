@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Cache } from '../utils/cache.js';
 import { decryptString, encryptString } from '../utils/crypto.js';
 import { makeRequest } from '../utils/http.js';
-import { isUnsafeRemoteUrl } from '../release-blocklist/url-safety.js';
+import { isUnsafeRemoteUrl } from '../utils/url-safety.js';
 
 const TOKEN_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;

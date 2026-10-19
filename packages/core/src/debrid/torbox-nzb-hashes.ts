@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { scanNzb } from '../usenet/nzb/scan.js';
-import { isUnsafeRemoteUrl } from '../release-blocklist/url-safety.js';
+import { isUnsafeRemoteUrl } from '../utils/url-safety.js';
 
 export interface TorboxNzbHashOptions {
   maxBytes?: number;

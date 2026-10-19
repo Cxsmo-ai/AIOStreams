@@ -318,7 +318,7 @@ export async function resolveServiceWrappedStreams(
 
     if (
       isServiceWrapEligibleP2PStream(stream, userData) ||
-      (isWrapped && stream.type === 'p2p')
+      (stream.addon.serviceWrapped && stream.type === 'p2p')
     ) {
       wrappedP2PStreams.push(stream);
     } else if (
