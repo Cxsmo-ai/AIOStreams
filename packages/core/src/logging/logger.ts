@@ -334,31 +334,55 @@ export function createLogger(module: string): Logger {
   // Logger modules are imported by configuration/database modules, while
   // redaction itself consults configuration. Resolve the root logger lazily
   // so that this harmless import cycle cannot read `root` before initialisation.
-  let child: Logger | undefined;
-  const getChild = (): Logger => (child ??= wrap(root.child({ module })));
-  return {
-    trace: (...args) => getChild().trace(...args),
-    debug: (...args) => getChild().debug(...args),
-    info: (...args) => getChild().info(...args),
-    warn: (...args) => getChild().warn(...args),
-    error: (...args) => getChild().error(...args),
-    fatal: (...args) => getChild().fatal(...args),
-    verbose: (...args) => getChild().verbose(...args),
-    silly: (...args) => getChild().silly(...args),
-    http: (...args) => getChild().http(...args),
-    child: (bindings) => ({
-      trace: (...args) => getChild().child(bindings).trace(...args),
-      debug: (...args) => getChild().child(bindings).debug(...args),
-      info: (...args) => getChild().child(bindings).info(...args),
-      warn: (...args) => getChild().child(bindings).warn(...args),
-      error: (...args) => getChild().child(bindings).error(...args),
-      fatal: (...args) => getChild().child(bindings).fatal(...args),
-      verbose: (...args) => getChild().child(bindings).verbose(...args),
-      silly: (...args) => getChild().child(bindings).silly(...args),
-      http: (...args) => getChild().child(bindings).http(...args),
-      child: (nested) => getChild().child(bindings).child(nested),
-    }),
-  };
+  class DeferredLogger implements Logger {
+    private delegate: Logger | undefined;
+
+    private get target(): Logger {
+      this.delegate ??= wrap(root.child({ module }));
+      return this.delegate;
+    }
+
+    trace(...args: LogArgs): void { this.target.trace(...args); }
+    debug(...args: LogArgs): void { this.target.debug(...args); }
+    info(...args: LogArgs): void { this.target.info(...args); }
+    warn(...args: LogArgs): void { this.target.warn(...args); }
+    error(...args: LogArgs): void { this.target.error(...args); }
+    fatal(...args: LogArgs): void { this.target.fatal(...args); }
+    verbose(...args: LogArgs): void { this.target.verbose(...args); }
+    silly(...args: LogArgs): void { this.target.silly(...args); }
+    http(...args: LogArgs): void { this.target.http(...args); }
+    child(bindings: Record<string, unknown>): Logger {
+      return new BoundDeferredLogger(this, bindings);
+    }
+  }
+
+  class BoundDeferredLogger implements Logger {
+    private delegate: Logger | undefined;
+
+    constructor(
+      private readonly parent: Logger,
+      private readonly bindings: Record<string, unknown>
+    ) {}
+
+    private get target(): Logger {
+      this.delegate ??= this.parent.child(this.bindings);
+      return this.delegate;
+    }
+    trace(...args: LogArgs): void { this.target.trace(...args); }
+    debug(...args: LogArgs): void { this.target.debug(...args); }
+    info(...args: LogArgs): void { this.target.info(...args); }
+    warn(...args: LogArgs): void { this.target.warn(...args); }
+    error(...args: LogArgs): void { this.target.error(...args); }
+    fatal(...args: LogArgs): void { this.target.fatal(...args); }
+    verbose(...args: LogArgs): void { this.target.verbose(...args); }
+    silly(...args: LogArgs): void { this.target.silly(...args); }
+    http(...args: LogArgs): void { this.target.http(...args); }
+    child(bindings: Record<string, unknown>): Logger {
+      return this.target.child(bindings);
+    }
+  }
+
+  return new DeferredLogger();
 }
 
 /**
