@@ -160,7 +160,7 @@ function decodeAndAuthorizeRequest(
   const configGrant = verifyConfigProxyGrant(auth.password);
   if (configGrant) {
     if (
-      encodeMode !== 'e' ||
+      !decoded.encrypted ||
       auth.username !== configGrant.identity ||
       !isConfigProxyRequestAllowed(configGrant, data)
     ) {
