@@ -15,6 +15,7 @@ import TorboxSearchApi, {
 } from './search-api.js';
 import { NZB, UnprocessedTorrent } from '../../debrid/utils.js';
 import { convertDataToTorrents, Torrent } from './torrent.js';
+import { torboxSearchCacheDiscriminator } from './cache-key.js';
 
 const logger = createLogger('torbox-search');
 
@@ -61,7 +62,7 @@ export class TorBoxSearchAddon extends BaseDebridAddon<TorBoxSearchAddonConfig> 
   private getCacheKey(parsedId: ParsedId, type: 'torrent' | 'usenet'): string {
     let cacheKey = `${type}:${parsedId.type}:${parsedId.value}:${parsedId.season}:${parsedId.episode}`;
     if (this.userData.searchUserEngines) {
-      cacheKey += `:${this.searchApi.apiKey}`;
+      cacheKey += `:${torboxSearchCacheDiscriminator(this.userData.torBoxApiKey)}`;
     }
     return cacheKey;
   }

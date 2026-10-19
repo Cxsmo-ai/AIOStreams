@@ -2,7 +2,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import {
   createLogger,
   TorBoxSearchAddon,
-  fromUrlSafeBase64,
+  decodeTorboxSearchConfig,
+  TORBOX_SEARCH_CONFIG_HEADER,
   APIError,
   constants,
 } from '@aiostreams/core';
@@ -10,8 +11,12 @@ const router: Router = Router();
 
 const logger = createLogger('builtins:torbox-search');
 
+function getConfig(configId: string, serializedConfig: string | undefined) {
+  return decodeTorboxSearchConfig(configId, serializedConfig);
+}
+
 interface TorboxManifestParams {
-  encodedConfig?: string; // optional
+  configId: string;
 }
 
 router.get(
@@ -21,14 +26,13 @@ router.get(
     res: Response,
     next: NextFunction
   ) => {
-    const { encodedConfig } = req.params;
+    const { configId } = req.params;
     try {
       const manifest = new TorBoxSearchAddon(
-        encodedConfig
-          ? JSON.parse(fromUrlSafeBase64(encodedConfig))
-          : undefined,
+        getConfig(configId, req.get(TORBOX_SEARCH_CONFIG_HEADER)),
         req.userIp
       ).getManifest();
+      res.set('Cache-Control', 'private, no-store');
       res.json(manifest);
     } catch (error) {
       next(error);
@@ -37,7 +41,7 @@ router.get(
 );
 
 interface TorboxStreamParams {
-  encodedConfig?: string; // optional
+  configId: string;
   type: string;
   id: string;
 }
@@ -49,16 +53,15 @@ router.get(
     res: Response,
     next: NextFunction
   ) => {
-    const { encodedConfig, type, id } = req.params;
+    const { configId, type, id } = req.params;
 
     try {
       const addon = new TorBoxSearchAddon(
-        encodedConfig
-          ? JSON.parse(fromUrlSafeBase64(encodedConfig))
-          : undefined,
+        getConfig(configId, req.get(TORBOX_SEARCH_CONFIG_HEADER)),
         req.userIp
       );
       const streams = await addon.getStreams(type, id);
+      res.set('Cache-Control', 'private, no-store');
       res.json({
         streams: streams,
       });

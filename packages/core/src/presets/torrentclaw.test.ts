@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   filterTorrentClawPlaybackActions,
+  filterTorrentClawStreamsForExposure,
   getTorrentClawCachedStatus,
   getTorrentClawSource,
   type TorrentClawStreamShape,
@@ -77,6 +78,32 @@ test('keeps standard Stremio info-hash streams as playable uncached P2P results'
       downloadActions: false,
     }),
     [p2pStream]
+  );
+});
+
+test('hides raw P2P hashes and magnet URLs unless service wrap owns them', () => {
+  const magnetStream: TorrentClawStreamShape = {
+    url: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+  };
+  const wrapped = [p2pStream, magnetStream];
+
+  assert.deepEqual(filterTorrentClawStreamsForExposure(wrapped, false), []);
+  assert.deepEqual(filterTorrentClawStreamsForExposure(wrapped, true), wrapped);
+});
+
+test('keeps provider-resolved playback and cache-on-play links visible', () => {
+  const resolved: TorrentClawStreamShape = {
+    ...p2pStream,
+    url: 'https://debrid.example/video.mp4',
+  };
+  const action: TorrentClawStreamShape = {
+    externalUrl: 'https://torrentclaw.com/cache',
+    behaviorHints: { tcAction: 'cache-on-play' },
+  };
+
+  assert.deepEqual(
+    filterTorrentClawStreamsForExposure([resolved, action], false),
+    [resolved, action]
   );
 });
 

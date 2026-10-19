@@ -4,7 +4,7 @@
   "main": "dist/server.js",
   "type": "module",
   "scripts": {
-    "test": "vitest run --passWithNoTests",
+    "test": "tsx --test --test-concurrency=1 --import ../core/test/setup.ts \"src/**/*.test.ts\"",
     "test:watch": "vitest watch",
     "dev": "cross-env NODE_ENV=development tsx watch src/server.ts",
     "build": "tsc --build --force",

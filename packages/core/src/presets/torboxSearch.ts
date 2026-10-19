@@ -13,6 +13,10 @@ import { constants, ServiceId } from '../utils/index.js';
 import { StreamParser } from '../parser/index.js';
 import { BuiltinAddonPreset, BuiltinStreamParser } from './builtin.js';
 import { StremThruPreset } from './stremthru.js';
+import {
+  createTorboxSearchConfigId,
+  TORBOX_SEARCH_CONFIG_HEADER,
+} from '../builtins/torbox-search/config.js';
 
 export class TorBoxSearchPreset extends BuiltinAddonPreset {
   public static readonly supportedServices: ServiceId[] =
@@ -194,6 +198,8 @@ export class TorBoxSearchPreset extends BuiltinAddonPreset {
     options: Record<string, any>,
     services: ServiceId[]
   ): Addon {
+    const config = this.generateConfig(userData, services, options);
+    const configId = createTorboxSearchConfigId(config);
     return {
       name: options.name || this.METADATA.NAME,
       displayIdentifier: services
@@ -203,7 +209,7 @@ export class TorBoxSearchPreset extends BuiltinAddonPreset {
         services.length > 1
           ? 'multi'
           : constants.SERVICE_DETAILS[services[0]].shortName,
-      manifestUrl: this.generateManifestUrl(userData, services, options),
+      manifestUrl: `${this.DEFAULT_URL}/${configId}/manifest.json`,
       mediaTypes: options.mediaTypes || [],
       enabled: true,
       resources: this.METADATA.SUPPORTED_RESOURCES,
@@ -216,10 +222,16 @@ export class TorBoxSearchPreset extends BuiltinAddonPreset {
       headers: {
         'User-Agent': this.METADATA.USER_AGENT,
       },
+      // The wrapper sends these only to the authenticated internal endpoint;
+      // unlike ordinary addon headers, they are stripped before any external
+      // request and are never placed in a URL.
+      internalHeaders: {
+        [TORBOX_SEARCH_CONFIG_HEADER]: JSON.stringify(config),
+      },
     };
   }
 
-  private static generateManifestUrl(
+  private static generateConfig(
     userData: UserData,
     services: ServiceId[],
     options: Record<string, any>
@@ -241,7 +253,6 @@ export class TorBoxSearchPreset extends BuiltinAddonPreset {
       onlyShowUserSearchResults: options.onlyShowUserSearchResults ?? false,
     };
 
-    const configString = this.base64EncodeJSON(config, 'urlSafe');
-    return `${this.DEFAULT_URL}/${configString}/manifest.json`;
+    return config;
   }
 }

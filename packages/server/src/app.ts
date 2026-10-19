@@ -15,10 +15,13 @@ import {
   proxyApi,
   templatesApi,
   syncApi,
+  trackingApi,
   authApi,
   dashboardApi,
   usenetApi,
-  floatplaneApi,
+  wetrakrApi,
+  traktApi,
+  floppyApi,
 } from './routes/api/index.js';
 import {
   configure,
@@ -30,6 +33,7 @@ import {
   subtitle,
   addonCatalog,
   alias,
+  enhancedCinemeta,
 } from './routes/stremio/index.js';
 import {
   manifest as chillLinkManifest,
@@ -57,7 +61,6 @@ import {
   easynews,
   library,
   kurato,
-  floatplane,
 } from './routes/builtins/index.js';
 import {
   ipMiddleware,
@@ -186,10 +189,13 @@ apiRouter.use('/anime', animeApi);
 apiRouter.use('/proxy', proxyApi);
 apiRouter.use('/templates', templatesApi);
 apiRouter.use('/sync', syncApi);
+apiRouter.use('/tracking/v1', trackingApi);
 apiRouter.use('/auth', authApi);
 apiRouter.use('/dashboard', dashboardApi);
 apiRouter.use('/usenet', usenetApi);
-apiRouter.use('/floatplane', floatplaneApi);
+apiRouter.use('/wetrakr', wetrakrApi);
+apiRouter.use('/trakt', traktApi);
+apiRouter.use('/floppy', floppyApi);
 apiRouter.use('/sabnzbd', sabnzbdRouter);
 apiRouter.use('/newznab', createNabRouter('newznab'));
 apiRouter.use('/torznab', createNabRouter('torznab'));
@@ -223,6 +229,16 @@ stremioAuthRouter.use('/stream-progressive', stremioStreamRateLimiter);
 stremioAuthRouter.use('/meta', stremioMetaRateLimiter);
 stremioAuthRouter.use('/catalog', stremioCatalogRateLimiter);
 stremioAuthRouter.use('/subtitles', stremioSubtitleRateLimiter);
+stremioAuthRouter.use(
+  '/enhanced-cinemeta/manifest.json',
+  stremioManifestRateLimiter
+);
+stremioAuthRouter.use('/enhanced-cinemeta/catalog', stremioCatalogRateLimiter);
+stremioAuthRouter.use(
+  '/enhanced-cinemeta/addon_catalog',
+  stremioCatalogRateLimiter
+);
+stremioAuthRouter.use('/enhanced-cinemeta/meta', stremioMetaRateLimiter);
 stremioAuthRouter.use(userDataMiddleware);
 stremioAuthRouter.use('/manifest.json', manifest);
 stremioAuthRouter.use('/stream', stream);
@@ -232,6 +248,7 @@ stremioAuthRouter.use('/meta', meta);
 stremioAuthRouter.use('/catalog', catalog);
 stremioAuthRouter.use('/subtitles', subtitle);
 stremioAuthRouter.use('/addon_catalog', addonCatalog);
+stremioAuthRouter.use('/enhanced-cinemeta', enhancedCinemeta);
 
 app.use('/stremio', stremioRouter); // For public routes
 app.use('/stremio/:uuid/:encryptedPassword', stremioAuthRouter); // For authenticated routes
@@ -271,7 +288,6 @@ builtinsRouter.use('/seadex', seadex);
 builtinsRouter.use('/easynews', easynews);
 builtinsRouter.use('/library', library);
 builtinsRouter.use('/kurato', kurato);
-builtinsRouter.use('/floatplane', floatplane);
 app.use('/builtins', builtinsRouter);
 
 app.use('/blocklist', publicBlocklistRouter);

@@ -11,7 +11,6 @@ import {
   AIOSTREAMS_SERVICE,
   DEEPBRID_SERVICE,
   TORRENTCLAW_SERVICE,
-  FLOATPLANE_SERVICE,
 } from '../../../../../../core/src/utils/constants';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import {
@@ -39,7 +38,7 @@ import TemplateOption from '../../../shared/template-option';
 import MarkdownLite from '../../../shared/markdown-lite';
 import { StatusResponse, UserData } from '@aiostreams/core';
 import { TorboxServiceModal } from './torbox-service-modal';
-import { FloatplaneServiceModal } from './floatplane-service-modal';
+import { enableServiceAfterCredentialSave } from '@/context/service-status';
 
 // Usenet service IDs
 const USENET_SERVICE_IDS: string[] = [
@@ -55,7 +54,6 @@ const USENET_SERVICE_IDS: string[] = [
 const DUAL_SERVICE_IDS: string[] = ['torbox'];
 const INTEGRATION_SERVICE_IDS: string[] = [
   TORRENTCLAW_SERVICE,
-  FLOATPLANE_SERVICE,
 ];
 
 function isUsenetService(id: string): boolean {
@@ -99,9 +97,6 @@ const SERVICE_LOGO_MAP: Record<ServiceId, string> = {
   torrentclaw: 'https://torrentclaw.com/icon-512.png',
   torrin: 'https://torrin.app/favicon.png',
   kurato: 'https://kurato.com/favicon.ico',
-  // Keep this local: the public Floatplane favicon is not a stable image URL
-  // and renders as a broken-image placeholder in several clients.
-  floatplane: '/assets/floatplane-icon.png',
 };
 
 function ServiceLogo({
@@ -191,9 +186,11 @@ export function StreamServices() {
           return {
             ...service,
             enabled:
-              modalService === FLOATPLANE_SERVICE
-                ? Boolean(values.authRef)
-                : true,
+              enableServiceAfterCredentialSave(
+                modalService ?? '',
+                service.enabled,
+                values
+              ),
             credentials: values,
           };
         }
@@ -641,18 +638,6 @@ function ServiceModal({
   if (serviceId === 'torbox') {
     return (
       <TorboxServiceModal
-        open={open}
-        onOpenChange={onOpenChange}
-        values={values}
-        onSubmit={onSubmit}
-        onClose={onClose}
-      />
-    );
-  }
-
-  if (serviceId === FLOATPLANE_SERVICE) {
-    return (
-      <FloatplaneServiceModal
         open={open}
         onOpenChange={onOpenChange}
         values={values}

@@ -16,23 +16,22 @@ export * from './usenet/integration/index.js';
 export * from './release-blocklist/index.js';
 export * from './stream-sessions/index.js';
 export * from './proxy/index.js';
+export * from './tracking/wetrakr.js';
+export * from './tracking/wetrakr-sync.js';
+export * from './tracking/trakt.js';
+export * from './tracking/trakt-sync.js';
+export * from './tracking/floppy.js';
+export * from './tracking/floppy-sync.js';
 export { SceneMappingDataset } from './metadata/scene-mappings.js';
 export { IdMappingDataset } from './metadata/id-mappings.js';
 export {
   TorBoxSearchAddon,
+  createTorboxSearchConfigId,
+  decodeTorboxSearchConfig,
+  TORBOX_SEARCH_CONFIG_HEADER,
   GDriveAddon,
   GoogleOAuth,
   GDriveAPI,
-  FloatplaneAddon,
-  FloatplaneClient,
-  encodeFloatplaneAuth,
-  decodeFloatplaneAuth,
-  storeFloatplaneAuth,
-  resolveFloatplaneAuth,
-  requestFloatplaneDeviceAuthorization,
-  pollFloatplaneDeviceAuthorization,
-  type FloatplaneDeviceAuthorization,
-  type FloatplaneClientOptions,
   TorznabAddon,
   NewznabAddon,
   UnarrIndexerAddon,
@@ -75,6 +74,11 @@ export {
 } from './builtins/index.js';
 export { PresetManager } from './presets/index.js';
 export {
+  getTorrentClawSeasonMetadata,
+  getTorrentClawServiceConfig,
+} from './presets/torrentclaw-api.js';
+export type { TorrentClawSeason } from './presets/torrentclaw-api.js';
+export {
   buildPlayChain,
   getPlayChain,
   describeChainItem,
@@ -102,3 +106,4 @@ export type {
 } from './main/failover.js';
 
 export * from './metadata/service.js';
+export * from './tracking/types.js';

@@ -10,6 +10,7 @@ import {
   DEFAULT_FAILOVER_PARALLEL,
 } from '../../../core/src/utils/constants';
 import { useStatus } from './status';
+import { applyServiceMetadata } from './service-status';
 
 const USER_DATA_KEY = 'aiostreams-user-data';
 
@@ -643,21 +644,7 @@ export function UserDataProvider({ children }: { children: React.ReactNode }) {
       newData.services = (newData.services ?? []).map((service) => {
         const serviceMeta = services[service.id];
         if (!serviceMeta) return service;
-        serviceMeta.credentials.forEach((credential) => {
-          if (credential.forced) {
-            service.credentials[credential.id] = credential.forced;
-          } else if (credential.default) {
-            service.credentials[credential.id] = credential.default;
-          }
-        });
-        // enable if every credential is set
-        service.enabled = serviceMeta.credentials.every(
-          (credential) =>
-            credential.forced ||
-            credential.default ||
-            service.credentials[credential.id] !== undefined
-        );
-        return service;
+        return applyServiceMetadata(service, serviceMeta);
       });
 
       return newData;

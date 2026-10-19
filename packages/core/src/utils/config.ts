@@ -104,6 +104,59 @@ export function getEnvironmentServiceDetails(): typeof constants.SERVICE_DETAILS
   ) as typeof constants.SERVICE_DETAILS;
 }
 
+/**
+ * Make globally forced services available to legacy profiles that predate the
+ * service entry. The entries are added only to the validated in-memory config;
+ * user profiles are not rewritten. `validateService` resolves forced values
+ * (and decrypts them only for runtime requests) in the normal way.
+ */
+type ForcedServiceCredentialDefinition = {
+  required?: boolean;
+  forced?: string | null;
+};
+
+type ForcedServiceDetails = Partial<
+  Record<
+    constants.ServiceId,
+    { credentials: readonly ForcedServiceCredentialDefinition[] }
+  >
+>;
+
+export function hasAllRequiredServiceCredentialsForced(
+  credentials: readonly ForcedServiceCredentialDefinition[]
+): boolean {
+  const requiredCredentials = credentials.filter(
+    (credential) => credential.required === true
+  );
+  return (
+    requiredCredentials.length > 0 &&
+    requiredCredentials.every((credential) => Boolean(credential.forced))
+  );
+}
+
+export function applyForcedServiceEntries<T extends UserData>(
+  config: T,
+  serviceDetails: ForcedServiceDetails = getEnvironmentServiceDetails() as unknown as ForcedServiceDetails
+): T {
+  const services = config.services ?? [];
+  const configuredIds = new Set(services.map((service) => service.id));
+
+  for (const [serviceId, service] of Object.entries(serviceDetails)) {
+    if (configuredIds.has(serviceId as constants.ServiceId)) continue;
+    if (!hasAllRequiredServiceCredentialsForced(service.credentials)) continue;
+
+    services.push({
+      id: serviceId as constants.ServiceId,
+      enabled: true,
+      credentials: {},
+    });
+    configuredIds.add(serviceId as constants.ServiceId);
+  }
+
+  config.services = services;
+  return config;
+}
+
 export interface ValidateConfigOptions {
   skipErrorsFromAddonsOrProxies?: boolean;
   decryptValues?: boolean;
@@ -125,6 +178,8 @@ export async function validateConfig(
   if (!success) {
     throw new Error(formatZodError(error));
   }
+
+  applyForcedServiceEntries(config);
 
   assertConfigAccessKey(config);
 
@@ -1161,7 +1216,7 @@ function validateService(
     throw new Error(`Service ${service.id} not found`);
   }
 
-  if (serviceMeta.credentials.every((cred) => cred.forced)) {
+  if (hasAllRequiredServiceCredentialsForced(serviceMeta.credentials)) {
     service.enabled = true;
   }
 

@@ -4,6 +4,76 @@ import { StreamContext } from './index.js';
 
 const logger = createLogger('sorter');
 
+function isTorrentClawStream(stream: ParsedStream): boolean {
+  const addon = stream.addon;
+  const addonName = addon.name?.toLowerCase() || '';
+  const addonIdentifier = addon.identifier?.toLowerCase() || '';
+  const manifestHost = (() => {
+    try {
+      return new URL(addon.manifestUrl).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+  })();
+
+  return (
+    addon.preset?.type === 'torrentclaw' ||
+    addonIdentifier.includes('torrentclaw') ||
+    addonName.includes('torrentclaw') ||
+    manifestHost === 'torrentclaw.com' ||
+    manifestHost.endsWith('.torrentclaw.com')
+  );
+}
+
+/**
+ * Keep TorrentClaw releases in resolution-first, largest-file-first order.
+ * Reordering only TorrentClaw's existing slots avoids changing the position
+ * of any other addon and keeps the comparator used by Array.sort transitive.
+ */
+export function orderTorrentClawStreams(
+  streams: ParsedStream[],
+  userData: UserData,
+  resolutionDirection: 'asc' | 'desc'
+): ParsedStream[] {
+  const positions: number[] = [];
+  const torrentClawStreams: ParsedStream[] = [];
+  streams.forEach((stream, index) => {
+    if (!isTorrentClawStream(stream)) return;
+    positions.push(index);
+    torrentClawStreams.push(stream);
+  });
+
+  if (torrentClawStreams.length < 2) return streams;
+
+  const preferred = userData.preferredResolutions || [];
+  const defaultOrder = constants.RESOLUTIONS;
+  const resolutionRank = (stream: ParsedStream) => {
+    const resolution = stream.parsedFile?.resolution || 'Unknown';
+    const preferredIndex = preferred.indexOf(resolution as any);
+    if (preferredIndex !== -1) return preferredIndex;
+    const defaultIndex = defaultOrder.indexOf(resolution as any);
+    return (
+      preferred.length +
+      (defaultIndex === -1 ? defaultOrder.length : defaultIndex)
+    );
+  };
+
+  const reordered = [...streams];
+  torrentClawStreams.sort((left, right) => {
+    const rankDifference = resolutionRank(left) - resolutionRank(right);
+    if (rankDifference !== 0) {
+      return resolutionDirection === 'desc'
+        ? rankDifference
+        : -rankDifference;
+    }
+    return (right.size ?? 0) - (left.size ?? 0);
+  });
+  positions.forEach((position, index) => {
+    reordered[position] = torrentClawStreams[index]!;
+  });
+  return reordered;
+}
+
 class StreamSorter {
   private userData: UserData;
 
@@ -123,6 +193,15 @@ class StreamSorter {
         return 0;
       });
     }
+
+    const resolutionCriterion = primarySortCriteria.find(
+      (criterion) => criterion.key === 'resolution'
+    );
+    sortedStreams = orderTorrentClawStreams(
+      sortedStreams,
+      this.userData,
+      resolutionCriterion?.direction || 'desc'
+    );
 
     const pinnedParts = [];
     if (pinnedToTopStreams.length > 0) {

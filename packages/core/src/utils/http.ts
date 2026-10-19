@@ -19,6 +19,7 @@ import {
 import { socksDispatcher } from 'fetch-socks';
 import { createLogger } from '../logging/logger.js';
 import { resolveHeaderPreset } from './header-presets.js';
+import { isUnsafeRemoteUrl } from '../release-blocklist/url-safety.js';
 
 const logger = createLogger('http');
 const urlCount = Cache.getInstance<string, number>(
@@ -74,14 +75,59 @@ export interface RequestOptions {
   forwardIp?: string;
   ignoreRecursion?: boolean;
   headers?: HeadersInit;
+  /** Headers attached only while the request remains on the internal origin. */
+  internalHeaders?: HeadersInit;
   body?: BodyInit;
   forceProxy?: string;
   context?: FetchContext;
   rawOptions?: RequestInit;
 }
 
+/** Returns private request headers only while targeting the trusted origin. */
+export function resolveTorboxSearchInternalHeaders(
+  requestUrl: URL,
+  internalHeaders: HeadersInit | undefined,
+  internalOrigin: string
+): Headers {
+  return requestUrl.origin === internalOrigin &&
+    requestUrl.pathname.startsWith('/builtins/torbox-search/')
+    ? new Headers(internalHeaders)
+    : new Headers();
+}
+
+/**
+ * Central default-off guard for literal private/local HTTP(S) destinations.
+ * The exact configured internal origin remains available for built-ins.
+ */
+export function isPrivateUrlRequestBlocked(
+  requestUrl: URL,
+  allowPrivateUrls: boolean,
+  internalOrigin: string
+): boolean {
+  if (requestUrl.protocol !== 'http:' && requestUrl.protocol !== 'https:')
+    return false;
+  if (requestUrl.origin === internalOrigin || allowPrivateUrls) return false;
+  return isUnsafeRemoteUrl(requestUrl.toString());
+}
+
+function enforcePrivateUrlPolicy(requestUrl: URL, internalOrigin: string): void {
+  if (
+    isPrivateUrlRequestBlocked(
+      requestUrl,
+      Env.ALLOW_PRIVATE_URLS,
+      internalOrigin
+    )
+  ) {
+    throw new Error(
+      'Requests to private or local network URLs are disabled. Set ALLOW_PRIVATE_URLS=true only on a trusted instance that requires private-network integrations.'
+    );
+  }
+}
+
 export async function makeRequest(url: string, options: RequestOptions) {
   let urlObj = rewriteRequestUrl(new URL(url));
+  const internalOrigin = new URL(appConfig.bootstrap.internalUrl).origin;
+  enforcePrivateUrlPolicy(urlObj, internalOrigin);
   const headers = new Headers(options.headers);
   if (options.forwardIp) {
     for (const header of HEADERS_FOR_IP_FORWARDING) {
@@ -113,6 +159,8 @@ export async function makeRequest(url: string, options: RequestOptions) {
   // One signal for the whole redirect chain.
   const signal = options.signal ?? AbortSignal.timeout(options.timeout);
   const { redirect: redirectMode, ...rawOptions } = options.rawOptions ?? {};
+  const internalHeaders = new Headers(options.internalHeaders);
+  const internalHeaderNames = [...internalHeaders.keys()];
   let method = options.method ?? 'GET';
   let body = options.body;
 
@@ -136,6 +184,20 @@ export async function makeRequest(url: string, options: RequestOptions) {
       headers.set(INTERNAL_SECRET_HEADER, appConfig.bootstrap.internalSecret);
     } else {
       headers.delete(INTERNAL_SECRET_HEADER);
+    }
+
+    // These credentials are for in-process built-ins only. Re-evaluate on
+    // every redirect so a misdirected internal response cannot forward them.
+    for (const name of internalHeaderNames) {
+      headers.delete(name);
+    }
+    const allowedInternalHeaders = resolveTorboxSearchInternalHeaders(
+      urlObj,
+      internalHeaders,
+      internalOrigin
+    );
+    for (const [name, value] of allowedInternalHeaders.entries()) {
+      headers.set(name, value);
     }
 
     // Apply per-host / per-[context] override headers
@@ -163,7 +225,11 @@ export async function makeRequest(url: string, options: RequestOptions) {
           : 'false',
         ...(appConfig.logging.logSensitiveInfo
           ? {
-              headers: Object.fromEntries(headers.entries()),
+              headers: Object.fromEntries(
+                [...headers.entries()].filter(
+                  ([name]) => !internalHeaderNames.includes(name)
+                )
+              ),
               dispatcher:
                 options.forceProxy ??
                 (useProxy ? appConfig.http.addonProxy[proxyIndex] : undefined),
@@ -223,6 +289,7 @@ export async function makeRequest(url: string, options: RequestOptions) {
     }
 
     const nextUrl = rewriteRequestUrl(new URL(hop.location));
+    enforcePrivateUrlPolicy(nextUrl, internalOrigin);
     if (nextUrl.origin !== urlObj.origin) {
       for (const header of CROSS_ORIGIN_SENSITIVE_HEADERS) {
         headers.delete(header);

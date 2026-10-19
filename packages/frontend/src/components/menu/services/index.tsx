@@ -3,13 +3,20 @@ import { useSubTab } from '@/context/sub-tab';
 import { PageControls } from '../../shared/page-controls';
 import { MenuTabs } from '../../shared/menu-tabs';
 import { useMode } from '@/context/mode';
-import { FiServer, FiSettings, FiDatabase, FiImage } from 'react-icons/fi';
+import {
+  FiServer,
+  FiSettings,
+  FiDatabase,
+  FiImage,
+  FiActivity,
+} from 'react-icons/fi';
 import { useParentInheritance } from '@/context/userData';
 import { InheritedBadge } from '../../shared/inherited-badge';
 import { StreamServices } from './_components/stream-services';
 import { BuiltinSettings } from './_components/builtin-settings';
 import { MetadataServices } from './_components/metadata-services';
 import { PosterServices } from './_components/poster-services';
+import { TrackerProviders } from './_components/tracker-providers';
 
 export function ServicesMenu() {
   return (
@@ -35,7 +42,8 @@ function Content() {
             )}
           </div>
           <p className="text-[--muted]">
-            Configure your debrid, metadata, and poster services.
+            Configure stream services and metadata, posters, and tracker
+            providers.
           </p>
         </div>
         <div className="hidden lg:block lg:ml-auto">
@@ -50,6 +58,12 @@ function Content() {
             label: 'Services',
             icon: <FiServer className="w-4 h-4 shrink-0" />,
             content: <StreamServices />,
+          },
+          {
+            value: 'trackers',
+            label: 'Trackers',
+            icon: <FiActivity className="w-4 h-4 shrink-0" />,
+            content: <TrackerProviders />,
           },
           {
             value: 'builtin',

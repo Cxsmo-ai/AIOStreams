@@ -457,6 +457,14 @@ function InstallCard({
   disableSearchApiCard,
   searchApiDisabledReason,
 }: InstallCardProps) {
+  const enhancedCinemetaManifestUrl = manifestUrl.replace(
+    /\/manifest\.json(?=\?|$)/,
+    '/enhanced-cinemeta/manifest.json'
+  );
+  const encodedEnhancedCinemetaManifest = encodeURIComponent(
+    enhancedCinemetaManifestUrl
+  );
+
   return (
     <SettingsCard
       title="Installation Options"
@@ -567,6 +575,77 @@ function InstallCard({
               </div>
             </div>
           </div>
+        </div>
+
+        <div className="w-full rounded-xl border border-gray-700 bg-gray-800/30 p-5 shadow-inner">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <h3 className="text-base font-semibold text-white">
+                Enhanced Cinemeta metadata
+              </h3>
+              <p className="mt-1 max-w-3xl text-sm text-gray-400">
+                Cinemeta catalogs and IDs with TorrentClaw season and episode
+                metadata when its API key is configured. This is metadata-only;
+                AIOStreams keeps supplying and merging your configured sources.
+              </p>
+            </div>
+            <div className="grid shrink-0 grid-cols-1 gap-2 sm:grid-cols-2">
+              <Button
+                onClick={() =>
+                  window.open(
+                    enhancedCinemetaManifestUrl.replace(
+                      /^https?:\/\//,
+                      'stremio://'
+                    )
+                  )
+                }
+                intent="primary"
+                className="w-full"
+              >
+                Install Enhanced Cinemeta
+              </Button>
+              <Button
+                onClick={() =>
+                  window.open(
+                    `https://web.stremio.com/#/addons?addon=${encodedEnhancedCinemetaManifest}`
+                  )
+                }
+                intent="gray-outline"
+                className="w-full"
+              >
+                Install to Stremio Web
+              </Button>
+            </div>
+          </div>
+          <div className="mt-4 flex items-center gap-2 border-t border-gray-700/60 pt-4">
+            <TextInput
+              type="text"
+              readOnly
+              value={enhancedCinemetaManifestUrl}
+              className="flex-1 bg-black/20 font-mono text-sm"
+              onClick={(event) => event.currentTarget.select()}
+              aria-label="Enhanced Cinemeta metadata manifest URL"
+            />
+            <Button
+              onClick={() =>
+                copyToClipboard(enhancedCinemetaManifestUrl, {
+                  onSuccess: () =>
+                    toast.success('Enhanced Cinemeta manifest URL copied'),
+                  onError: () =>
+                    toast.error('Failed to copy Enhanced Cinemeta URL'),
+                })
+              }
+              intent="gray-outline"
+              className="shrink-0 px-3"
+              aria-label="Copy Enhanced Cinemeta manifest URL"
+            >
+              <CopyIcon className="h-4 w-4" />
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-gray-500">
+            The companion never returns streams or suppresses results. Keep
+            your existing AIOStreams manifest installed for playback sources.
+          </p>
         </div>
 
         {/* Other apps — playback clients you install the addon into */}

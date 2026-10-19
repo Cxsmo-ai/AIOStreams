@@ -28,6 +28,7 @@ import {
 } from './preset.js';
 import {
   filterTorrentClawPlaybackActions,
+  filterTorrentClawStreamsForExposure,
   getTorrentClawCachedStatus,
   getTorrentClawSource,
   streamText,
@@ -36,6 +37,9 @@ import {
 import {
   buildTorrentClawHeaders,
   enrichTorrentClawStreams,
+  enrichTorrentClawStreamsWithMetadata,
+  createTorrentClawApiStreams,
+  getTorrentClawTorrents,
   getTorrentClawMetadata,
   getTorrentClawServiceConfig,
   isTrustedTorrentClawUrl,
@@ -43,6 +47,17 @@ import {
   torrentClawAuthScope,
   torrentClawThreatLevel,
 } from './torrentclaw-api.js';
+import { StremThruPreset } from './stremthru.js';
+
+export const TORRENTCLAW_SUPPORTED_SERVICES: ServiceId[] = Array.from(
+  new Set<ServiceId>([
+    ...StremThruPreset.supportedServices,
+    constants.DEEPBRID_SERVICE,
+  ])
+);
+const torrentClawSupportedServiceSet = new Set<ServiceId>(
+  TORRENTCLAW_SUPPORTED_SERVICES
+);
 
 type TorrentClawFormattingOptions = {
   useAioFormatter?: boolean;
@@ -79,6 +94,95 @@ type RemapCacheEntry = {
   value: string[] | null;
   expires: number;
 };
+
+type TorrentClawSearchPage<T> = {
+  total?: number;
+  pageSize?: number;
+  results?: T[];
+};
+
+// TorrentClaw's public API currently accepts pages through page 1000.
+const TORRENTCLAW_MAX_SEARCH_PAGE = 1_000;
+
+/** Consume every API search page; page size is not a result-count limit. */
+export async function collectAllTorrentClawSearchPages<T>(
+  firstPage: TorrentClawSearchPage<T>,
+  fetchPage: (page: number) => Promise<TorrentClawSearchPage<T>>
+): Promise<T[]> {
+  const firstResults = Array.isArray(firstPage.results)
+    ? firstPage.results
+    : [];
+  const pageSize = Number(firstPage.pageSize);
+  const total = Number(firstPage.total);
+  if (!Number.isFinite(pageSize) || pageSize <= 0 || !Number.isFinite(total)) {
+    return firstResults;
+  }
+
+  const reportedPageCount = Math.ceil(total / pageSize);
+  const pageCount = Math.min(reportedPageCount, TORRENTCLAW_MAX_SEARCH_PAGE);
+  const results = [...firstResults];
+  const failedPages: number[] = [];
+  // Fetch pages in small concurrent batches to avoid flooding TorrentClaw
+  // while still collecting the entire result set instead of truncating it.
+  for (let page = 2; page <= pageCount; page += 4) {
+    const pages = Array.from(
+      { length: Math.min(4, pageCount - page + 1) },
+      (_, index) => page + index
+    );
+    const pageResults = await Promise.allSettled(
+      pages.map(async (pageNumber) => {
+        try {
+          return await fetchPage(pageNumber);
+        } catch (firstError) {
+          // A single transient page failure should not discard already fetched
+          // pages or the rest of TorrentClaw's results. Retry once, then keep
+          // the successfully fetched pages from this batch.
+          try {
+            return await fetchPage(pageNumber);
+          } catch {
+            throw firstError;
+          }
+        }
+      })
+    );
+    for (const [index, result] of pageResults.entries()) {
+      if (
+        result.status === 'fulfilled' &&
+        Array.isArray(result.value.results)
+      ) {
+        results.push(...result.value.results);
+      } else {
+        failedPages.push(pages[index]);
+      }
+    }
+  }
+  if (failedPages.length) {
+    logger.warn(
+      { failedPages, expectedPageCount: pageCount },
+      'some TorrentClaw search pages failed after retry; retaining successful results'
+    );
+  }
+  if (reportedPageCount > TORRENTCLAW_MAX_SEARCH_PAGE) {
+    logger.warn(
+      { reportedPageCount, providerMaxPage: TORRENTCLAW_MAX_SEARCH_PAGE },
+      'TorrentClaw reported more pages than its API supports; fetched through the provider page limit'
+    );
+  }
+  return results;
+}
+
+async function mapTorrentClawCandidates<T, R>(
+  values: T[],
+  map: (value: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  for (let start = 0; start < values.length; start += 4) {
+    results.push(
+      ...(await Promise.all(values.slice(start, start + 4).map(map)))
+    );
+  }
+  return results;
+}
 
 const logger = createLogger('torrentclaw');
 const remapCache = new Map<string, RemapCacheEntry>();
@@ -189,6 +293,8 @@ async function enrichSeasonPackSizes(
         isTorrentClawSeasonPack(stream) &&
         Boolean(getTorrentClawReportedSize(stream))
     )
+    // This only bounds optional HEAD requests for size labels; every stream
+    // remains in `enriched` and is returned to the client.
     .slice(0, 48);
   if (!candidates.length) return streams;
 
@@ -254,13 +360,19 @@ function numberInRange(
 }
 
 function hasPlayableStream(streams: Stream[]): boolean {
-  return streams.some((stream) => Boolean(stream.url));
+  return streams.some((stream) =>
+    Boolean(stream.url || stream.infoHash || stream.externalUrl)
+  );
 }
 
-function mergeStreams(original: Stream[], additions: Stream[][]): Stream[] {
+export function mergeTorrentClawStreams(
+  original: Stream[],
+  additions: Stream[][]
+): Stream[] {
   const seen = new Set<string>();
   return [...original, ...additions.flat()].filter((stream) => {
     const key =
+      (stream.infoHash && `hash:${stream.infoHash.toLowerCase()}`) ||
       stream.url ||
       stream.externalUrl ||
       `${stream.name || ''}\n${stream.title || ''}\n${stream.description || ''}`;
@@ -311,7 +423,7 @@ async function discoverTorrentClawIds(
 
   const titleMatch = remapping.titleMatch === 'contains' ? 'contains' : 'exact';
   const yearTolerance = numberInRange(remapping.yearTolerance, 1, 0, 5);
-  const searchLimit = numberInRange(remapping.searchLimit, 10, 1, 25);
+  const searchLimit = numberInRange(remapping.searchLimit, 50, 1, 50);
   const cacheKey = [
     type,
     requestedId,
@@ -344,13 +456,20 @@ async function discoverTorrentClawIds(
     // repeating the same public search and triggering provider rate limits.
     // The requested season and episode remain part of replacementId below.
     if (expectedYear) searchUrl.searchParams.set('year', String(expectedYear));
-    const searchPayload = await fetchJson(searchUrl.toString(), {
+    const searchHeaders = {
       'X-Search-Source': 'aiostreams',
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    });
-    const candidates = Array.isArray(searchPayload?.results)
-      ? searchPayload.results
-      : [];
+    };
+    searchUrl.searchParams.set('page', '1');
+    const searchPayload = await fetchJson(searchUrl.toString(), searchHeaders);
+    const candidates = await collectAllTorrentClawSearchPages(
+      searchPayload,
+      async (page) => {
+        const pageUrl = new URL(searchUrl);
+        pageUrl.searchParams.set('page', String(page));
+        return fetchJson(pageUrl.toString(), searchHeaders);
+      }
+    );
 
     const ranked = candidates
       .map((item: any) => {
@@ -439,6 +558,42 @@ export class TorrentClawStreamParser extends StreamParser {
     return getTorrentClawMetadata(stream);
   }
 
+  protected override getSize(
+    stream: Stream,
+    currentParsedStream: ParsedStream
+  ): number | undefined {
+    const parseSize = (value: unknown): number | undefined => {
+      if (typeof value === 'number') {
+        return Number.isFinite(value) && value > 0
+          ? Math.round(value)
+          : undefined;
+      }
+      if (typeof value !== 'string' || !value.trim()) return undefined;
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) return Math.round(numeric);
+      const parsed = bytes.parse(value);
+      return typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0
+        ? Math.round(parsed)
+        : undefined;
+    };
+
+    const streamSize = parseSize(
+      stream.behaviorHints?.videoSize ??
+        (stream as any).size ??
+        (stream as any).sizeBytes ??
+        (stream as any).sizebytes
+    );
+    if (streamSize !== undefined) return streamSize;
+
+    const reportedSize = this.metadata(stream)?.sizeBytes;
+    const metadataSize = parseSize(reportedSize);
+    // Preserve playable-file size hints above. Structured TorrentClaw bytes
+    // outrank display text, which can be incomplete or inconsistently rounded.
+    if (metadataSize !== undefined) return metadataSize;
+
+    return super.getSize(stream, currentParsedStream);
+  }
+
   private language(value: unknown): string | undefined {
     const text = String(value || '').trim();
     if (!text) return undefined;
@@ -454,11 +609,16 @@ export class TorrentClawStreamParser extends StreamParser {
     currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
     const source = getTorrentClawSource(stream);
-    const structuredProviders: Record<string, ServiceId> = {
+    const providerAliases: Record<string, ServiceId> = {
       realdebrid: constants.REALDEBRID_SERVICE,
       rd: constants.REALDEBRID_SERVICE,
       alldebrid: constants.ALLDEBRID_SERVICE,
       ad: constants.ALLDEBRID_SERVICE,
+      debridlink: constants.DEBRIDLINK_SERVICE,
+      dl: constants.DEBRIDLINK_SERVICE,
+      easydebrid: constants.EASYDEBRID_SERVICE,
+      ed: constants.EASYDEBRID_SERVICE,
+      debrider: constants.DEBRIDER_SERVICE,
       torbox: constants.TORBOX_SERVICE,
       tb: constants.TORBOX_SERVICE,
       premiumize: constants.PREMIUMIZE_SERVICE,
@@ -466,10 +626,26 @@ export class TorrentClawStreamParser extends StreamParser {
       deepbrid: constants.DEEPBRID_SERVICE,
       deepbriddb: constants.DEEPBRID_SERVICE,
       db: constants.DEEPBRID_SERVICE,
+      offcloud: constants.OFFCLOUD_SERVICE,
+      oc: constants.OFFCLOUD_SERVICE,
+      pikpak: constants.PIKPAK_SERVICE,
+      torrin: constants.TORRIN_SERVICE,
     };
-    if (structuredProviders[source]) {
+    const directProvider = providerAliases[source];
+    const metadataProvider = TORRENTCLAW_SUPPORTED_SERVICES.find(
+      (serviceId) => {
+        const details = constants.SERVICE_DETAILS[serviceId];
+        return [serviceId, details?.name, details?.shortName]
+          .filter((value): value is string => Boolean(value))
+          .some(
+            (value) => value.toLowerCase().replace(/[^a-z0-9]/g, '') === source
+          );
+      }
+    );
+    const sourceProvider = directProvider || metadataProvider;
+    if (sourceProvider && torrentClawSupportedServiceSet.has(sourceProvider)) {
       return {
-        id: structuredProviders[source],
+        id: sourceProvider,
         cached: getTorrentClawCachedStatus(stream),
       };
     }
@@ -558,6 +734,7 @@ export class TorrentClawStreamParser extends StreamParser {
     _currentParsedStream: ParsedStream
   ): Partial<ParsedFile> {
     const metadata = this.metadata(stream);
+    const resolvedResolution = this.getResolution(stream);
     const technicalText = [
       metadata?.rawTitle,
       metadata?.quality,
@@ -608,7 +785,9 @@ export class TorrentClawStreamParser extends StreamParser {
       : undefined;
 
     return {
-      ...(technical?.resolution ? { resolution: technical.resolution } : {}),
+      ...(resolvedResolution || technical?.resolution
+        ? { resolution: resolvedResolution || technical?.resolution }
+        : {}),
       ...(technical?.quality ? { quality: technical.quality } : {}),
       ...(technical?.encode ? { encode: technical.encode } : {}),
       ...(technical?.visualTags?.length
@@ -697,6 +876,11 @@ export class TorrentClawStreamParser extends StreamParser {
           Number(metadata?.leechers) >= 0
             ? Number(metadata?.leechers)
             : undefined,
+        // Preserve coverage as descriptive data; never suppress a candidate.
+        packEpisodes: Array.isArray(metadata?.packEpisodes)
+          ? metadata.packEpisodes
+          : undefined,
+        seasons: metadata?.seasons,
       },
       formattingPassthrough: isAction,
       formattingSuffix: suffix,
@@ -724,12 +908,7 @@ export class TorrentClawPreset extends Preset {
   }
 
   static override get METADATA(): PresetMetadata {
-    const supportedServices: ServiceId[] = [
-      constants.REALDEBRID_SERVICE,
-      constants.ALLDEBRID_SERVICE,
-      constants.TORBOX_SERVICE,
-      constants.PREMIUMIZE_SERVICE,
-    ];
+    const supportedServices = TORRENTCLAW_SUPPORTED_SERVICES;
     const supportedResources = [
       constants.STREAM_RESOURCE,
       constants.CATALOG_RESOURCE,
@@ -742,6 +921,15 @@ export class TorrentClawPreset extends Preset {
         appConfig.presets.torrentclaw.defaultTimeout ??
           appConfig.presets.defaultTimeout,
         appConfig.presets.torrentclaw.url
+      ).map((option) =>
+        option.id === 'url'
+          ? {
+              ...option,
+              name: 'Account-linked manifest URL',
+              description:
+                'Paste the TorrentClaw install manifest URL generated after logging in to your TorrentClaw account to enable personalized catalogs such as For You. The tc_ PRO API key in Services authorizes PRO API features but does not sign in to your TorrentClaw account. Leave blank to use the public addon feed.',
+            }
+          : option
       ),
       {
         id: 'mediaTypes',
@@ -813,7 +1001,7 @@ export class TorrentClawPreset extends Preset {
             description:
               'Fallback only remaps empty results. Merge also checks alternate IDs when the requested ID works.',
             type: 'select',
-            default: 'fallback',
+            default: 'merge',
             options: [
               { label: 'Fallback when empty', value: 'fallback' },
               { label: 'Merge alternate IDs', value: 'merge' },
@@ -849,10 +1037,11 @@ export class TorrentClawPreset extends Preset {
           {
             id: 'searchLimit',
             name: 'Search Result Limit',
-            description: 'Maximum TorrentClaw search candidates to inspect.',
+            description:
+              'Search results per API page. All pages are fetched; this does not cap matching titles or sources.',
             type: 'number',
-            default: 10,
-            constraints: { min: 1, max: 25, forceInUi: true },
+            default: 50,
+            constraints: { min: 1, max: 50, forceInUi: true },
             showInSimpleMode: false,
           },
           {
@@ -1033,28 +1222,53 @@ export class TorrentClawPreset extends Preset {
     const options = (addon.preset.options || {}) as TorrentClawPresetOptions;
     const playback = options.playback || {};
     const remapping = options.remapping || {};
+    const remapMode = remapping.mode ?? 'merge';
     const apiKey = addon.headers?.Authorization?.replace(/^Bearer\s+/i, '');
-    const enrichedStreams = await enrichTorrentClawStreams({
-      streams,
+    // Account-authenticated API search can return hashes that the Stremio
+    // add-on omits. Wait for it when a key is configured; without a key retain
+    // the existing short, best-effort metadata lookup so public searches stay
+    // responsive and never fabricate an unresolvable torrent.
+    const apiTorrents = await getTorrentClawTorrents({
       type,
       id,
       apiKey,
-      timeout: Math.min(3_500, Math.max(1_500, addon.timeout)),
-      maxWait: options.safety?.hideUnsafe === true ? undefined : 1_000,
+      timeout: Math.min(8_000, Math.max(1_500, addon.timeout)),
+      maxWait: apiKey
+        ? undefined
+        : options.safety?.hideUnsafe === true
+          ? undefined
+          : 1_000,
     });
-    const original = filterTorrentClawPlaybackActions(enrichedStreams, playback)
+    const enrichedStreams = enrichTorrentClawStreamsWithMetadata(
+      streams,
+      apiTorrents
+    );
+    const apiStreams = createTorrentClawApiStreams(
+      apiTorrents,
+      enrichedStreams
+    );
+    const original = filterTorrentClawPlaybackActions(
+      [...enrichedStreams, ...apiStreams],
+      playback
+    )
       .filter((stream) => stream.type !== constants.STREMIO_USENET_STREAM_TYPE)
       .filter(
         (stream) =>
           options.safety?.hideUnsafe !== true ||
           !isUnsafeTorrentClawStream(stream)
       );
+    const expose = (items: Stream[]) =>
+      filterTorrentClawStreamsForExposure(items, addon.serviceWrapped === true);
 
     if (remapping.enabled === false || !/^tt\d+/i.test(id)) {
-      return enrichSeasonPackSizes(original, type, options.formatting || {});
+      return expose(
+        await enrichSeasonPackSizes(original, type, options.formatting || {})
+      );
     }
-    if (remapping.mode !== 'merge' && hasPlayableStream(original)) {
-      return enrichSeasonPackSizes(original, type, options.formatting || {});
+    if (remapMode !== 'merge' && hasPlayableStream(original)) {
+      return expose(
+        await enrichSeasonPackSizes(original, type, options.formatting || {})
+      );
     }
 
     const parts = id.split(':');
@@ -1070,41 +1284,66 @@ export class TorrentClawPreset extends Preset {
         Number.isFinite(episode) ? episode : undefined,
         apiKey
       );
-      const additions: Stream[][] = [];
-      for (const alternativeId of (alternatives || []).slice(0, 3)) {
-        const replacementParts = [...parts];
-        replacementParts[0] = alternativeId;
-        const replacementId = replacementParts.join(':');
-        const enrichedRetry = await enrichTorrentClawStreams({
-          streams: await fetchStreams(replacementId),
-          type,
-          id: replacementId,
-          apiKey,
-          timeout: Math.min(3_500, Math.max(1_500, addon.timeout)),
-          maxWait: options.safety?.hideUnsafe === true ? undefined : 1_000,
-        });
-        const retry = filterTorrentClawPlaybackActions(
-          enrichedRetry,
-          playback
-        ).filter(
-          (stream) =>
-            options.safety?.hideUnsafe !== true ||
-            !isUnsafeTorrentClawStream(stream)
-        );
-        if (!hasPlayableStream(retry)) continue;
-        logger.info(
-          { type, requestedId, replacementId: alternativeId },
-          'resolved TorrentClaw metadata mismatch natively'
-        );
-        if (remapping.mode !== 'merge') {
-          return enrichSeasonPackSizes(retry, type, options.formatting || {});
+      const additions = await mapTorrentClawCandidates(
+        alternatives || [],
+        async (alternativeId) => {
+          const replacementParts = [...parts];
+          replacementParts[0] = alternativeId;
+          const replacementId = replacementParts.join(':');
+          try {
+            const enrichedRetry = await enrichTorrentClawStreams({
+              streams: await fetchStreams(replacementId),
+              type,
+              id: replacementId,
+              apiKey,
+              timeout: Math.min(3_500, Math.max(1_500, addon.timeout)),
+              maxWait: options.safety?.hideUnsafe === true ? undefined : 1_000,
+            });
+            const retry = filterTorrentClawPlaybackActions(
+              enrichedRetry,
+              playback
+            ).filter(
+              (stream) =>
+                options.safety?.hideUnsafe !== true ||
+                !isUnsafeTorrentClawStream(stream)
+            );
+            if (!hasPlayableStream(retry)) return [];
+            logger.info(
+              { type, requestedId, replacementId: alternativeId },
+              'resolved TorrentClaw metadata mismatch natively'
+            );
+            return retry;
+          } catch (error) {
+            logger.debug(
+              {
+                type,
+                requestedId,
+                replacementId: alternativeId,
+                err: error instanceof Error ? error.message : String(error),
+              },
+              'alternate TorrentClaw ID lookup failed; continuing with remaining candidates'
+            );
+            return [];
+          }
         }
-        additions.push(retry);
+      );
+      if (remapMode !== 'merge' && additions.length) {
+        return expose(
+          await enrichSeasonPackSizes(
+            mergeTorrentClawStreams([], additions),
+            type,
+            options.formatting || {}
+          )
+        );
       }
-      return enrichSeasonPackSizes(
-        additions.length ? mergeStreams(original, additions) : original,
-        type,
-        options.formatting || {}
+      return expose(
+        await enrichSeasonPackSizes(
+          additions.length
+            ? mergeTorrentClawStreams(original, additions)
+            : original,
+          type,
+          options.formatting || {}
+        )
       );
     } catch (error) {
       logger.warn(
@@ -1115,7 +1354,9 @@ export class TorrentClawPreset extends Preset {
         },
         'native TorrentClaw metadata remapping failed; using original response'
       );
-      return enrichSeasonPackSizes(original, type, options.formatting || {});
+      return expose(
+        await enrichSeasonPackSizes(original, type, options.formatting || {})
+      );
     }
   }
 

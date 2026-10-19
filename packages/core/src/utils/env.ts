@@ -221,6 +221,10 @@ export const Env = cleanEnv(process.env, {
     default: `http://localhost:${process.env.PORT || 3000}`,
     desc: 'Internal URL of the addon, used for internal communication between built-in addons and the server',
   }),
+  ALLOW_PRIVATE_URLS: bool({
+    default: false,
+    desc: 'Allow outbound requests to private, loopback, link-local, or CGNAT IP addresses. Keep disabled on public instances; enable only when trusted users need private-network integrations.',
+  }),
   INTERNAL_SECRET: readonly({
     default: randomBytes(32).toString('hex'),
     desc: 'Internal secret for the addon, used for internal communication between built-in addons and the server',

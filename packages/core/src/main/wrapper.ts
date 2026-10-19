@@ -212,6 +212,7 @@ export class Wrapper {
             AbortSignal.timeout(backgroundTimeout),
           ]),
           headers: this.addon.headers,
+          internalHeaders: this.addon.internalHeaders,
           forwardIp: this.addon.ip,
         });
         if (!res.ok) {
@@ -295,23 +296,17 @@ export class Wrapper {
         options: this.addon.preset.options,
         headers: this.addon.headers,
       }) || this.buildResourceUrl('stream', type, id);
-    // Floatplane delivery URLs contain short-lived CDN signatures. Never
-    // reuse a cached stream response for this preset; each playback request
-    // must ask Floatplane for a fresh signed playlist URL.
-    const ephemeralSignedUrls = this.addon.preset.type === 'floatplane';
-    const streamTtl = ephemeralSignedUrls
-      ? -1
-      : resolveTtl(
-          appConfig.resources.cache.stream.ttl,
-          this.addon.preset.type,
-          this.manifestUrl
-        );
+    const streamTtl = resolveTtl(
+      appConfig.resources.cache.stream.ttl,
+      this.addon.preset.type,
+      this.manifestUrl
+    );
     const upstreamStreams = await this.makeResourceRequest(
       'stream',
       { type, id },
       this.addon.timeout,
       validator,
-      !ephemeralSignedUrls && streamTtl != -1 ? streamsCache : undefined,
+      streamTtl != -1 ? streamsCache : undefined,
       streamTtl,
       this.preset.getCacheKey({
         resource: 'stream',
@@ -324,26 +319,27 @@ export class Wrapper {
     let streams: Stream[];
     try {
       streams = await this.preset.transformStreamResponse({
-      addon: this.addon,
-      type,
-      id,
-      streams: upstreamStreams,
-      fetchStreams: async (replacementId: string): Promise<Stream[]> => {
-        const replacementUrl = this.buildResourceUrl(
-          'stream',
-          type,
-          replacementId
-        );
-        const response = await makeRequest(replacementUrl, {
-          timeout: this.addon.timeout,
-          headers: this.addon.headers,
-          forwardIp: this.addon.ip,
-        });
-        if (!response.ok) {
-          throw new Error(`${response.status} - ${response.statusText}`);
-        }
-        return validator(await response.json());
-      },
+        addon: this.addon,
+        type,
+        id,
+        streams: upstreamStreams,
+        fetchStreams: async (replacementId: string): Promise<Stream[]> => {
+          const replacementUrl = this.buildResourceUrl(
+            'stream',
+            type,
+            replacementId
+          );
+          const response = await makeRequest(replacementUrl, {
+            timeout: this.addon.timeout,
+            headers: this.addon.headers,
+            internalHeaders: this.addon.internalHeaders,
+            forwardIp: this.addon.ip,
+          });
+          if (!response.ok) {
+            throw new Error(`${response.status} - ${response.statusText}`);
+          }
+          return validator(await response.json());
+        },
       });
     } catch (error) {
       await streamsCache.delete(cacheKey);
@@ -541,6 +537,7 @@ export class Wrapper {
       headers: this.addon.headers,
       forwardIp: this.addon.ip,
       ...options,
+      internalHeaders: this.addon.internalHeaders,
     });
   }
 
@@ -718,6 +715,7 @@ export class Wrapper {
         timeout,
         signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
         headers: this.addon.headers,
+        internalHeaders: this.addon.internalHeaders,
         forwardIp: this.addon.ip,
       });
 

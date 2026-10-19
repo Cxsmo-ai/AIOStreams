@@ -8,6 +8,11 @@ import { config as appConfig } from '../config/index.js';
 import { constants } from '../utils/index.js';
 import { Wrapper } from './wrapper.js';
 import { PresetManager } from '../presets/index.js';
+import {
+  getTorrentClawServiceWrapEntries,
+  isTorrentClawP2PDisabledManifest,
+} from '../presets/torrentclaw-api.js';
+import { shouldAutoWrapTorrentClaw } from './torrentClawAutoWrap.js';
 import { FeatureControl } from '../utils/feature.js';
 import { createProxy } from '../proxy/index.js';
 import { getAddonName } from '../utils/general.js';
@@ -32,16 +37,41 @@ export async function applyPresets(ctx: AIOStreamsContext): Promise<void> {
         );
       }
 
-      // Determine if P2P wrap applies to this preset
-      const shouldServiceWrap =
-        serviceWrap?.enabled &&
-        Preset.METADATA.SUPPORTED_STREAM_TYPES.includes(
+      // TorrentClaw's info-hash results are resolved through enabled
+      // compatible debrid services automatically. This does not enable the
+      // global Service Wrap feature for any other preset.
+      const torrentClawAutoWrap = shouldAutoWrapTorrentClaw({
+        presetType: preset.type,
+        supportsP2P: Preset.METADATA.SUPPORTED_STREAM_TYPES.includes(
           constants.P2P_STREAM_TYPE
-        ) &&
-        !Preset.METADATA.BUILTIN &&
-        (!serviceWrap.presets ||
-          serviceWrap.presets.length === 0 ||
-          serviceWrap.presets.includes(preset.instanceId));
+        ),
+        supportedServiceIds: Preset.METADATA.SUPPORTED_SERVICES ?? [],
+        enabledServiceIds: (ctx.userData.services ?? [])
+          .filter((service) => service.enabled !== false)
+          .map((service) => service.id),
+      });
+
+      // Respect an explicit no-P2P option on account-linked TorrentClaw
+      // manifests. Otherwise the second internal addon would bypass that
+      // choice and reintroduce P2P candidates for service wrapping.
+      const torrentClawAllowsP2P =
+        preset.type !== 'torrentclaw' ||
+        !isTorrentClawP2PDisabledManifest(String(preset.options?.url || ''));
+
+      // Determine if P2P wrap applies to this preset. TorrentClaw has a
+      // preset-specific auto-wrap path; other presets still require the
+      // existing global Service Wrap setting and scope.
+      const shouldServiceWrap =
+        torrentClawAllowsP2P &&
+        (torrentClawAutoWrap ||
+          (serviceWrap?.enabled === true &&
+            Preset.METADATA.SUPPORTED_STREAM_TYPES.includes(
+              constants.P2P_STREAM_TYPE
+            ) &&
+            !Preset.METADATA.BUILTIN &&
+            (!serviceWrap.presets ||
+              serviceWrap.presets.length === 0 ||
+              serviceWrap.presets.includes(preset.instanceId))));
 
       // When Service Wrap is active, only generate normal addons for services
       // that are NOT builtin-supported (since builtin services will be handled
@@ -92,9 +122,10 @@ export async function applyPresets(ctx: AIOStreamsContext): Promise<void> {
         : addons;
 
       ctx.addons.push(
-        ...filteredAddons.map(
-          (a): Addon => ({
-            ...a,
+        ...filteredAddons.map((a): Addon => {
+          const { internalHeaders, ...publicAddon } = a;
+          const addon: Addon = {
+            ...publicAddon,
             preset: {
               ...a.preset,
               id: preset.instanceId,
@@ -102,8 +133,15 @@ export async function applyPresets(ctx: AIOStreamsContext): Promise<void> {
             // if no identifier is present, we can assume that the preset can only generate one addon at a time and so no
             // unique identifier is needed as the preset instance id is enough to identify the addon
             instanceId: `${preset.instanceId}${getSimpleTextHash(`${a.identifier ?? ''}`).slice(0, 4)}`,
-          })
-        )
+          };
+          if (internalHeaders) {
+            Object.defineProperty(addon, 'internalHeaders', {
+              value: internalHeaders,
+              enumerable: false,
+            });
+          }
+          return addon;
+        })
       );
 
       // Service Wrap: generate the P2P-mode addon for this preset
@@ -113,7 +151,13 @@ export async function applyPresets(ctx: AIOStreamsContext): Promise<void> {
           // Generate addons with no services, forcing the preset into P2P mode
           const p2pUserData: UserData = {
             ...ctx.userData,
-            services: [], // empty services → preset falls into P2P codepath
+            // Preserve only TorrentClaw's own API key so its authenticated
+            // hash lookup works in the internal P2P wrapper. Never pass the
+            // user's debrid credentials to that addon.
+            services: getTorrentClawServiceWrapEntries(
+              ctx.userData,
+              preset.type
+            ),
             presets: ctx.userData.presets?.map((p) =>
               p.instanceId === preset.instanceId
                 ? {
@@ -506,10 +550,18 @@ export function buildResources(ctx: AIOStreamsContext): void {
         if (catalog.id === 'tc-streaming-top') {
           const streamingPlatforms = [
             { id: 'netflix', name: 'TorrentClaw · Netflix', genre: 'Netflix' },
-            { id: 'prime', name: 'TorrentClaw · Prime Video', genre: 'Prime Video' },
+            {
+              id: 'prime',
+              name: 'TorrentClaw · Prime Video',
+              genre: 'Prime Video',
+            },
             { id: 'disney', name: 'TorrentClaw · Disney+', genre: 'Disney+' },
             { id: 'hbo', name: 'TorrentClaw · HBO Max', genre: 'HBO Max' },
-            { id: 'apple', name: 'TorrentClaw · Apple TV+', genre: 'Apple TV+' },
+            {
+              id: 'apple',
+              name: 'TorrentClaw · Apple TV+',
+              genre: 'Apple TV+',
+            },
           ];
           for (const sp of streamingPlatforms) {
             ctx.finalCatalogs.push({
@@ -604,8 +656,12 @@ export function buildResources(ctx: AIOStreamsContext): void {
     ctx.finalCatalogs = ctx.finalCatalogs
       .sort((a, b) => {
         // "What you guys should watch" / tc-watchlist always floats to the very top
-        const aIsWatchlist = a.id.includes('tc-watchlist') || a.name === 'What you guys should watch';
-        const bIsWatchlist = b.id.includes('tc-watchlist') || b.name === 'What you guys should watch';
+        const aIsWatchlist =
+          a.id.includes('tc-watchlist') ||
+          a.name === 'What you guys should watch';
+        const bIsWatchlist =
+          b.id.includes('tc-watchlist') ||
+          b.name === 'What you guys should watch';
         if (aIsWatchlist && !bIsWatchlist) return -1;
         if (!aIsWatchlist && bIsWatchlist) return 1;
         const aModIndex = ctx.userData.catalogModifications!.findIndex(

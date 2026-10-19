@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { Addon, ParsedStream } from '../db/schemas.js';
 import {
   getDeepbridFinderIdentities,
+  hasTorrentClawAutoWrapAddon,
   isAlreadyResolvedByDeepbridFinder,
 } from './serviceWrapper.js';
 
@@ -43,6 +44,25 @@ test('suppresses an external Deepbrid copy when Finder exposed the same NZB', ()
       getDeepbridFinderIdentities(finder)
     ),
     true
+  );
+});
+
+test('recognizes only an internally service-wrapped TorrentClaw addon for auto-wrap', () => {
+  const torrentClaw = {
+    ...addon('torrentclaw'),
+    preset: { id: 'torrentclaw', type: 'torrentclaw', options: {} },
+    serviceWrapped: true,
+  } as Addon;
+  const ordinaryWrappedAddon = {
+    ...addon('comet'),
+    serviceWrapped: true,
+  } as Addon;
+
+  assert.equal(hasTorrentClawAutoWrapAddon([torrentClaw]), true);
+  assert.equal(hasTorrentClawAutoWrapAddon([ordinaryWrappedAddon]), false);
+  assert.equal(
+    hasTorrentClawAutoWrapAddon([{ ...torrentClaw, serviceWrapped: false }]),
+    false
   );
 });
 

@@ -40,7 +40,29 @@ export type TorrentClawApiTorrent = {
   isRemastered?: boolean | null;
   season?: number | null;
   episode?: number | null;
+  /** Episode numbers/identifiers actually present in a season-pack torrent. */
+  packEpisodes?: unknown;
+  /** Title-level season metadata returned by search with include=seasons. */
+  seasons?: TorrentClawSeason[];
   subtitleLanguages?: string[] | null;
+};
+
+export type TorrentClawEpisode = {
+  episode: number;
+  name?: string;
+  overview?: string | null;
+  stillUrl?: string | null;
+  airDate?: string | null;
+  runtime?: number | null;
+  voteAverage?: number | null;
+};
+
+export type TorrentClawSeason = {
+  season: number;
+  episodeCount: number;
+  posterUrl?: string | null;
+  /** Returned only by exact-title lookups that explicitly request episodes. */
+  episodes?: TorrentClawEpisode[];
 };
 
 export type TorrentClawServiceConfig = {
@@ -48,11 +70,27 @@ export type TorrentClawServiceConfig = {
   unarrUrl: string;
 };
 
+/** Preserve only TorrentClaw's own credential for its internal P2P wrapper. */
+export function getTorrentClawServiceWrapEntries(
+  userData: UserData,
+  presetType: string
+): NonNullable<UserData['services']> {
+  if (presetType !== 'torrentclaw') return [];
+  return (userData.services || []).filter(
+    (service) =>
+      service.id === constants.TORRENTCLAW_SERVICE && service.enabled !== false
+  );
+}
+
 type CacheEntry<T> = { value: T; expires: number };
 
 const liveCache = new Map<string, CacheEntry<TorrentClawApiTorrent[]>>();
 const staticCache = new Map<string, CacheEntry<TorrentClawApiTorrent[]>>();
 const inFlight = new Map<string, Promise<TorrentClawApiTorrent[]>>();
+const seasonMetadataCache = new Map<
+  string,
+  CacheEntry<TorrentClawSeason[] | null>
+>();
 
 function setBounded<T>(
   cache: Map<string, CacheEntry<T>>,
@@ -122,6 +160,60 @@ function positiveNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
+/**
+ * Convert authenticated TorrentClaw search results into ordinary P2P streams.
+ * The API intentionally omits info hashes without an account key, so only
+ * complete, valid hashes are exposed to AIOStreams' existing service wrapper.
+ */
+export function createTorrentClawApiStreams(
+  torrents: TorrentClawApiTorrent[],
+  existingStreams: Stream[] = []
+): Stream[] {
+  const seen = new Set(
+    existingStreams
+      .map((stream) => String(stream.infoHash || '').toLowerCase())
+      .filter(Boolean)
+  );
+  const streams: Stream[] = [];
+
+  for (const torrent of torrents) {
+    const infoHash = String(torrent.infoHash || '')
+      .trim()
+      .toLowerCase();
+    const filename = String(torrent.rawTitle || '').trim();
+    if (!/^[a-f0-9]{40}$/.test(infoHash) || !filename || seen.has(infoHash)) {
+      continue;
+    }
+    seen.add(infoHash);
+
+    const size = positiveNumber(torrent.sizeBytes);
+    const seeders = positiveNumber(torrent.seeders);
+    const quality = String(torrent.quality || '').trim();
+    const score = positiveNumber(torrent.qualityScore);
+    const title = [
+      filename,
+      seeders !== undefined ? `👤 ${seeders}` : undefined,
+      score !== undefined ? `🟢 ${score}/100` : undefined,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    streams.push({
+      infoHash,
+      name: `TorrentClaw${quality ? ` ${quality}` : ''}`,
+      title,
+      behaviorHints: {
+        filename,
+        ...(size !== undefined && size > 0 ? { videoSize: size } : {}),
+        ...(seeders !== undefined ? { seeders } : {}),
+        tcMetadata: torrent,
+      },
+    } as Stream);
+  }
+
+  return streams;
+}
+
 export function normaliseRelease(value: unknown): string {
   return String(value || '')
     .normalize('NFKD')
@@ -159,6 +251,47 @@ export function isTrustedTorrentClawUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Account-linked TorrentClaw manifests can explicitly disable P2P in a
+ * base64url-encoded options segment. Respect that choice when deciding
+ * whether AIOStreams should create its separate internal P2P/service-wrap
+ * addon. Public/default manifests retain the existing auto-wrap behavior.
+ */
+export function isTorrentClawP2PDisabledManifest(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== 'https:' ||
+      (url.hostname !== 'torrentclaw.com' &&
+        !url.hostname.endsWith('.torrentclaw.com'))
+    ) {
+      return false;
+    }
+
+    for (const segment of url.pathname.split('/').filter(Boolean)) {
+      if (segment.length > 8_192) continue;
+      try {
+        const decoded = Buffer.from(segment, 'base64url').toString('utf8');
+        const options: unknown = JSON.parse(decoded);
+        if (
+          typeof options === 'object' &&
+          options !== null &&
+          'noP2P' in options &&
+          options.noP2P === true
+        ) {
+          return true;
+        }
+      } catch {
+        // Most path segments are route names or opaque account tokens.
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
 }
 
 export function buildTorrentClawHeaders(options: {
@@ -286,9 +419,15 @@ async function requestTorrentClawTorrents(options: {
 }): Promise<TorrentClawApiTorrent[]> {
   const parts = options.id.split(':');
   const url = new URL('/api/v1/search', API_BASE_URL);
-  url.searchParams.set('q', parts[0]);
+  // Exact IMDb lookup avoids fuzzy-title collisions (especially long-running
+  // shows). Keep the previous query mode for non-IMDb identifiers.
+  if (/^tt\d+$/i.test(parts[0])) url.searchParams.set('imdbid', parts[0]);
+  else url.searchParams.set('q', parts[0]);
   url.searchParams.set('type', options.type === 'series' ? 'show' : 'movie');
-  url.searchParams.set('limit', '5');
+  // Request the maximum documented page size. For an exact ID, TorrentClaw
+  // returns the title's available torrents together in its result object.
+  url.searchParams.set('limit', '50');
+  if (options.type === 'series') url.searchParams.set('include', 'seasons');
   if (options.type === 'series' && parts[1]) {
     url.searchParams.set('season', parts[1]);
   }
@@ -308,15 +447,22 @@ async function requestTorrentClawTorrents(options: {
     throw new Error(`TorrentClaw enrichment failed (${response.status})`);
   }
   const payload = (await response.json()) as {
-    results?: Array<{ imdbId?: string | null; torrents?: unknown }>;
+    results?: Array<{
+      imdbId?: string | null;
+      torrents?: unknown;
+      seasons?: TorrentClawSeason[];
+    }>;
   };
   const requestedId = parts[0].toLowerCase();
   const result = (payload.results || []).find(
     (item) => String(item.imdbId || '').toLowerCase() === requestedId
   );
-  return Array.isArray(result?.torrents)
-    ? (result.torrents as TorrentClawApiTorrent[])
-    : [];
+  if (!Array.isArray(result?.torrents)) return [];
+  const seasons = Array.isArray(result.seasons) ? result.seasons : undefined;
+  return (result.torrents as TorrentClawApiTorrent[]).map((torrent) => ({
+    ...torrent,
+    ...(seasons ? { seasons } : {}),
+  }));
 }
 
 export async function getTorrentClawTorrents(options: {
@@ -382,6 +528,67 @@ export async function getTorrentClawTorrents(options: {
   ]);
 }
 
+/** Fetch optional episode metadata for the metadata-only Cinemeta companion. */
+export async function getTorrentClawSeasonMetadata(options: {
+  id: string;
+  apiKey: string;
+  timeout?: number;
+}): Promise<TorrentClawSeason[] | undefined> {
+  const imdbId = options.id.split(':')[0];
+  if (!/^tt\d+$/i.test(imdbId)) return undefined;
+
+  const cacheKey = `${imdbId.toLowerCase()}:${torrentClawAuthScope(options.apiKey)}`;
+  const cached = getFresh(seasonMetadataCache, cacheKey);
+  if (cached !== undefined) return cached || undefined;
+
+  const url = new URL('/api/v1/search', API_BASE_URL);
+  url.searchParams.set('imdbid', imdbId);
+  url.searchParams.set('type', 'show');
+  url.searchParams.set('include', 'episodes');
+  url.searchParams.set('limit', '1');
+  try {
+    const response = await makeRequest(url.toString(), {
+      timeout: Math.min(8_000, Math.max(1_500, options.timeout ?? 5_000)),
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'AIOStreams Enhanced Cinemeta metadata',
+        'X-Search-Source': 'aiostreams',
+        Authorization: `Bearer ${options.apiKey}`,
+      },
+    });
+    if (!response.ok)
+      throw new Error(`TorrentClaw metadata failed (${response.status})`);
+    const payload = (await response.json()) as {
+      results?: Array<{
+        imdbId?: string | null;
+        seasons?: TorrentClawSeason[];
+      }>;
+    };
+    const result = payload.results?.find(
+      (item) => String(item.imdbId || '').toLowerCase() === imdbId.toLowerCase()
+    );
+    const seasons = Array.isArray(result?.seasons) ? result.seasons : undefined;
+    setBounded(
+      seasonMetadataCache,
+      cacheKey,
+      seasons || null,
+      6 * 60 * 60 * 1000
+    );
+    return seasons;
+  } catch (error) {
+    logger.debug(
+      {
+        id: imdbId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'TorrentClaw episode metadata unavailable'
+    );
+    // Avoid repeatedly paying the timeout when the optional endpoint is down.
+    setBounded(seasonMetadataCache, cacheKey, null, 60_000);
+    return undefined;
+  }
+}
+
 export async function enrichTorrentClawStreams(options: {
   streams: Stream[];
   id: string;
@@ -392,17 +599,26 @@ export async function enrichTorrentClawStreams(options: {
 }): Promise<Stream[]> {
   if (!/^tt\d+/i.test(options.id)) return options.streams;
   const torrents = await getTorrentClawTorrents(options);
-  if (!torrents.length) return options.streams;
-  return options.streams.map((stream) => {
+  return enrichTorrentClawStreamsWithMetadata(options.streams, torrents);
+}
+
+export function enrichTorrentClawStreamsWithMetadata(
+  streams: Stream[],
+  torrents: TorrentClawApiTorrent[]
+): Stream[] {
+  if (!torrents.length) return streams;
+  return streams.flatMap((stream) => {
     const metadata = matchTorrentClawTorrent(stream, torrents);
-    if (!metadata) return stream;
-    return {
-      ...stream,
-      behaviorHints: {
-        ...(stream.behaviorHints || {}),
-        tcMetadata: metadata,
-      },
-    } as Stream;
+    if (!metadata) return [stream];
+    return [
+      {
+        ...stream,
+        behaviorHints: {
+          ...(stream.behaviorHints || {}),
+          tcMetadata: metadata,
+        },
+      } as Stream,
+    ];
   });
 }
 

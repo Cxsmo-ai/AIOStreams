@@ -29,6 +29,7 @@ import {
 import { ParsedResult } from '@viren070/parse-torrent-title';
 import { parseTorrentTitleCached } from '../parser/title.js';
 import assert from 'assert';
+import { isIP } from 'node:net';
 
 const logger = createLogger('debrid:stremthru');
 
@@ -41,6 +42,37 @@ function convertStremThruError(error: StremThruError): DebridError {
     body: error.body,
     cause: 'cause' in error ? error.cause : undefined,
   });
+}
+
+/**
+ * StremThru asks the debrid provider (not this server) to fetch .torrent URLs.
+ * Container-local names and literal IPs are unsafe to hand to that remote provider;
+ * attempting them can fail after the user has selected a source. Prefer the known
+ * info-hash magnet for those results instead.
+ */
+export function isRemoteTorrentUrlFetchable(downloadUrl: string): boolean {
+  try {
+    const url = new URL(downloadUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (!hostname || isIP(hostname) || !hostname.includes('.')) return false;
+
+    const localSuffixes = [
+      '.localhost',
+      '.local',
+      '.internal',
+      '.lan',
+      '.home',
+      '.home.arpa',
+      '.test',
+      '.invalid',
+      '.onion',
+    ];
+    return !localSuffixes.some((suffix) => hostname.endsWith(suffix));
+  } catch {
+    return false;
+  }
 }
 
 export interface StremThruServiceConfig {
@@ -951,6 +983,7 @@ export class StremThruService
       playbackInfo.private !== undefined &&
       playbackInfo.downloadUrl &&
       appConfig.builtins.debrid.useTorrentDownloadUrl &&
+      isRemoteTorrentUrlFetchable(playbackInfo.downloadUrl) &&
       (await this.checkCacheGet(hash))?.status !== 'cached'
     ) {
       logger.debug(
@@ -965,6 +998,22 @@ export class StremThruService
         }
       );
     } else {
+      if (
+        playbackInfo.downloadUrl &&
+        appConfig.builtins.debrid.useTorrentDownloadUrl &&
+        !isRemoteTorrentUrlFetchable(playbackInfo.downloadUrl)
+      ) {
+        let host = 'invalid';
+        try {
+          host = new URL(playbackInfo.downloadUrl).host;
+        } catch {
+          // Keep the diagnostic free of the original URL and any embedded token.
+        }
+        logger.warn(
+          { host },
+          'Skipping non-public torrent URL; adding the release by info hash instead'
+        );
+      }
       let magnet = `magnet:?xt=urn:btih:${hash}`;
       if (playbackInfo.filename) {
         magnet += `&dn=${playbackInfo.filename}`;

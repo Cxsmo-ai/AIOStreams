@@ -19,6 +19,19 @@ export function streamText(stream: TorrentClawStreamShape): string {
   return `${stream.name || ''} ${stream.title || ''} ${stream.description || ''}`;
 }
 
+/** Keep raw hashes available only to AIOStreams' service-wrap pipeline. */
+export function filterTorrentClawStreamsForExposure<
+  T extends TorrentClawStreamShape,
+>(streams: T[], serviceWrapped: boolean): T[] {
+  if (serviceWrapped) return streams;
+
+  return streams.filter((stream) => {
+    const magnetUrl = /^magnet:/i.test(String(stream.url || '').trim());
+    const hashOnly = Boolean(stream.infoHash) && !stream.url && !stream.externalUrl;
+    return !magnetUrl && !hashOnly;
+  });
+}
+
 /**
  * Classify TorrentClaw's provider-backed streams using its explicit Stremio
  * response signals. Structured hints win, then uncached markers win over

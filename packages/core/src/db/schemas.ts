@@ -219,7 +219,10 @@ export type PresetObject = z.infer<typeof PresetSchema>;
 
 const PresetList = z.array(PresetSchema);
 
-export type Addon = z.infer<typeof AddonSchema>;
+export type Addon = z.infer<typeof AddonSchema> & {
+  /** In-memory only; never accepted from user config or serialized. */
+  internalHeaders?: Record<string, string>;
+};
 export type Preset = z.infer<typeof PresetSchema>;
 
 const DeduplicatorKey = z.enum(constants.DEDUPLICATOR_KEYS);
@@ -864,6 +867,18 @@ export const UserDataSchema = z.object({
     })
     .optional(),
   services: ServiceList.optional(),
+  /** Tracker account references are opaque server-side handles; OAuth tokens never belong in user config. */
+  trackerProviders: z
+    .record(
+      z.string().min(1).max(40),
+      z.object({
+        enabled: z.boolean().optional(),
+        authRef: z.string().uuid().optional(),
+        /** Non-secret endpoint metadata; provider credentials remain in encrypted server storage. */
+        baseUrl: z.string().max(2048).optional(),
+      })
+    )
+    .optional(),
   presets: PresetList,
   addonCategoryColors: z.record(z.string(), z.string()).optional(), // maps custom category name → colour key
   catalogModifications: z.array(CatalogModification).optional(),
@@ -1061,6 +1076,7 @@ export const StreamSchema = z.looseObject({
       videoHash: z.string().nullable().optional(),
       videoSize: z.number().or(z.null()).optional(),
       filename: z.string().nullable().optional(),
+      duration: z.number().or(z.string()).or(z.null()).optional(),
     })
     .optional(),
 });

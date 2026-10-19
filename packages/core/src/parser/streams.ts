@@ -1,5 +1,5 @@
 import bytes from 'bytes';
-import { Stream, ParsedStream, Addon, ParsedFile } from '../db/index.js';
+import type { Stream, ParsedStream, Addon, ParsedFile } from '../db/index.js';
 import {
   constants,
   createLogger,
@@ -8,6 +8,7 @@ import {
   getLanguageDisplayName,
 } from '../utils/index.js';
 import { config as appConfig } from '../config/index.js';
+import { parseDurationHint } from './duration-hint.js';
 import FileParser from './file.js';
 import {
   parseAgeString,
@@ -464,12 +465,6 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
-    // Floatplane is an authenticated direct HTTP/CDN source, not a debrid
-    // cache service. Its stream labels contain the word "Floatplane", which
-    // would otherwise make the generic parser mark every stream as
-    // `service.cached === false`; users with "Exclude uncached" enabled would
-    // then lose every valid Floatplane result after a successful scrape.
-    if (this.addon.preset?.type === 'floatplane') return undefined;
     return this.parseServiceData(stream.name || '');
   }
 
@@ -498,7 +493,9 @@ class StreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): number | undefined {
-    return parseDuration(stream.description || '');
+    const parsedHint = parseDurationHint(stream.behaviorHints?.duration);
+    if (parsedHint !== undefined) return parsedHint;
+    return parseDuration(stream.description || '') || undefined;
   }
 
   protected getBitrate(

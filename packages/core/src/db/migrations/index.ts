@@ -22,6 +22,12 @@ import { legacyVpnManagement } from './900002_legacy_vpn_management.js';
 import { torrentclawNzbQuota } from './900003_torrentclaw_nzb_quota.js';
 import { torrentclawNzbReservations } from './900004_torrentclaw_nzb_reservations.js';
 import { addonPerformance } from './900005_addon_performance.js';
+import { trackerSync } from './900006_tracker_sync.js';
+import { trackerProviderSnapshots } from './900007_tracker_provider_snapshots.js';
+import { trackerProviderOutbox } from './900008_tracker_provider_outbox.js';
+import { trackerProviderFacets } from './900009_tracker_provider_facets.js';
+import { trackerProviderFacetRetry } from './900010_tracker_provider_facet_retry.js';
+import { wetrakrRequestQuota } from './900011_wetrakr_request_quota.js';
 import type { Migration } from './types.js';
 
 export const MIGRATIONS: readonly Migration[] = [
@@ -49,6 +55,12 @@ export const MIGRATIONS: readonly Migration[] = [
   torrentclawNzbQuota,
   torrentclawNzbReservations,
   addonPerformance,
+  trackerSync,
+  trackerProviderSnapshots,
+  trackerProviderOutbox,
+  trackerProviderFacets,
+  trackerProviderFacetRetry,
+  wetrakrRequestQuota,
 ];
 
 export type { Migration } from './types.js';
