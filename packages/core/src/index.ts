@@ -149,4 +149,6 @@ export {
   initializeTrackerProviderLinkStates,
   isCurrentTrackerProviderLink,
   saveTrackerProviderLinkState,
+  withTrackerProviderLinkLock,
+  withTrackerProviderLinkLocks,
 } from './tracking/provider-link-state.js';

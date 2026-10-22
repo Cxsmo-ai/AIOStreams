@@ -10,6 +10,56 @@ export interface TrackerProviderLinkState {
   generation: number;
 }
 
+const trackerProviderLinkLocks = new Map<string, Promise<void>>();
+
+/**
+ * Serialize link mutations and deliveries for one saved profile/provider.
+ * SQLite coordination is process-local; PostgreSQL dispatch also takes a row
+ * lock so separate application processes coordinate through the database.
+ */
+export async function withTrackerProviderLinkLock<T>(
+  userUuid: string,
+  providerId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  if (!/^[a-z0-9_-]{1,40}$/i.test(providerId))
+    throw new Error('Invalid tracker provider id');
+
+  const key = `${userUuid}\u0000${providerId}`;
+  const previous = trackerProviderLinkLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => held);
+  trackerProviderLinkLocks.set(key, tail);
+  await previous;
+
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (trackerProviderLinkLocks.get(key) === tail)
+      trackerProviderLinkLocks.delete(key);
+  }
+}
+
+/** Acquire multiple provider locks in stable order to avoid deadlocks. */
+export async function withTrackerProviderLinkLocks<T>(
+  userUuid: string,
+  providerIds: string[],
+  operation: () => Promise<T>
+): Promise<T> {
+  const sorted = [...new Set(providerIds)].sort();
+  const acquire = (index: number): Promise<T> =>
+    index >= sorted.length
+      ? operation()
+      : withTrackerProviderLinkLock(userUuid, sorted[index]!, () =>
+          acquire(index + 1)
+        );
+  return acquire(0);
+}
+
 /** Providers whose credentials changed need a fresh provider-side sync baseline. */
 export function changedTrackerProviderLinks(
   previous: TrackerProviderLinkRefs | undefined,

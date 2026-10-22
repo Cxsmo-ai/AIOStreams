@@ -27,6 +27,7 @@ import {
   changedTrackerProviderLinks,
   clearTrackerProviderLinkState,
   saveTrackerProviderLinkState,
+  withTrackerProviderLinkLocks,
 } from '../../tracking/provider-link-state.js';
 
 const APIError = constants.APIError;
@@ -456,46 +457,48 @@ export class UserRepository {
     }
 
     try {
-      await db.tx(async (tx) => {
-        const updated = await tx.exec(
-          sql`UPDATE users SET config = ${encryptedConfig}, updated_at = CURRENT_TIMESTAMP WHERE uuid = ${uuid} AND config = ${current.config}`
-        );
-        if (updated.rowCount !== 1) {
-          throw new APIError(
-            constants.ErrorCode.INTERNAL_SERVER_ERROR,
-            409,
-            'Configuration changed while saving; reload and retry'
+      await withTrackerProviderLinkLocks(uuid, changedTrackerProviders, () =>
+        db.tx(async (tx) => {
+          const updated = await tx.exec(
+            sql`UPDATE users SET config = ${encryptedConfig}, updated_at = CURRENT_TIMESTAMP WHERE uuid = ${uuid} AND config = ${current.config}`
           );
-        }
-        for (const providerId of changedTrackerProviders) {
-          await clearTrackerProviderLinkState(tx, uuid, providerId);
-        }
-        const providerIds = new Set([
-          ...Object.keys(previousConfig?.trackerProviders ?? {}),
-          ...Object.keys(config.trackerProviders ?? {}),
-        ]);
-        for (const providerId of providerIds) {
-          const oldRef =
-            previousConfig?.trackerProviders?.[providerId]?.authRef;
-          const newRef = config.trackerProviders?.[providerId]?.authRef;
-          const changed = oldRef !== newRef;
-          if (changed || newRef !== undefined) {
-            await saveTrackerProviderLinkState(
-              tx,
-              uuid,
-              providerId,
-              newRef ?? null,
-              changed
+          if (updated.rowCount !== 1) {
+            throw new APIError(
+              constants.ErrorCode.INTERNAL_SERVER_ERROR,
+              409,
+              'Configuration changed while saving; reload and retry'
             );
           }
-        }
-        await JellyfinAddressRepository.syncForUuid(
-          tx,
-          uuid,
-          encryptedPassword.data,
-          validatedConfig.jellyfin?.personas ?? []
-        );
-      });
+          for (const providerId of changedTrackerProviders) {
+            await clearTrackerProviderLinkState(tx, uuid, providerId);
+          }
+          const providerIds = new Set([
+            ...Object.keys(previousConfig?.trackerProviders ?? {}),
+            ...Object.keys(config.trackerProviders ?? {}),
+          ]);
+          for (const providerId of providerIds) {
+            const oldRef =
+              previousConfig?.trackerProviders?.[providerId]?.authRef;
+            const newRef = config.trackerProviders?.[providerId]?.authRef;
+            const changed = oldRef !== newRef;
+            if (changed || newRef !== undefined) {
+              await saveTrackerProviderLinkState(
+                tx,
+                uuid,
+                providerId,
+                newRef ?? null,
+                changed
+              );
+            }
+          }
+          await JellyfinAddressRepository.syncForUuid(
+            tx,
+            uuid,
+            encryptedPassword.data,
+            validatedConfig.jellyfin?.personas ?? []
+          );
+        })
+      );
       logger.info(`Updated user ${uuid} with an updated configuration`);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);

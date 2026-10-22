@@ -7,6 +7,8 @@ import {
   clearTrackerProviderLinkState,
   isCurrentTrackerProviderLink,
   saveTrackerProviderLinkState,
+  withTrackerProviderLinkLock,
+  withTrackerProviderLinkLocks,
 } from './provider-link-state.js';
 
 async function makeLinkStateDb(): Promise<SqliteDriver> {
@@ -56,6 +58,104 @@ test('tracker link changes are provider-local and ignore enabled-only changes', 
     changedTrackerProviderLinks({ floppy: { authRef: 'old-floppy' } }, {}),
     ['floppy']
   );
+});
+
+test('link generation checks use row locks only on PostgreSQL', async () => {
+  const sqliteCalls: string[] = [];
+  const sqlite = {
+    dialect: 'sqlite',
+    exec: async (sql: string) => {
+      sqliteCalls.push(sql);
+      return { rowCount: 1 };
+    },
+    maybeOne: async () => ({ auth_ref: 'current', generation: 2 }),
+  } as unknown as DbDriver;
+  assert.equal(
+    await isCurrentTrackerProviderLink(
+      sqlite,
+      'profile-a',
+      'floppy',
+      'current',
+      2,
+      true
+    ),
+    true
+  );
+  assert.deepEqual(sqliteCalls, []);
+
+  const postgresCalls: string[] = [];
+  const postgres = {
+    dialect: 'postgres',
+    maybeOne: async (sql: string) => {
+      postgresCalls.push(sql);
+      return { auth_ref: 'current', generation: 2 };
+    },
+  } as unknown as DbDriver;
+  assert.equal(
+    await isCurrentTrackerProviderLink(
+      postgres,
+      'profile-a',
+      'floppy',
+      'current',
+      2,
+      true
+    ),
+    true
+  );
+  assert.match(postgresCalls[0]!, /FOR UPDATE$/);
+});
+
+test('profile/provider locks serialize relinking behind an in-flight delivery', async () => {
+  let signalEntered!: () => void;
+  let releaseDelivery!: () => void;
+  const entered = new Promise<void>((resolve) => (signalEntered = resolve));
+  const blocked = new Promise<void>((resolve) => (releaseDelivery = resolve));
+  const order: string[] = [];
+
+  const delivery = withTrackerProviderLinkLock(
+    'profile-a',
+    'floppy',
+    async () => {
+      order.push('delivery-start');
+      signalEntered();
+      await blocked;
+      order.push('delivery-end');
+    }
+  );
+  await entered;
+  const relink = withTrackerProviderLinkLocks(
+    'profile-a',
+    ['floppy'],
+    async () => void order.push('relink')
+  );
+  await Promise.resolve();
+  assert.deepEqual(order, ['delivery-start']);
+
+  releaseDelivery();
+  await Promise.all([delivery, relink]);
+  assert.deepEqual(order, ['delivery-start', 'delivery-end', 'relink']);
+});
+
+test('profile/provider locks do not serialize unrelated profiles or providers', async () => {
+  const entered = new Set<string>();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const first = withTrackerProviderLinkLock('profile-a', 'floppy', async () => {
+    entered.add('a/floppy');
+    await blocked;
+  });
+  while (!entered.has('a/floppy')) await Promise.resolve();
+  await Promise.all([
+    withTrackerProviderLinkLock('profile-a', 'wetrakr', async () => {
+      entered.add('a/wetrakr');
+    }),
+    withTrackerProviderLinkLock('profile-b', 'floppy', async () => {
+      entered.add('b/floppy');
+    }),
+  ]);
+  assert.deepEqual([...entered].sort(), ['a/floppy', 'a/wetrakr', 'b/floppy']);
+  release();
+  await first;
 });
 
 test('relink cleanup removes only provider sync state and retains canonical history', async () => {

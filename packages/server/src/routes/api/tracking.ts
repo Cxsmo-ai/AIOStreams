@@ -16,6 +16,7 @@ import {
   getTrackerProviderLinkState,
   initializeTrackerProviderLinkStates,
   isCurrentTrackerProviderLink,
+  withTrackerProviderLinkLock,
   WeTrakrRateLimitError,
   type DbDriver,
 } from '@aiostreams/core';
@@ -324,6 +325,55 @@ export async function enqueueScrobbleEvents(
   return staleProviders;
 }
 
+/**
+ * Hold a provider-scoped lock until remote dispatch finishes. PostgreSQL also
+ * holds the link row lock for cross-process coordination; SQLite uses the
+ * shared in-process lock so network I/O never holds its database-wide writer
+ * lock.
+ */
+async function dispatchForCurrentTrackerLink<T>(
+  db: DbDriver,
+  userUuid: string,
+  providerId: string,
+  authRef: string,
+  generation: number,
+  dispatch: (tx: DbDriver) => Promise<T>
+): Promise<{ current: false } | { current: true; value: T }> {
+  const dispatchWithCheck = async (
+    tx: DbDriver,
+    lockForUpdate: boolean
+  ): Promise<{ current: false } | { current: true; value: T }> => {
+    if (
+      !(await isCurrentTrackerProviderLink(
+        tx,
+        userUuid,
+        providerId,
+        authRef,
+        generation,
+        lockForUpdate
+      ))
+    )
+      return { current: false };
+    return { current: true, value: await dispatch(tx) };
+  };
+
+  if (db.dialect === 'sqlite')
+    return withTrackerProviderLinkLock(userUuid, providerId, async () => {
+      if (
+        !(await isCurrentTrackerProviderLink(
+          db,
+          userUuid,
+          providerId,
+          authRef,
+          generation
+        ))
+      )
+        return { current: false };
+      return { current: true, value: await dispatch(db) };
+    });
+  return db.tx((tx) => dispatchWithCheck(tx, true));
+}
+
 export async function flushScrobbleOutbox(
   db: DbDriver,
   userUuid: string,
@@ -375,15 +425,34 @@ export async function flushScrobbleOutbox(
       );
       if (!claimed.rowCount) continue;
       try {
-        if (
-          !(await isCurrentTrackerProviderLink(
-            db,
-            userUuid,
-            adapter.id,
-            authRef,
-            generation
-          ))
-        ) {
+        const event = JSON.parse(row.event_json) as TrackerScrobbleEvent;
+        const dispatch = await dispatchForCurrentTrackerLink(
+          db,
+          userUuid,
+          adapter.id,
+          authRef,
+          generation,
+          async (tx) => {
+            const result = await adapter.scrobble(
+              authRef,
+              event,
+              providerApiFor(adapter)
+            );
+            await tx.exec(
+              "UPDATE tracker_scrobble_outbox SET delivery_status = 'delivered', lease_token = NULL, lease_until_ms = 0, last_error_code = NULL WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND link_generation = ? AND lease_token = ?",
+              [
+                userUuid,
+                adapter.id,
+                row.event_id,
+                createdAt,
+                generation,
+                claimToken,
+              ]
+            );
+            return result;
+          }
+        );
+        if (!dispatch.current) {
           linkChanged = true;
           // This worker owns only its claimed generation. A relinked queue is
           // pruned by the new link's enqueue transaction, never by stale work.
@@ -400,23 +469,7 @@ export async function flushScrobbleOutbox(
           );
           continue;
         }
-        const event = JSON.parse(row.event_json) as TrackerScrobbleEvent;
-        const result = await adapter.scrobble(
-          authRef,
-          event,
-          providerApiFor(adapter)
-        );
-        await db.exec(
-          "UPDATE tracker_scrobble_outbox SET delivery_status = 'delivered', lease_token = NULL, lease_until_ms = 0, last_error_code = NULL WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND link_generation = ? AND lease_token = ?",
-          [
-            userUuid,
-            adapter.id,
-            row.event_id,
-            createdAt,
-            generation,
-            claimToken,
-          ]
-        );
+        const result = dispatch.value;
         if (result?.status === 'ignored')
           ignoredProviders.push({
             providerId: adapter.id,
@@ -609,15 +662,15 @@ async function flushProviderOutbox(
           const row = deliverableRows[index]!;
           const record = records[index]!;
           try {
-            if (
-              !(await isCurrentTrackerProviderLink(
-                db,
-                userUuid,
-                adapter.id,
-                authRef,
-                generation
-              ))
-            ) {
+            const dispatch = await dispatchForCurrentTrackerLink(
+              db,
+              userUuid,
+              adapter.id,
+              authRef,
+              generation,
+              () => adapter.pushRecord!(authRef, record, api)
+            );
+            if (!dispatch.current) {
               writeFailureReasons[adapter.id] = 'tracker_link_changed';
               await db.exec(
                 'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
@@ -632,7 +685,7 @@ async function flushProviderOutbox(
               );
               continue;
             }
-            const represented = await adapter.pushRecord(authRef, record, api);
+            const represented = dispatch.value;
             await db.tx(async (tx) => {
               await tx.exec(
                 'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
@@ -709,15 +762,20 @@ async function flushProviderOutbox(
         );
         let providerHadSuccessfulWrites = false;
         if (ordinary.length) {
-          if (
-            !(await isCurrentTrackerProviderLink(
-              db,
-              userUuid,
-              adapter.id,
-              authRef,
-              generation
-            ))
-          ) {
+          const dispatch = await dispatchForCurrentTrackerLink(
+            db,
+            userUuid,
+            adapter.id,
+            authRef,
+            generation,
+            () =>
+              adapter.pushRecords(
+                authRef,
+                ordinary.map(({ record }) => record),
+                api
+              )
+          );
+          if (!dispatch.current) {
             writeFailureReasons[adapter.id] = 'tracker_link_changed';
             await discardClaimedProviderRows(
               db,
@@ -728,11 +786,7 @@ async function flushProviderOutbox(
             );
             continue;
           }
-          const ordinaryResult = await adapter.pushRecords(
-            authRef,
-            ordinary.map(({ record }) => record),
-            api
-          );
+          const ordinaryResult = dispatch.value;
           await discardClaimedProviderRows(
             db,
             userUuid,
@@ -750,36 +804,17 @@ async function flushProviderOutbox(
             });
         }
         if (tombstones.length) {
-          if (
-            !(await isCurrentTrackerProviderLink(
-              db,
-              userUuid,
-              adapter.id,
-              authRef,
-              generation
-            ))
-          ) {
-            writeFailureReasons[adapter.id] = 'tracker_link_changed';
-            await discardClaimedProviderRows(
-              db,
-              userUuid,
-              adapter.id,
-              tombstones.map(({ row }) => row),
-              claimToken
-            );
-            continue;
-          }
           if (adapter.removeRecord) {
             for (const { row, record } of tombstones) {
-              if (
-                !(await isCurrentTrackerProviderLink(
-                  db,
-                  userUuid,
-                  adapter.id,
-                  authRef,
-                  generation
-                ))
-              ) {
+              const dispatch = await dispatchForCurrentTrackerLink(
+                db,
+                userUuid,
+                adapter.id,
+                authRef,
+                generation,
+                () => adapter.removeRecord!(authRef, record, api)
+              );
+              if (!dispatch.current) {
                 writeFailureReasons[adapter.id] = 'tracker_link_changed';
                 await discardClaimedProviderRows(
                   db,
@@ -790,7 +825,6 @@ async function flushProviderOutbox(
                 );
                 break;
               }
-              await adapter.removeRecord(authRef, record, api);
               await discardClaimedProviderRows(
                 db,
                 userUuid,
@@ -802,11 +836,31 @@ async function flushProviderOutbox(
               providerHadSuccessfulWrites = true;
             }
           } else {
-            const tombstoneResult = await adapter.pushRecords(
+            const dispatch = await dispatchForCurrentTrackerLink(
+              db,
+              userUuid,
+              adapter.id,
               authRef,
-              tombstones.map(({ record }) => record),
-              api
+              generation,
+              () =>
+                adapter.pushRecords(
+                  authRef,
+                  tombstones.map(({ record }) => record),
+                  api
+                )
             );
+            if (!dispatch.current) {
+              writeFailureReasons[adapter.id] = 'tracker_link_changed';
+              await discardClaimedProviderRows(
+                db,
+                userUuid,
+                adapter.id,
+                tombstones.map(({ row }) => row),
+                claimToken
+              );
+              continue;
+            }
+            const tombstoneResult = dispatch.value;
             await discardClaimedProviderRows(
               db,
               userUuid,
