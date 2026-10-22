@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="branding/fork/cxsmo-banner.png" alt="Cxsmo fork artwork showing three clean source paths merging into a single stream" width="100%" />
+  <img src="branding/fork/cxsmo-banner.png" alt="Official AIOStreams symbol alongside the AIOStreams name and a plus sign identifying the community fork" width="100%" />
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="AGPL-3.0-only license" /></a>
 </p>
 
-<p align="center"><sub>Independent community fork. The artwork above is original to this fork; it is not the official AIOStreams logo.</sub></p>
+<p align="center"><sub>Independent community fork. The banner incorporates AIOStreams branding with a fork-specific +; this is not an official upstream release.</sub></p>
 
 <p align="center">
   <a href="#at-a-glance">At a glance</a> ·
