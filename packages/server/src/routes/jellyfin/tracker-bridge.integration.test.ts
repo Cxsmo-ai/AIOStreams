@@ -159,6 +159,7 @@ test('tracker bridge applies facets, protects local state, handles deletes and q
             'INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms) VALUES (?, ?, ?, ?)',
             [scope.uuid, atomicRecord.id, JSON.stringify(atomicRecord), 400]
           );
+          return true;
         }
       ),
       /simulated failure before transaction commit/
@@ -177,6 +178,54 @@ test('tracker bridge applies facets, protects local state, handles deletes and q
         [scope.uuid, atomicRecord.id]
       ),
       0
+    );
+
+    const staleRecord = TrackerRecordSchema.parse({
+      ...atomicRecord,
+      id: 'movie:imdb:tt1000004|rating',
+      ids: { imdb: 'tt1000004' },
+      title: 'Stale Rating Must Not Fan Out',
+      rating: 2,
+      updatedAt: 500,
+    });
+    await storeRecord(db, staleRecord.id, {
+      ...staleRecord,
+      rating: 9,
+      updatedAt: 900,
+    }, 900);
+    await fanOutLinkedTrackerRecord(
+      scope.uuid,
+      { trackerProviders: { wetrakr: { authRef: 'opaque-link', enabled: true } } },
+      staleRecord,
+      db,
+      async (tx) => {
+        const result = await tx.exec(
+          `INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_uuid, record_id) DO UPDATE SET
+             record_json = excluded.record_json,
+             updated_at_ms = excluded.updated_at_ms
+           WHERE excluded.updated_at_ms >= tracker_records.updated_at_ms`,
+          [scope.uuid, staleRecord.id, JSON.stringify(staleRecord), staleRecord.updatedAt]
+        );
+        return result.rowCount > 0;
+      }
+    );
+    assert.equal(
+      JSON.parse((await db.maybeOne<{ record_json: string }>(
+        'SELECT record_json FROM tracker_records WHERE user_uuid = ? AND record_id = ?',
+        [scope.uuid, staleRecord.id]
+      ))!.record_json).rating,
+      9,
+      'a stale Jellyfin rating cannot replace newer canonical tracker state'
+    );
+    assert.equal(
+      await db.count(
+        'SELECT COUNT(*) FROM tracker_provider_outbox WHERE user_uuid = ? AND record_id = ?',
+        [scope.uuid, staleRecord.id]
+      ),
+      0,
+      'a rejected stale Jellyfin mutation is never sent to linked providers'
     );
   } finally {
     await db.close();

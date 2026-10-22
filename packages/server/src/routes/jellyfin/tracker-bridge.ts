@@ -671,7 +671,7 @@ export async function reportRatingToMergedTracker(
       trackerRecord,
       db,
       async (tx) => {
-        await tx.exec(
+        const result = await tx.exec(
           `INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms)
            VALUES (?, ?, ?, ?)
            ON CONFLICT(user_uuid, record_id) DO UPDATE SET
@@ -680,6 +680,7 @@ export async function reportRatingToMergedTracker(
            WHERE excluded.updated_at_ms >= tracker_records.updated_at_ms`,
           [userUuid, recordId, JSON.stringify(trackerRecord), now]
         );
+        return result.rowCount > 0;
       }
     );
   } catch (error) {
@@ -757,7 +758,7 @@ export async function reportListChangeToMergedTracker(
       trackerRecord,
       db,
       async (tx) => {
-        await tx.exec(
+        const result = await tx.exec(
           `INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms)
            VALUES (?, ?, ?, ?)
            ON CONFLICT(user_uuid, record_id) DO UPDATE SET
@@ -766,6 +767,7 @@ export async function reportListChangeToMergedTracker(
            WHERE excluded.updated_at_ms >= tracker_records.updated_at_ms`,
           [userUuid, recordId, JSON.stringify(trackerRecord), now]
         );
+        return result.rowCount > 0;
       }
     );
   } catch (error) {
