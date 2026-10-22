@@ -694,18 +694,21 @@ export async function fanOutLinkedTrackerRecord(
   userUuid: string,
   user: { trackerProviders?: Record<string, TrackerProviderLink> } | null,
   record: TrackerRecord,
-  db: DbDriver = getDb()
+  db: DbDriver = getDb(),
+  persist?: (tx: DbDriver) => Promise<void>
 ): Promise<void> {
   const adapters = resolveLinkedAdapters(user).adapters.filter(
     ({ adapter }) => adapter.id !== record.origin
   );
-  if (!adapters.length) return;
+  if (!adapters.length && !persist) return;
   const now = Date.now();
   await db.tx(async (tx) => {
+    await persist?.(tx);
     for (const { adapter } of adapters) {
       await enqueueProviderRecords(tx, userUuid, adapter.id, [record], now);
     }
   });
+  if (!adapters.length) return;
   await flushProviderOutbox(
     db,
     userUuid,

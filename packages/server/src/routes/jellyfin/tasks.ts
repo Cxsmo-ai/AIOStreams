@@ -9,7 +9,10 @@ import {
   WatchStateRepository,
   getDb,
 } from '@aiostreams/core';
-import { syncTrackerRecordsToWatchState } from './tracker-bridge.js';
+import {
+  getPendingTrackerBridgeUsers,
+  syncTrackerRecordsToWatchState,
+} from './tracker-bridge.js';
 
 const ID_MAP_MAX_AGE_MS = 180 * 24 * 3600 * 1000;
 const DAY_MS = 24 * 3600 * 1000;
@@ -130,13 +133,11 @@ export function registerJellyfinTasks(): void {
         return { ok: true, message: 'tracker bridge is disabled' };
       }
       const db = getDb();
-      const users = await db.query<{ uuid: string }>(
-        'SELECT DISTINCT user_uuid as uuid FROM tracker_records'
-      );
+      const users = await getPendingTrackerBridgeUsers(db);
       let totalImported = 0;
       let totalSkipped = 0;
       const failures: string[] = [];
-      for (const { uuid } of users) {
+      for (const uuid of users) {
         try {
           const { imported, skipped } = await syncTrackerRecordsToWatchState(
             { uuid, persona: '' },

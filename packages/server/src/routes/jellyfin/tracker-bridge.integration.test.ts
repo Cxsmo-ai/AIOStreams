@@ -7,7 +7,11 @@ import {
 } from '@aiostreams/core';
 import { SqliteDriver } from '../../../../core/dist/db/driver/sqlite.js';
 import { runMigrations } from '../../../../core/src/db/migrations/runner.js';
-import { syncTrackerRecordsToWatchState } from './tracker-bridge.js';
+import { fanOutLinkedTrackerRecord } from '../api/tracking.js';
+import {
+  getPendingTrackerBridgeUsers,
+  syncTrackerRecordsToWatchState,
+} from './tracker-bridge.js';
 
 const scope: WatchScope = { uuid: 'bridge-integration-user', persona: '' };
 
@@ -94,6 +98,11 @@ test('tracker bridge applies facets, protects local state, handles deletes and q
       'DELETE FROM tracker_records WHERE user_uuid = ? AND record_id = ?',
       [scope.uuid, watched.id]
     );
+    assert.deepEqual(
+      await getPendingTrackerBridgeUsers(db),
+      [scope.uuid],
+      'scheduled discovery includes a user whose last live tracker record was physically deleted'
+    );
     await syncTrackerRecordsToWatchState(scope, db);
     assert.equal(
       (await db.maybeOne<{ played: number }>(
@@ -114,6 +123,60 @@ test('tracker bridge applies facets, protects local state, handles deletes and q
       ),
       1,
       'invalid rows are durably quarantined before the feed cursor advances'
+    );
+
+    const atomicRecord = TrackerRecordSchema.parse({
+      id: 'movie:imdb:tt1000003|rating',
+      kind: 'movie',
+      ids: { imdb: 'tt1000003' },
+      title: 'Atomic Outbox',
+      state: 'rated',
+      rating: 7,
+      updatedAt: 400,
+      origin: 'jellyfin',
+    });
+    const failingCommitDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'tx') {
+          return async (fn: Parameters<SqliteDriver['tx']>[0]) =>
+            target.tx(async (tx) => {
+              await fn(tx);
+              throw new Error('simulated failure before transaction commit');
+            });
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    await assert.rejects(
+      fanOutLinkedTrackerRecord(
+        scope.uuid,
+        { trackerProviders: { wetrakr: { authRef: 'opaque-link', enabled: true } } },
+        atomicRecord,
+        failingCommitDb,
+        async (tx) => {
+          await tx.exec(
+            'INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms) VALUES (?, ?, ?, ?)',
+            [scope.uuid, atomicRecord.id, JSON.stringify(atomicRecord), 400]
+          );
+        }
+      ),
+      /simulated failure before transaction commit/
+    );
+    assert.equal(
+      await db.count(
+        'SELECT COUNT(*) FROM tracker_records WHERE user_uuid = ? AND record_id = ?',
+        [scope.uuid, atomicRecord.id]
+      ),
+      0,
+      'tracker mutation rolls back if the atomic provider-outbox transaction fails'
+    );
+    assert.equal(
+      await db.count(
+        'SELECT COUNT(*) FROM tracker_provider_outbox WHERE user_uuid = ? AND record_id = ?',
+        [scope.uuid, atomicRecord.id]
+      ),
+      0
     );
   } finally {
     await db.close();

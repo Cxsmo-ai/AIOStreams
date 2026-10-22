@@ -136,6 +136,20 @@ export function trackerRecordToWatchIdentity(
   return null;
 }
 
+/** User discovery must include deleted-only histories still pending in the feed. */
+export async function getPendingTrackerBridgeUsers(
+  db: DbDriver = getDb()
+): Promise<string[]> {
+  const rows = await db.query<{ uuid: string }>(
+    `SELECT DISTINCT c.user_uuid AS uuid
+       FROM tracker_record_changes c
+       LEFT JOIN jellyfin_tracker_bridge_state s ON s.user_uuid = c.user_uuid
+      WHERE c.change_id > COALESCE(s.checkpoint_change_id, 0)
+      ORDER BY c.user_uuid`
+  );
+  return rows.map(({ uuid }) => uuid);
+}
+
 export async function syncTrackerRecordsToWatchState(
   scope: WatchScope,
   db: DbDriver = getDb()
@@ -651,16 +665,23 @@ export async function reportRatingToMergedTracker(
             updatedAt: now,
             origin: 'jellyfin',
           });
-    await db.exec(
-      `INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(user_uuid, record_id) DO UPDATE SET
-         record_json = excluded.record_json,
-         updated_at_ms = excluded.updated_at_ms
-       WHERE excluded.updated_at_ms >= tracker_records.updated_at_ms`,
-      [userUuid, recordId, JSON.stringify(trackerRecord), now]
+    await fanOutLinkedTrackerRecord(
+      userUuid,
+      ctx.userData,
+      trackerRecord,
+      db,
+      async (tx) => {
+        await tx.exec(
+          `INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_uuid, record_id) DO UPDATE SET
+             record_json = excluded.record_json,
+             updated_at_ms = excluded.updated_at_ms
+           WHERE excluded.updated_at_ms >= tracker_records.updated_at_ms`,
+          [userUuid, recordId, JSON.stringify(trackerRecord), now]
+        );
+      }
     );
-    await fanOutLinkedTrackerRecord(userUuid, ctx.userData, trackerRecord, db);
   } catch (error) {
     logger.warn(
       {
@@ -730,16 +751,23 @@ export async function reportListChangeToMergedTracker(
           updatedAt: now,
           origin: 'jellyfin',
         });
-    await db.exec(
-      `INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(user_uuid, record_id) DO UPDATE SET
-         record_json = excluded.record_json,
-         updated_at_ms = excluded.updated_at_ms
-       WHERE excluded.updated_at_ms >= tracker_records.updated_at_ms`,
-      [userUuid, recordId, JSON.stringify(trackerRecord), now]
+    await fanOutLinkedTrackerRecord(
+      userUuid,
+      ctx.userData,
+      trackerRecord,
+      db,
+      async (tx) => {
+        await tx.exec(
+          `INSERT INTO tracker_records (user_uuid, record_id, record_json, updated_at_ms)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_uuid, record_id) DO UPDATE SET
+             record_json = excluded.record_json,
+             updated_at_ms = excluded.updated_at_ms
+           WHERE excluded.updated_at_ms >= tracker_records.updated_at_ms`,
+          [userUuid, recordId, JSON.stringify(trackerRecord), now]
+        );
+      }
     );
-    await fanOutLinkedTrackerRecord(userUuid, ctx.userData, trackerRecord, db);
   } catch (error) {
     logger.warn(
       {
