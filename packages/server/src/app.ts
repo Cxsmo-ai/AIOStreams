@@ -95,6 +95,7 @@ import {
   requireSessionIfAuthRequired,
 } from './middlewares/index.js';
 import { isTrustedIp } from './middlewares/ip.js';
+import { securityHeadersMiddleware } from './middlewares/security-headers.js';
 
 import {
   config as appConfig,
@@ -110,6 +111,8 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 const app: Express = express();
 app.set('trust proxy', (addr: string) => isTrustedIp(addr));
+app.disable('x-powered-by');
+app.use(securityHeadersMiddleware);
 const logger = createLogger('server');
 
 const __filename = fileURLToPath(import.meta.url);
@@ -161,7 +164,6 @@ apiRouter.use(
 apiRouter.use('/anime', animeApi);
 apiRouter.use('/proxy', proxyApi);
 apiRouter.use('/templates', templatesApi);
-apiRouter.use('/sync', syncApi);
 apiRouter.use('/tracking/v1', trackingApi);
 apiRouter.use('/auth', authApi);
 apiRouter.use('/dashboard', dashboardApi);

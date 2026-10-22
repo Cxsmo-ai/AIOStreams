@@ -9,7 +9,7 @@ import type {
 } from '@aiostreams/core';
 import { encryptString, WeTrakrRateLimitError } from '@aiostreams/core';
 import { errorMiddleware } from '../../middlewares/errors.js';
-import { createTrackerRouter } from './tracking.js';
+import { createTrackerRouter, fanOutLinkedTrackerRecord } from './tracking.js';
 import {
   weTrakrTrackerAdapter,
   type TrackerProviderAdapter,
@@ -23,6 +23,7 @@ type StoredRecord = {
 
 type StoredOutboxRecord = StoredRecord & {
   provider_id: string;
+  link_generation: number | null;
   attempt_count: number;
   next_attempt_at_ms: number;
   lease_token: string | null;
@@ -34,6 +35,7 @@ type StoredScrobbleOutbox = {
   event_id: string;
   provider_id: string;
   event_json: string;
+  link_generation: number | null;
   delivery_status: 'pending' | 'delivered';
   created_at_ms: number;
   attempt_count: number;
@@ -47,6 +49,14 @@ type StoredScrobbleOutbox = {
 class MemoryTrackerDb {
   private readonly users = new Map<string, Map<string, StoredRecord>>();
   private readonly syncStates = new Map<string, number>();
+  private readonly trackerLinks = new Map<
+    string,
+    { auth_ref: string | null; generation: number }
+  >();
+  private readonly relinkOnRead = new Map<
+    string,
+    { remainingReads: number; authRef: string }
+  >();
   private readonly providerFacets = new Map<
     string,
     {
@@ -69,6 +79,73 @@ class MemoryTrackerDb {
     return [...this.outbox.values()].map((row) => ({ ...row }));
   }
 
+  seedOutbox(
+    providerId: string,
+    record: TrackerRecord,
+    generation: number,
+    rawJson = JSON.stringify(record)
+  ) {
+    const key = `alice\u0000${providerId}\u0000${record.id}`;
+    this.outbox.set(key, {
+      record_id: record.id,
+      provider_id: providerId,
+      record_json: rawJson,
+      updated_at_ms: record.updatedAt,
+      link_generation: generation,
+      attempt_count: 0,
+      next_attempt_at_ms: 0,
+      lease_token: null,
+      lease_until_ms: 0,
+    });
+  }
+
+  seedScrobbleOutbox(
+    providerId: string,
+    eventId: string,
+    eventJson: string,
+    generation: number,
+    createdAt = Date.now()
+  ) {
+    const key = `alice\u0000${providerId}\u0000${eventId}`;
+    this.scrobbleOutbox.set(key, {
+      event_id: eventId,
+      provider_id: providerId,
+      event_json: eventJson,
+      link_generation: generation,
+      delivery_status: 'pending',
+      created_at_ms: createdAt,
+      attempt_count: 0,
+      next_attempt_at_ms: 0,
+      lease_token: null,
+      lease_until_ms: 0,
+    });
+  }
+
+  inspectScrobbleOutbox() {
+    return [...this.scrobbleOutbox.values()].map((row) => ({ ...row }));
+  }
+
+  relinkTrackerProvider(uuid: string, providerId: string, authRef: string) {
+    const key = `${uuid}:${providerId}`;
+    const current = this.trackerLinks.get(key);
+    this.trackerLinks.set(key, {
+      auth_ref: authRef,
+      generation: (current?.generation ?? 0) + 1,
+    });
+  }
+
+  relinkTrackerProviderOnRead(
+    uuid: string,
+    providerId: string,
+    authRef: string,
+    afterReads: number
+  ) {
+    this.relinkOnRead.set(`${uuid}:${providerId}`, {
+      remainingReads: afterReads,
+      authRef,
+    });
+  }
+
   private rows(uuid: string) {
     let rows = this.users.get(uuid);
     if (!rows) this.users.set(uuid, (rows = new Map()));
@@ -88,23 +165,28 @@ class MemoryTrackerDb {
   ): Promise<T[]> {
     if (sql.includes('FROM tracker_scrobble_outbox')) {
       if (!sql.includes('lease_until_ms <=')) {
-        const [uuid, providerId] = params;
+        const [uuid, providerId, generation] = params;
         const pending = [...this.scrobbleOutbox.entries()].some(
           ([key, row]) =>
             key.startsWith(`${uuid}\u0000${providerId}\u0000`) &&
-            row.delivery_status === 'pending'
+            row.delivery_status === 'pending' &&
+            row.link_generation === Number(generation)
         );
         return (pending ? [{ event_id: 'pending' }] : []) as unknown as T[];
       }
-      const [uuid, providerId, dueAt] = params;
+      const [uuid, providerId, generation, dueAt] = params;
       const effectiveLimit = Number(params.at(-1) ?? 1);
       const leaseDeadline = sql.includes('next_attempt_at_ms <=')
-        ? params[3]
-        : dueAt;
+        ? params[4]
+        : params[3];
       let rows = [...this.scrobbleOutbox.entries()]
         .filter(([key]) => key.startsWith(`${uuid}\u0000${providerId}\u0000`))
         .map(([, row]) => row)
-        .filter((row) => row.delivery_status === 'pending');
+        .filter(
+          (row) =>
+            row.delivery_status === 'pending' &&
+            row.link_generation === Number(generation)
+        );
       if (sql.includes('next_attempt_at_ms <='))
         rows = rows.filter((row) => row.next_attempt_at_ms <= Number(dueAt));
       if (sql.includes('lease_until_ms <='))
@@ -121,14 +203,15 @@ class MemoryTrackerDb {
         .map((row) => ({ ...row }) as unknown as T);
     }
     if (sql.includes('FROM tracker_provider_outbox')) {
-      const [uuid, providerId, dueAt] = params;
+      const [uuid, providerId, generation, dueAt] = params;
       const effectiveLimit = params.at(-1) ?? 1;
       const leaseDeadline = sql.includes('next_attempt_at_ms <=')
-        ? params[3]
-        : dueAt;
+        ? params[4]
+        : params[3];
       let rows = [...this.outbox.entries()]
         .filter(([key]) => key.startsWith(`${uuid}\u0000${providerId}\u0000`))
-        .map(([, row]) => row);
+        .map(([, row]) => row)
+        .filter((row) => row.link_generation === Number(generation));
       if (sql.includes('next_attempt_at_ms <='))
         rows = rows.filter((row) => row.next_attempt_at_ms <= Number(dueAt));
       if (sql.includes('lease_until_ms <='))
@@ -189,6 +272,29 @@ class MemoryTrackerDb {
     sql: string,
     params: readonly unknown[] = []
   ): Promise<T | null> {
+    if (sql.includes('FROM tracker_provider_link_state')) {
+      const [uuid, providerId] = params;
+      const key = `${uuid}:${providerId}`;
+      const pendingRelink = this.relinkOnRead.get(key);
+      if (pendingRelink) {
+        pendingRelink.remainingReads -= 1;
+        if (pendingRelink.remainingReads <= 0) {
+          this.relinkOnRead.delete(key);
+          this.relinkTrackerProvider(
+            String(uuid),
+            String(providerId),
+            pendingRelink.authRef
+          );
+        }
+      }
+      const row = this.trackerLinks.get(key);
+      return row
+        ? ({
+            auth_ref: row.auth_ref,
+            generation: row.generation,
+          } as unknown as T)
+        : null;
+    }
     if (sql.includes('FROM tracker_provider_sync_state')) {
       const [uuid, providerId] = params;
       const checkpoint = this.syncStates.get(`${uuid}:${providerId}`);
@@ -210,7 +316,39 @@ class MemoryTrackerDb {
     sql: string,
     params: readonly unknown[] = []
   ): Promise<ExecResult> {
+    if (sql.startsWith('INSERT INTO tracker_provider_link_state')) {
+      const [uuid, providerId, authRef] = params;
+      const key = `${uuid}:${providerId}`;
+      const current = this.trackerLinks.get(key);
+      if (!current) {
+        this.trackerLinks.set(key, {
+          auth_ref: authRef == null ? null : String(authRef),
+          generation: 1,
+        });
+      } else if (sql.includes('DO UPDATE SET')) {
+        this.trackerLinks.set(key, {
+          auth_ref: authRef == null ? null : String(authRef),
+          generation: current.generation + 1,
+        });
+      }
+      return { rowCount: 1 };
+    }
     if (sql.startsWith('DELETE FROM tracker_scrobble_outbox')) {
+      if (sql.includes('link_generation IS NULL')) {
+        const [uuid, providerId, generation] = params;
+        let deleted = 0;
+        for (const [key, row] of this.scrobbleOutbox) {
+          if (
+            key.startsWith(`${uuid}\u0000${providerId}\u0000`) &&
+            (row.link_generation === null ||
+              row.link_generation !== Number(generation))
+          ) {
+            this.scrobbleOutbox.delete(key);
+            deleted += 1;
+          }
+        }
+        return { rowCount: deleted };
+      }
       const [uuid, providerId, cutoff] = params;
       let deleted = 0;
       for (const [key, row] of this.scrobbleOutbox) {
@@ -226,13 +364,15 @@ class MemoryTrackerDb {
       return { rowCount: deleted };
     }
     if (sql.startsWith('INSERT INTO tracker_scrobble_outbox')) {
-      const [uuid, providerId, eventId, eventJson, createdAt] = params;
+      const [uuid, providerId, eventId, eventJson, createdAt, generation] =
+        params;
       const key = `${uuid}\u0000${providerId}\u0000${eventId}`;
       if (!this.scrobbleOutbox.has(key))
         this.scrobbleOutbox.set(key, {
           event_id: String(eventId),
           provider_id: String(providerId),
           event_json: String(eventJson),
+          link_generation: Number(generation),
           delivery_status: 'pending',
           created_at_ms: Number(createdAt),
           attempt_count: 0,
@@ -245,14 +385,23 @@ class MemoryTrackerDb {
     }
     if (sql.startsWith('UPDATE tracker_scrobble_outbox')) {
       if (sql.includes('SET lease_token = ?')) {
-        const [token, leaseUntil, uuid, providerId, eventId, createdAt, now] =
-          params;
+        const [
+          token,
+          leaseUntil,
+          uuid,
+          providerId,
+          eventId,
+          createdAt,
+          generation,
+          now,
+        ] = params;
         const row = this.scrobbleOutbox.get(
           `${uuid}\u0000${providerId}\u0000${eventId}`
         );
         if (
           !row ||
           row.created_at_ms !== Number(createdAt) ||
+          row.link_generation !== Number(generation) ||
           row.lease_until_ms > Number(now)
         )
           return { rowCount: 0 };
@@ -260,14 +409,33 @@ class MemoryTrackerDb {
         row.lease_until_ms = Number(leaseUntil);
         return { rowCount: 1 };
       }
-      if (sql.includes("delivery_status = 'delivered'")) {
-        const [uuid, providerId, eventId, createdAt, token] = params;
+      if (sql.includes('SET lease_token = NULL')) {
+        const [uuid, providerId, eventId, createdAt, generation, token] =
+          params;
         const row = this.scrobbleOutbox.get(
           `${uuid}\u0000${providerId}\u0000${eventId}`
         );
         if (
           !row ||
           row.created_at_ms !== Number(createdAt) ||
+          row.link_generation !== Number(generation) ||
+          row.lease_token !== token
+        )
+          return { rowCount: 0 };
+        row.lease_token = null;
+        row.lease_until_ms = 0;
+        return { rowCount: 1 };
+      }
+      if (sql.includes("delivery_status = 'delivered'")) {
+        const [uuid, providerId, eventId, createdAt, generation, token] =
+          params;
+        const row = this.scrobbleOutbox.get(
+          `${uuid}\u0000${providerId}\u0000${eventId}`
+        );
+        if (
+          !row ||
+          row.created_at_ms !== Number(createdAt) ||
+          row.link_generation !== Number(generation) ||
           row.lease_token !== token
         )
           return { rowCount: 0 };
@@ -283,6 +451,7 @@ class MemoryTrackerDb {
         providerId,
         eventId,
         createdAt,
+        generation,
         token,
       ] = sql.includes('last_error_code = ?')
         ? params
@@ -293,6 +462,7 @@ class MemoryTrackerDb {
       if (
         !row ||
         row.created_at_ms !== Number(createdAt) ||
+        row.link_generation !== Number(generation) ||
         row.lease_token !== token
       )
         return { rowCount: 0 };
@@ -304,15 +474,19 @@ class MemoryTrackerDb {
       return { rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO tracker_provider_outbox')) {
-      const [uuid, providerId, id, recordJson, updatedAt] = params;
+      const [uuid, providerId, id, recordJson, updatedAt, generation] = params;
       const key = `${uuid}\u0000${providerId}\u0000${id}`;
       const current = this.outbox.get(key);
-      if (!current || Number(updatedAt) >= current.updated_at_ms) {
+      if (
+        (!current || current.link_generation === Number(generation)) &&
+        (!current || Number(updatedAt) >= current.updated_at_ms)
+      ) {
         this.outbox.set(key, {
           record_id: String(id),
           provider_id: String(providerId),
           record_json: String(recordJson),
           updated_at_ms: Number(updatedAt),
+          link_generation: Number(generation),
           attempt_count: 0,
           next_attempt_at_ms: 0,
           lease_token: null,
@@ -323,12 +497,28 @@ class MemoryTrackerDb {
       return { rowCount: 1 };
     }
     if (sql.startsWith('DELETE FROM tracker_provider_outbox')) {
-      const [uuid, providerId, id, updatedAt, leaseToken] = params;
+      if (sql.includes('link_generation IS NULL')) {
+        const [uuid, providerId, generation] = params;
+        let deleted = 0;
+        for (const [key, row] of this.outbox) {
+          if (
+            key.startsWith(`${uuid}\u0000${providerId}\u0000`) &&
+            (row.link_generation === null ||
+              row.link_generation !== Number(generation))
+          ) {
+            this.outbox.delete(key);
+            deleted += 1;
+          }
+        }
+        return { rowCount: deleted };
+      }
+      const [uuid, providerId, id, updatedAt, generation, leaseToken] = params;
       const key = `${uuid}\u0000${providerId}\u0000${id}`;
       const current = this.outbox.get(key);
       if (
         !current ||
         current.updated_at_ms !== Number(updatedAt) ||
+        current.link_generation !== Number(generation) ||
         current.lease_token !== leaseToken
       )
         return { rowCount: 0 };
@@ -337,13 +527,22 @@ class MemoryTrackerDb {
     }
     if (sql.startsWith('UPDATE tracker_provider_outbox')) {
       if (sql.includes('SET lease_token = ?')) {
-        const [leaseToken, leaseUntil, uuid, providerId, id, updatedAt, now] =
-          params;
+        const [
+          leaseToken,
+          leaseUntil,
+          uuid,
+          providerId,
+          id,
+          updatedAt,
+          generation,
+          now,
+        ] = params;
         const key = `${uuid}\u0000${providerId}\u0000${id}`;
         const current = this.outbox.get(key);
         if (
           !current ||
           current.updated_at_ms !== Number(updatedAt) ||
+          current.link_generation !== Number(generation) ||
           current.lease_until_ms > Number(now)
         )
           return { rowCount: 0 };
@@ -358,6 +557,7 @@ class MemoryTrackerDb {
         providerId,
         id,
         updatedAt,
+        generation,
         leaseToken,
       ] = sql.includes('last_error_code = ?')
         ? params
@@ -367,6 +567,7 @@ class MemoryTrackerDb {
       if (
         !current ||
         current.updated_at_ms !== Number(updatedAt) ||
+        current.link_generation !== Number(generation) ||
         current.lease_token !== leaseToken
       )
         return { rowCount: 0 };
@@ -1392,6 +1593,58 @@ describe('AIOStreams tracker API', () => {
       records.data.records.map(({ id }) => id),
       ['remote-existing', 'remote-change']
     );
+  });
+
+  it('rejects a tracker pull that finishes after its profile was relinked', async () => {
+    let database: MemoryTrackerDb | undefined;
+    const stalePull: TrackerProviderAdapter = {
+      id: 'wetrakr',
+      async pullSnapshot() {
+        return [
+          {
+            ...record('old-account-record', 1700, 'watched'),
+            origin: 'wetrakr',
+          },
+        ];
+      },
+      async pullChanges() {
+        database!.relinkTrackerProvider('alice', 'wetrakr', 'new-account-ref');
+        return {
+          checkpoint: '2026-10-22T12:00:00.000Z',
+          records: [
+            {
+              ...record('stale-account-delta', 1800, 'watched'),
+              origin: 'wetrakr',
+            },
+          ],
+        };
+      },
+      async pushRecords() {
+        return { synced: 0, skipped: 0 };
+      },
+      async scrobble() {},
+    };
+    const server = createTestServer({
+      trackerProviders: {
+        wetrakr: { authRef: 'old-account-ref', enabled: true },
+      },
+      trackerAdapters: [stalePull],
+    });
+    database = server.database;
+
+    const refreshed = await fetch(`${server.baseUrl}/refresh`, {
+      method: 'POST',
+      headers: { Authorization: auth('alice') },
+    });
+    assert.equal(refreshed.status, 503);
+    const snapshot = await fetch(`${server.baseUrl}/snapshot`, {
+      headers: { Authorization: auth('alice') },
+    });
+    const result = await responseJson<{
+      data: { records: Array<{ id: string }> };
+    }>(snapshot);
+    assert.deepEqual(result.data.records, []);
+    assert.equal(database.inspectOutbox().length, 0);
   });
 
   it('propagates a corrected Floppy completion date even when the watched state is unchanged', async () => {
@@ -2550,6 +2803,279 @@ describe('AIOStreams tracker API', () => {
     });
     assert.equal(deleted.status, 200);
     assert.deepEqual(deletedStates, ['watched', 'deleted']);
+  });
+
+  it('keeps a newer-generation queue row when an old provider worker finishes', async () => {
+    let database: MemoryTrackerDb | undefined;
+    const adapter: TrackerProviderAdapter = {
+      id: 'isolated',
+      async pushRecords(_authRef, records) {
+        database!.relinkTrackerProvider('alice', 'isolated', 'new-auth');
+        database!.seedOutbox('isolated', records[0]!, 2);
+        return { synced: records.length, skipped: 0 };
+      },
+      async scrobble() {},
+    };
+    const server = createTestServer({
+      trackerProviders: { isolated: { authRef: 'old-auth', enabled: true } },
+      trackerAdapters: [adapter],
+    });
+    database = server.database;
+    const response = await fetch(`${server.baseUrl}/records`, {
+      method: 'POST',
+      headers: {
+        Authorization: auth('alice'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ records: [record('generation-race', 2100)] }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      database.inspectOutbox().map(({ record_id, link_generation }) => ({
+        record_id,
+        link_generation,
+      })),
+      [{ record_id: 'generation-race', link_generation: 2 }]
+    );
+  });
+
+  it('rejects Jellyfin fan-out when a tracker relinks before enqueue', async () => {
+    const database = new MemoryTrackerDb();
+    await assert.rejects(
+      fanOutLinkedTrackerRecord(
+        'alice',
+        {
+          trackerProviders: {
+            floppy: { authRef: 'old-floppy-auth', enabled: true },
+          },
+        },
+        record('jellyfin-relink-race', 2150),
+        database as unknown as DbDriver,
+        async () => {
+          database.relinkTrackerProvider('alice', 'floppy', 'new-floppy-auth');
+          return true;
+        }
+      ),
+      /Tracker link changed during Jellyfin fan-out/
+    );
+  });
+
+  it('keeps a newer-generation scrobble when an old delivery worker finishes', async () => {
+    let database: MemoryTrackerDb | undefined;
+    const adapter: TrackerProviderAdapter = {
+      id: 'scrobble-race',
+      async pushRecords() {
+        return { synced: 0, skipped: 0 };
+      },
+      async scrobble(_authRef, event) {
+        database!.relinkTrackerProvider('alice', 'scrobble-race', 'new-auth');
+        database!.seedScrobbleOutbox(
+          'scrobble-race',
+          event.eventId,
+          JSON.stringify(event),
+          2
+        );
+      },
+    };
+    const server = createTestServer({
+      trackerProviders: {
+        'scrobble-race': { authRef: 'old-auth', enabled: true },
+      },
+      trackerAdapters: [adapter],
+    });
+    database = server.database;
+    const response = await fetch(`${server.baseUrl}/scrobble`, {
+      method: 'POST',
+      headers: {
+        Authorization: auth('alice'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        eventId: 'generation-scrobble-race',
+        action: 'start',
+        progress: 10,
+        media: {
+          kind: 'movie',
+          title: 'A Test Movie',
+          ids: { imdb: 'tt1234567' },
+        },
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      database.inspectScrobbleOutbox().map(({ event_id, link_generation }) => ({
+        event_id,
+        link_generation,
+      })),
+      [{ event_id: 'generation-scrobble-race', link_generation: 2 }]
+    );
+  });
+
+  it('does not report success when a scrobble link changes before enqueue', async () => {
+    let providerCalls = 0;
+    const adapter: TrackerProviderAdapter = {
+      id: 'scrobble-enqueue-race',
+      async pushRecords() {
+        return { synced: 0, skipped: 0 };
+      },
+      async scrobble() {
+        providerCalls += 1;
+      },
+    };
+    const server = createTestServer({
+      trackerProviders: {
+        'scrobble-enqueue-race': { authRef: 'old-auth', enabled: true },
+      },
+      trackerAdapters: [adapter],
+    });
+    server.database.relinkTrackerProviderOnRead(
+      'alice',
+      'scrobble-enqueue-race',
+      'new-auth',
+      2
+    );
+
+    const response = await fetch(`${server.baseUrl}/scrobble`, {
+      method: 'POST',
+      headers: {
+        Authorization: auth('alice'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        eventId: 'stale-enqueue-event',
+        action: 'start',
+        progress: 10,
+        media: {
+          kind: 'movie',
+          title: 'A Test Movie',
+          ids: { imdb: 'tt1234567' },
+        },
+      }),
+    });
+
+    assert.equal(response.status, 503);
+    const result = await responseJson<{
+      data: { pendingProviders: string[] };
+    }>(response);
+    assert.deepEqual(result.data.pendingProviders, ['scrobble-enqueue-race']);
+    assert.equal(providerCalls, 0);
+  });
+
+  it('isolates malformed outbox payloads and still delivers valid rows', async () => {
+    const pushed: string[] = [];
+    const adapter: TrackerProviderAdapter = {
+      id: 'robust',
+      async pushRecords(_authRef, records) {
+        pushed.push(...records.map(({ id }) => id));
+        return { synced: records.length, skipped: 0 };
+      },
+      async scrobble() {},
+    };
+    const { baseUrl, database } = createTestServer({
+      trackerProviders: { robust: { authRef: 'robust-auth', enabled: true } },
+      trackerAdapters: [adapter],
+    });
+    database.seedOutbox('robust', record('bad-json-row', 2200), 1, '{');
+    const response = await fetch(`${baseUrl}/records`, {
+      method: 'POST',
+      headers: {
+        Authorization: auth('alice'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ records: [record('good-row', 2201)] }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(pushed, ['good-row']);
+    assert.deepEqual(database.inspectOutbox(), []);
+  });
+
+  it('does not retry ordinary records already acknowledged when tombstone delivery fails', async () => {
+    const ordinaryAttempts: string[][] = [];
+    const deleted = {
+      ...record('queued-delete', 2300),
+      state: 'deleted' as const,
+      deletedState: 'watched' as const,
+    };
+    const adapter: TrackerProviderAdapter = {
+      id: 'partial-batch',
+      async pushRecords(_authRef, records) {
+        if (records.some(({ state }) => state === 'deleted'))
+          throw new Error('tombstone failure');
+        ordinaryAttempts.push(records.map(({ id }) => id));
+        return { synced: records.length, skipped: 0 };
+      },
+      async scrobble() {},
+    };
+    const { baseUrl, database } = createTestServer({
+      trackerProviders: {
+        'partial-batch': { authRef: 'partial-auth', enabled: true },
+      },
+      trackerAdapters: [adapter],
+    });
+    database.seedOutbox('partial-batch', deleted, 1);
+    const response = await fetch(`${baseUrl}/records`, {
+      method: 'POST',
+      headers: {
+        Authorization: auth('alice'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ records: [record('ordinary-once', 2301)] }),
+    });
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(ordinaryAttempts, [['ordinary-once']]);
+    assert.deepEqual(
+      database.inspectOutbox().map(({ record_id }) => record_id),
+      ['queued-delete']
+    );
+  });
+
+  it('stops sending tombstones as soon as a provider link changes mid-batch', async () => {
+    let database: MemoryTrackerDb | undefined;
+    const removed: string[] = [];
+    const adapter: TrackerProviderAdapter = {
+      id: 'delete-race',
+      async pushRecords() {
+        return { synced: 0, skipped: 0 };
+      },
+      async removeRecord(_authRef, item) {
+        removed.push(item.id);
+        if (removed.length === 1)
+          database!.relinkTrackerProvider('alice', 'delete-race', 'new-auth');
+      },
+      async scrobble() {},
+    };
+    const server = createTestServer({
+      trackerProviders: {
+        'delete-race': { authRef: 'old-auth', enabled: true },
+      },
+      trackerAdapters: [adapter],
+    });
+    database = server.database;
+    const first = {
+      ...record('delete-one', 2400),
+      state: 'deleted' as const,
+      deletedState: 'watched' as const,
+    };
+    const second = {
+      ...record('delete-two', 2401),
+      state: 'deleted' as const,
+      deletedState: 'watched' as const,
+    };
+    const response = await fetch(`${server.baseUrl}/records`, {
+      method: 'POST',
+      headers: {
+        Authorization: auth('alice'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ records: [first, second] }),
+    });
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(removed, ['delete-one']);
   });
 
   it('stores WeTrakr rate-limit cooldowns on durable writes without losing records', async () => {

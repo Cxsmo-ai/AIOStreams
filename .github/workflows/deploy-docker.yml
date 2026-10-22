@@ -154,12 +154,18 @@ jobs:
       # GitHub's intermediary. The image is already pushed at this point, so
       # retry the digest transfer under a distinct name and let the merge job
       # select whichever upload completed.
-      - name: Retry digest artifact upload
+      - name: Prepare retry digest filename
+        if: ${{ steps.upload_digest.outcome == 'failure' }}
+        # archive: false names the artifact after the uploaded file, not the
+        # `name` input. Give the retry digest a distinct basename so the merge
+        # job can find it even if the first upload partially completed.
+        run: cp "/tmp/${{ matrix.suffix }}" "/tmp/${{ matrix.suffix }}-retry"
+
+      - name: Upload retry digest artifact
         if: ${{ steps.upload_digest.outcome == 'failure' }}
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.suffix }}-retry
-          path: /tmp/${{ matrix.suffix }}
+          path: /tmp/${{ matrix.suffix }}-retry
           archive: false
           retention-days: 1
 

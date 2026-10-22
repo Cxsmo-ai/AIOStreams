@@ -30,7 +30,11 @@ export const SERVICE_LOGO_MAP: Record<ServiceId, string> = {
   altmount:
     'https://raw.githubusercontent.com/javi11/altmount/refs/heads/main/docs/static/img/logo.png',
   aiostreams: '/logo.png',
+  deepbrid:
+    'https://www.deepbrid.com/application/default/themes/okagev4/public/img/logo-light.png',
+  torrentclaw: 'https://torrentclaw.com/icon-512.png',
   torrin: 'https://torrin.app/favicon.png',
+  kurato: 'https://kurato.com/favicon.ico',
 };
 
 const USENET_SERVICE_IDS: string[] = [

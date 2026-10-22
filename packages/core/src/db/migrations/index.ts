@@ -57,6 +57,8 @@ import { trackerProviderFacets } from './900009_tracker_provider_facets.js';
 import { trackerProviderFacetRetry } from './900010_tracker_provider_facet_retry.js';
 import { wetrakrRequestQuota } from './900011_wetrakr_request_quota.js';
 import { jellyfinTrackerBridgeChanges } from './901001_jellyfin_tracker_bridge_changes.js';
+import { trackerProviderLinkState } from './900041_tracker_provider_link_state.js';
+import { trackerOutboxGeneration } from './900042_tracker_outbox_generation.js';
 import { watchSessionTracks } from './0048_watch_session_tracks.js';
 import type { Migration } from './types.js';
 
@@ -126,6 +128,8 @@ export const MIGRATIONS: readonly Migration[] = [
     appReports,
     watchSessionTracks,
   ].map((migration, index) => ({ ...migration, id: 900012 + index })),
+  trackerProviderLinkState,
+  trackerOutboxGeneration,
   jellyfinTrackerBridgeChanges,
 ];
 

@@ -13,6 +13,9 @@ import {
   parseTrackerCursor,
   requestWeTrakrApi,
   requestFloppyApi,
+  getTrackerProviderLinkState,
+  initializeTrackerProviderLinkStates,
+  isCurrentTrackerProviderLink,
   WeTrakrRateLimitError,
   type DbDriver,
 } from '@aiostreams/core';
@@ -255,6 +258,7 @@ type TrackerOutboxRow = {
   record_json: string;
   updated_at_ms: number | string;
   attempt_count: number | string;
+  link_generation: number | string | null;
 };
 
 type TrackerScrobbleOutboxRow = {
@@ -262,12 +266,16 @@ type TrackerScrobbleOutboxRow = {
   event_json: string;
   created_at_ms: number | string;
   attempt_count: number | string;
+  link_generation: number | string | null;
 };
 
 export type LinkedTrackerAdapter = {
   adapter: TrackerProviderAdapter;
   authRef: string;
+  generation: number;
 };
+
+type ResolvedTrackerAdapter = Omit<LinkedTrackerAdapter, 'generation'>;
 
 /**
  * Persist live playback events before provider fan-out. Stable event IDs make
@@ -279,13 +287,41 @@ export async function enqueueScrobbleEvents(
   adapters: LinkedTrackerAdapter[],
   event: TrackerScrobbleEvent,
   now = Date.now()
-): Promise<void> {
-  for (const { adapter } of adapters) {
+): Promise<string[]> {
+  const staleProviders: string[] = [];
+  for (const { adapter, authRef, generation } of adapters) {
+    if (
+      !(await isCurrentTrackerProviderLink(
+        tx,
+        userUuid,
+        adapter.id,
+        authRef,
+        generation,
+        true
+      ))
+    ) {
+      staleProviders.push(adapter.id);
+      continue;
+    }
+    // Prune obsolete work only after locking and validating the current link.
+    // A worker holding an older generation must never perform this cleanup.
     await tx.exec(
-      'INSERT INTO tracker_scrobble_outbox (user_uuid, provider_id, event_id, event_json, created_at_ms, attempt_count, next_attempt_at_ms, lease_token, lease_until_ms, last_error_code) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, 0, NULL) ON CONFLICT(user_uuid, provider_id, event_id) DO NOTHING',
-      [userUuid, adapter.id, event.eventId, JSON.stringify(event), now]
+      'DELETE FROM tracker_scrobble_outbox WHERE user_uuid = ? AND provider_id = ? AND (link_generation IS NULL OR link_generation <> ?)',
+      [userUuid, adapter.id, generation]
+    );
+    await tx.exec(
+      'INSERT INTO tracker_scrobble_outbox (user_uuid, provider_id, event_id, event_json, created_at_ms, link_generation, attempt_count, next_attempt_at_ms, lease_token, lease_until_ms, last_error_code) VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, 0, NULL) ON CONFLICT(user_uuid, provider_id, event_id) DO NOTHING',
+      [
+        userUuid,
+        adapter.id,
+        event.eventId,
+        JSON.stringify(event),
+        now,
+        generation,
+      ]
     );
   }
+  return staleProviders;
 }
 
 export async function flushScrobbleOutbox(
@@ -305,7 +341,8 @@ export async function flushScrobbleOutbox(
   const syncedProviders: string[] = [];
   const pendingProviders: string[] = [];
   const ignoredProviders: Array<{ providerId: string; reason?: string }> = [];
-  for (const { adapter, authRef } of adapters) {
+  for (const { adapter, authRef, generation } of adapters) {
+    let linkChanged = false;
     // Retain successful event IDs long enough to suppress ordinary retries,
     // without keeping a permanent playback-history database.
     await db.exec(
@@ -314,17 +351,17 @@ export async function flushScrobbleOutbox(
     );
     const rows = await db.query<TrackerScrobbleOutboxRow>(
       forceRetry
-        ? "SELECT event_id, event_json, created_at_ms, attempt_count FROM tracker_scrobble_outbox WHERE user_uuid = ? AND provider_id = ? AND delivery_status = 'pending' AND lease_until_ms <= ? ORDER BY created_at_ms, event_id LIMIT ?"
-        : "SELECT event_id, event_json, created_at_ms, attempt_count FROM tracker_scrobble_outbox WHERE user_uuid = ? AND provider_id = ? AND delivery_status = 'pending' AND next_attempt_at_ms <= ? AND lease_until_ms <= ? ORDER BY created_at_ms, event_id LIMIT ?",
+        ? "SELECT event_id, event_json, created_at_ms, attempt_count, link_generation FROM tracker_scrobble_outbox WHERE user_uuid = ? AND provider_id = ? AND link_generation = ? AND delivery_status = 'pending' AND lease_until_ms <= ? ORDER BY created_at_ms, event_id LIMIT ?"
+        : "SELECT event_id, event_json, created_at_ms, attempt_count, link_generation FROM tracker_scrobble_outbox WHERE user_uuid = ? AND provider_id = ? AND link_generation = ? AND delivery_status = 'pending' AND next_attempt_at_ms <= ? AND lease_until_ms <= ? ORDER BY created_at_ms, event_id LIMIT ?",
       forceRetry
-        ? [userUuid, adapter.id, now, 200]
-        : [userUuid, adapter.id, now, now, 200]
+        ? [userUuid, adapter.id, generation, now, 200]
+        : [userUuid, adapter.id, generation, now, now, 200]
     );
     for (const row of rows) {
       const claimToken = randomUUID();
       const createdAt = Number(row.created_at_ms);
       const claimed = await db.exec(
-        'UPDATE tracker_scrobble_outbox SET lease_token = ?, lease_until_ms = ? WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND lease_until_ms <= ?',
+        'UPDATE tracker_scrobble_outbox SET lease_token = ?, lease_until_ms = ? WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND link_generation = ? AND lease_until_ms <= ?',
         [
           claimToken,
           now + 120_000,
@@ -332,11 +369,37 @@ export async function flushScrobbleOutbox(
           adapter.id,
           row.event_id,
           createdAt,
+          generation,
           now,
         ]
       );
       if (!claimed.rowCount) continue;
       try {
+        if (
+          !(await isCurrentTrackerProviderLink(
+            db,
+            userUuid,
+            adapter.id,
+            authRef,
+            generation
+          ))
+        ) {
+          linkChanged = true;
+          // This worker owns only its claimed generation. A relinked queue is
+          // pruned by the new link's enqueue transaction, never by stale work.
+          await db.exec(
+            'UPDATE tracker_scrobble_outbox SET lease_token = NULL, lease_until_ms = 0 WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND link_generation = ? AND lease_token = ?',
+            [
+              userUuid,
+              adapter.id,
+              row.event_id,
+              createdAt,
+              generation,
+              claimToken,
+            ]
+          );
+          continue;
+        }
         const event = JSON.parse(row.event_json) as TrackerScrobbleEvent;
         const result = await adapter.scrobble(
           authRef,
@@ -344,8 +407,15 @@ export async function flushScrobbleOutbox(
           providerApiFor(adapter)
         );
         await db.exec(
-          "UPDATE tracker_scrobble_outbox SET delivery_status = 'delivered', lease_token = NULL, lease_until_ms = 0, last_error_code = NULL WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND lease_token = ?",
-          [userUuid, adapter.id, row.event_id, createdAt, claimToken]
+          "UPDATE tracker_scrobble_outbox SET delivery_status = 'delivered', lease_token = NULL, lease_until_ms = 0, last_error_code = NULL WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND link_generation = ? AND lease_token = ?",
+          [
+            userUuid,
+            adapter.id,
+            row.event_id,
+            createdAt,
+            generation,
+            claimToken,
+          ]
         );
         if (result?.status === 'ignored')
           ignoredProviders.push({
@@ -358,7 +428,7 @@ export async function flushScrobbleOutbox(
         const attempt = Number(row.attempt_count) + 1;
         const retry = trackerOutboxRetry(adapter, error, attempt, 1_280_000);
         await db.exec(
-          'UPDATE tracker_scrobble_outbox SET attempt_count = attempt_count + 1, next_attempt_at_ms = ?, lease_token = NULL, lease_until_ms = 0, last_error_code = ? WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND lease_token = ?',
+          'UPDATE tracker_scrobble_outbox SET attempt_count = attempt_count + 1, next_attempt_at_ms = ?, lease_token = NULL, lease_until_ms = 0, last_error_code = ? WHERE user_uuid = ? AND provider_id = ? AND event_id = ? AND created_at_ms = ? AND link_generation = ? AND lease_token = ?',
           [
             Date.now() + retry.delayMs,
             retry.errorCode,
@@ -366,16 +436,17 @@ export async function flushScrobbleOutbox(
             adapter.id,
             row.event_id,
             createdAt,
+            generation,
             claimToken,
           ]
         );
       }
     }
     const pending = await db.query<{ event_id: string }>(
-      "SELECT event_id FROM tracker_scrobble_outbox WHERE user_uuid = ? AND provider_id = ? AND delivery_status = 'pending' LIMIT 1",
-      [userUuid, adapter.id]
+      "SELECT event_id FROM tracker_scrobble_outbox WHERE user_uuid = ? AND provider_id = ? AND link_generation = ? AND delivery_status = 'pending' LIMIT 1",
+      [userUuid, adapter.id, generation]
     );
-    if (pending.length) pendingProviders.push(adapter.id);
+    if (pending.length || linkChanged) pendingProviders.push(adapter.id);
   }
   return { syncedProviders, pendingProviders, ignoredProviders };
 }
@@ -385,22 +456,67 @@ async function enqueueProviderRecords(
   tx: DbDriver,
   userUuid: string,
   providerId: string,
+  authRef: string,
+  generation: number,
   records: TrackerRecord[],
   now = Date.now()
-): Promise<void> {
+): Promise<boolean> {
+  if (
+    !(await isCurrentTrackerProviderLink(
+      tx,
+      userUuid,
+      providerId,
+      authRef,
+      generation,
+      true
+    ))
+  ) {
+    return false;
+  }
+  await tx.exec(
+    'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND (link_generation IS NULL OR link_generation <> ?)',
+    [userUuid, providerId, generation]
+  );
   for (const record of records) {
     await tx.exec(
-      `INSERT INTO tracker_provider_outbox (user_uuid, provider_id, record_id, record_json, updated_at_ms, attempt_count, next_attempt_at_ms, lease_token, lease_until_ms, created_at_ms, last_error_code) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, 0, ?, NULL) ON CONFLICT(user_uuid, provider_id, record_id) DO UPDATE SET record_json = excluded.record_json, updated_at_ms = excluded.updated_at_ms, attempt_count = 0, next_attempt_at_ms = 0, lease_token = NULL, lease_until_ms = 0, created_at_ms = excluded.created_at_ms, last_error_code = NULL WHERE excluded.updated_at_ms >= tracker_provider_outbox.updated_at_ms`,
+      `INSERT INTO tracker_provider_outbox (user_uuid, provider_id, record_id, record_json, updated_at_ms, link_generation, attempt_count, next_attempt_at_ms, lease_token, lease_until_ms, created_at_ms, last_error_code) VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, 0, ?, NULL) ON CONFLICT(user_uuid, provider_id, record_id) DO UPDATE SET record_json = excluded.record_json, updated_at_ms = excluded.updated_at_ms, link_generation = excluded.link_generation, attempt_count = 0, next_attempt_at_ms = 0, lease_token = NULL, lease_until_ms = 0, created_at_ms = excluded.created_at_ms, last_error_code = NULL WHERE excluded.link_generation = tracker_provider_outbox.link_generation AND excluded.updated_at_ms >= tracker_provider_outbox.updated_at_ms`,
       [
         userUuid,
         providerId,
         record.id,
         JSON.stringify(record),
         record.updatedAt,
+        generation,
         now,
       ]
     );
   }
+  return true;
+}
+
+/** Drop only rows still owned by this worker when a tracker was relinked. */
+async function discardClaimedProviderRows(
+  db: DbDriver,
+  userUuid: string,
+  providerId: string,
+  rows: TrackerOutboxRow[],
+  claimToken: string
+): Promise<void> {
+  await db.tx(async (tx) => {
+    for (const row of rows) {
+      await tx.exec(
+        'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
+        [
+          userUuid,
+          providerId,
+          row.record_id,
+          Number(row.updated_at_ms),
+          Number(row.link_generation),
+          claimToken,
+        ]
+      );
+    }
+  });
 }
 
 /**
@@ -411,7 +527,7 @@ async function enqueueProviderRecords(
 async function flushProviderOutbox(
   db: DbDriver,
   userUuid: string,
-  adapters: Array<{ adapter: TrackerProviderAdapter; authRef: string }>,
+  adapters: LinkedTrackerAdapter[],
   requestApi: (adapter: TrackerProviderAdapter) => TrackerProviderApiRequest,
   now = Date.now(),
   forceRetry = false
@@ -428,14 +544,14 @@ async function flushProviderOutbox(
   const writeFailureReasons: Record<string, string> = {};
   let synced = 0;
   let skipped = 0;
-  for (const { adapter, authRef } of adapters) {
+  for (const { adapter, authRef, generation } of adapters) {
     const rows = await db.query<TrackerOutboxRow>(
       forceRetry
-        ? 'SELECT record_id, record_json, updated_at_ms, attempt_count FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND lease_until_ms <= ? ORDER BY updated_at_ms ASC, record_id ASC LIMIT ?'
-        : 'SELECT record_id, record_json, updated_at_ms, attempt_count FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND next_attempt_at_ms <= ? AND lease_until_ms <= ? ORDER BY updated_at_ms ASC, record_id ASC LIMIT ?',
+        ? 'SELECT record_id, record_json, updated_at_ms, attempt_count, link_generation FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND link_generation = ? AND lease_until_ms <= ? ORDER BY updated_at_ms ASC, record_id ASC LIMIT ?'
+        : 'SELECT record_id, record_json, updated_at_ms, attempt_count, link_generation FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND link_generation = ? AND next_attempt_at_ms <= ? AND lease_until_ms <= ? ORDER BY updated_at_ms ASC, record_id ASC LIMIT ?',
       forceRetry
-        ? [userUuid, adapter.id, now, 200]
-        : [userUuid, adapter.id, now, now, 200]
+        ? [userUuid, adapter.id, generation, now, 200]
+        : [userUuid, adapter.id, generation, now, now, 200]
     );
     if (rows.length) {
       const claimToken = randomUUID();
@@ -443,7 +559,7 @@ async function flushProviderOutbox(
       await db.tx(async (tx) => {
         for (const row of rows) {
           const result = await tx.exec(
-            'UPDATE tracker_provider_outbox SET lease_token = ?, lease_until_ms = ? WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND lease_until_ms <= ?',
+            'UPDATE tracker_provider_outbox SET lease_token = ?, lease_until_ms = ? WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_until_ms <= ?',
             [
               claimToken,
               now + 120_000,
@@ -451,33 +567,81 @@ async function flushProviderOutbox(
               adapter.id,
               row.record_id,
               Number(row.updated_at_ms),
+              generation,
               now,
             ]
           );
           if (result.rowCount) claimed.push(row);
         }
       });
-      const records = claimed.map((row) =>
-        TrackerRecordSchema.parse(JSON.parse(row.record_json))
-      );
       if (!claimed.length) continue;
+      // Isolate corrupt rows so a single bad payload cannot strand every
+      // otherwise-valid item behind a batch-level JSON/schema exception.
+      const valid: Array<{ row: TrackerOutboxRow; record: TrackerRecord }> = [];
+      for (const row of claimed) {
+        try {
+          valid.push({
+            row,
+            record: TrackerRecordSchema.parse(JSON.parse(row.record_json)),
+          });
+        } catch {
+          await db.exec(
+            'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
+            [
+              userUuid,
+              adapter.id,
+              row.record_id,
+              Number(row.updated_at_ms),
+              generation,
+              claimToken,
+            ]
+          );
+        }
+      }
+      const deliverableRows = valid.map(({ row }) => row);
+      const records = valid.map(({ record }) => record);
+      if (!deliverableRows.length) continue;
       if (adapter.pushRecord) {
         const api = requestApi(adapter);
         let batchSynced = 0;
         let batchSkipped = 0;
-        for (let index = 0; index < claimed.length; index += 1) {
-          const row = claimed[index]!;
+        for (let index = 0; index < deliverableRows.length; index += 1) {
+          const row = deliverableRows[index]!;
           const record = records[index]!;
           try {
-            const represented = await adapter.pushRecord(authRef, record, api);
-            await db.tx(async (tx) => {
-              await tx.exec(
-                'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND lease_token = ?',
+            if (
+              !(await isCurrentTrackerProviderLink(
+                db,
+                userUuid,
+                adapter.id,
+                authRef,
+                generation
+              ))
+            ) {
+              writeFailureReasons[adapter.id] = 'tracker_link_changed';
+              await db.exec(
+                'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
                 [
                   userUuid,
                   adapter.id,
                   row.record_id,
                   Number(row.updated_at_ms),
+                  generation,
+                  claimToken,
+                ]
+              );
+              continue;
+            }
+            const represented = await adapter.pushRecord(authRef, record, api);
+            await db.tx(async (tx) => {
+              await tx.exec(
+                'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
+                [
+                  userUuid,
+                  adapter.id,
+                  row.record_id,
+                  Number(row.updated_at_ms),
+                  generation,
                   claimToken,
                 ]
               );
@@ -510,7 +674,7 @@ async function flushProviderOutbox(
             );
             await db.tx(async (tx) => {
               await tx.exec(
-                'UPDATE tracker_provider_outbox SET attempt_count = attempt_count + 1, next_attempt_at_ms = ?, lease_token = NULL, lease_until_ms = 0, last_error_code = ? WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND lease_token = ?',
+                'UPDATE tracker_provider_outbox SET attempt_count = attempt_count + 1, next_attempt_at_ms = ?, lease_token = NULL, lease_until_ms = 0, last_error_code = ? WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
                 [
                   Date.now() + retry.delayMs,
                   retry.errorCode,
@@ -518,6 +682,7 @@ async function flushProviderOutbox(
                   adapter.id,
                   row.record_id,
                   Number(row.updated_at_ms),
+                  generation,
                   claimToken,
                 ]
               );
@@ -536,60 +701,130 @@ async function flushProviderOutbox(
       }
       try {
         const api = requestApi(adapter);
-        const ordinary = records.filter((record) => record.state !== 'deleted');
-        const tombstones = records.filter(
-          (record) => record.state === 'deleted'
+        const ordinary = valid.filter(
+          ({ record }) => record.state !== 'deleted'
         );
-        let result = { synced: 0, skipped: 0 };
+        const tombstones = valid.filter(
+          ({ record }) => record.state === 'deleted'
+        );
+        let providerHadSuccessfulWrites = false;
         if (ordinary.length) {
+          if (
+            !(await isCurrentTrackerProviderLink(
+              db,
+              userUuid,
+              adapter.id,
+              authRef,
+              generation
+            ))
+          ) {
+            writeFailureReasons[adapter.id] = 'tracker_link_changed';
+            await discardClaimedProviderRows(
+              db,
+              userUuid,
+              adapter.id,
+              deliverableRows,
+              claimToken
+            );
+            continue;
+          }
           const ordinaryResult = await adapter.pushRecords(
             authRef,
-            ordinary,
+            ordinary.map(({ record }) => record),
             api
           );
-          result.synced += ordinaryResult.synced;
-          result.skipped += ordinaryResult.skipped;
+          await discardClaimedProviderRows(
+            db,
+            userUuid,
+            adapter.id,
+            ordinary.map(({ row }) => row),
+            claimToken
+          );
+          providerHadSuccessfulWrites = true;
+          synced += ordinaryResult.synced;
+          skipped += ordinaryResult.skipped;
+          if (ordinaryResult.skipped > 0)
+            unsupportedWrites.push({
+              providerId: adapter.id,
+              skipped: ordinaryResult.skipped,
+            });
         }
         if (tombstones.length) {
-          if (adapter.removeRecord) {
-            await Promise.all(
-              tombstones.map((record) =>
-                adapter.removeRecord!(authRef, record, api)
-              )
+          if (
+            !(await isCurrentTrackerProviderLink(
+              db,
+              userUuid,
+              adapter.id,
+              authRef,
+              generation
+            ))
+          ) {
+            writeFailureReasons[adapter.id] = 'tracker_link_changed';
+            await discardClaimedProviderRows(
+              db,
+              userUuid,
+              adapter.id,
+              tombstones.map(({ row }) => row),
+              claimToken
             );
-            result.synced += tombstones.length;
+            continue;
+          }
+          if (adapter.removeRecord) {
+            for (const { row, record } of tombstones) {
+              if (
+                !(await isCurrentTrackerProviderLink(
+                  db,
+                  userUuid,
+                  adapter.id,
+                  authRef,
+                  generation
+                ))
+              ) {
+                writeFailureReasons[adapter.id] = 'tracker_link_changed';
+                await discardClaimedProviderRows(
+                  db,
+                  userUuid,
+                  adapter.id,
+                  tombstones.map(({ row: pendingRow }) => pendingRow),
+                  claimToken
+                );
+                break;
+              }
+              await adapter.removeRecord(authRef, record, api);
+              await discardClaimedProviderRows(
+                db,
+                userUuid,
+                adapter.id,
+                [row],
+                claimToken
+              );
+              synced += 1;
+              providerHadSuccessfulWrites = true;
+            }
           } else {
             const tombstoneResult = await adapter.pushRecords(
               authRef,
-              tombstones,
+              tombstones.map(({ record }) => record),
               api
             );
-            result.synced += tombstoneResult.synced;
-            result.skipped += tombstoneResult.skipped;
+            await discardClaimedProviderRows(
+              db,
+              userUuid,
+              adapter.id,
+              tombstones.map(({ row }) => row),
+              claimToken
+            );
+            providerHadSuccessfulWrites = true;
+            synced += tombstoneResult.synced;
+            skipped += tombstoneResult.skipped;
+            if (tombstoneResult.skipped > 0)
+              unsupportedWrites.push({
+                providerId: adapter.id,
+                skipped: tombstoneResult.skipped,
+              });
           }
         }
-        await db.tx(async (tx) => {
-          for (const row of claimed) {
-            await tx.exec(
-              'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND lease_token = ?',
-              [
-                userUuid,
-                adapter.id,
-                row.record_id,
-                Number(row.updated_at_ms),
-                claimToken,
-              ]
-            );
-          }
-        });
-        syncedProviders.push(adapter.id);
-        synced += result.synced;
-        skipped += result.skipped;
-        if (result.skipped > 0)
-          unsupportedWrites.push({
-            providerId: adapter.id,
-            skipped: result.skipped,
-          });
+        if (providerHadSuccessfulWrites) syncedProviders.push(adapter.id);
       } catch (error) {
         const floppyFailure =
           adapter.id === 'floppy' && error instanceof Error
@@ -603,7 +838,7 @@ async function flushProviderOutbox(
             ? 'rate_limited'
             : 'provider_unavailable';
         await db.tx(async (tx) => {
-          for (const row of claimed) {
+          for (const row of deliverableRows) {
             const attempt = Number(row.attempt_count) + 1;
             const retry = trackerOutboxRetry(
               adapter,
@@ -612,7 +847,7 @@ async function flushProviderOutbox(
               15 * 60_000
             );
             await tx.exec(
-              'UPDATE tracker_provider_outbox SET attempt_count = attempt_count + 1, next_attempt_at_ms = ?, lease_token = NULL, lease_until_ms = 0, last_error_code = ? WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND lease_token = ?',
+              'UPDATE tracker_provider_outbox SET attempt_count = attempt_count + 1, next_attempt_at_ms = ?, lease_token = NULL, lease_until_ms = 0, last_error_code = ? WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND link_generation = ? AND lease_token = ?',
               [
                 Date.now() + retry.delayMs,
                 retry.errorCode,
@@ -620,6 +855,7 @@ async function flushProviderOutbox(
                 adapter.id,
                 row.record_id,
                 Number(row.updated_at_ms),
+                generation,
                 claimToken,
               ]
             );
@@ -629,12 +865,13 @@ async function flushProviderOutbox(
     }
   }
   const pendingProviders: string[] = [];
-  for (const { adapter } of adapters) {
+  for (const { adapter, generation } of adapters) {
     const pending = await db.query<{ record_id: string }>(
-      'SELECT record_id FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? LIMIT 1',
-      [userUuid, adapter.id]
+      'SELECT record_id FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND link_generation = ? LIMIT 1',
+      [userUuid, adapter.id, generation]
     );
-    if (pending.length) pendingProviders.push(adapter.id);
+    if (pending.length || writeFailureReasons[adapter.id])
+      pendingProviders.push(adapter.id);
   }
   return {
     syncedProviders,
@@ -649,12 +886,12 @@ async function flushProviderOutbox(
 export function resolveLinkedAdapters(
   user: { trackerProviders?: Record<string, TrackerProviderLink> } | null,
   providerAdapters: TrackerProviderAdapter[] = defaultTrackerProviderAdapters
-): { adapters: LinkedTrackerAdapter[]; unsupported: string[] } {
+): { adapters: ResolvedTrackerAdapter[]; unsupported: string[] } {
   const configured = user?.trackerProviders ?? {};
   const active = Object.entries(configured).filter(
     ([, link]) => Boolean(link?.authRef) && link.enabled !== false
   );
-  const adapters = active.flatMap(([id, link]) => {
+  const adapters: ResolvedTrackerAdapter[] = active.flatMap(([id, link]) => {
     const adapter = providerAdapters.find((candidate) => candidate.id === id);
     return adapter && link.authRef ? [{ adapter, authRef: link.authRef }] : [];
   });
@@ -664,6 +901,54 @@ export function resolveLinkedAdapters(
     )
     .map(([id]) => id);
   return { adapters, unsupported };
+}
+
+export async function bindLinkedTrackerAdapters(
+  db: DbDriver,
+  userUuid: string,
+  adapters: ResolvedTrackerAdapter[]
+): Promise<{ adapters: LinkedTrackerAdapter[]; stale: string[] }> {
+  const bound: LinkedTrackerAdapter[] = [];
+  const stale: string[] = [];
+  for (const linked of adapters) {
+    const state = await getTrackerProviderLinkState(
+      db,
+      userUuid,
+      linked.adapter.id
+    );
+    if (!state || state.authRef !== linked.authRef) {
+      stale.push(linked.adapter.id);
+      continue;
+    }
+    bound.push({ ...linked, generation: state.generation });
+  }
+  return { adapters: bound, stale };
+}
+
+/** Resolve tracker connections only when the saved config still owns the authRef. */
+export async function resolveCurrentLinkedAdapters(
+  db: DbDriver,
+  userUuid: string,
+  user: { trackerProviders?: Record<string, TrackerProviderLink> } | null
+): Promise<{
+  adapters: LinkedTrackerAdapter[];
+  stale: string[];
+  unsupported: string[];
+}> {
+  await db.tx((tx) =>
+    initializeTrackerProviderLinkStates(
+      tx,
+      userUuid,
+      user?.trackerProviders ?? {}
+    )
+  );
+  const resolved = resolveLinkedAdapters(user);
+  const bound = await bindLinkedTrackerAdapters(
+    db,
+    userUuid,
+    resolved.adapters
+  );
+  return { ...bound, unsupported: resolved.unsupported };
 }
 
 export function defaultProviderApiFor(
@@ -697,17 +982,35 @@ export async function fanOutLinkedTrackerRecord(
   db: DbDriver = getDb(),
   persist?: (tx: DbDriver) => Promise<boolean>
 ): Promise<void> {
-  const adapters = resolveLinkedAdapters(user).adapters.filter(
+  await db.tx((tx) =>
+    initializeTrackerProviderLinkStates(
+      tx,
+      userUuid,
+      user?.trackerProviders ?? {}
+    )
+  );
+  const resolved = resolveLinkedAdapters(user).adapters.filter(
     ({ adapter }) => adapter.id !== record.origin
   );
+  const { adapters } = await bindLinkedTrackerAdapters(db, userUuid, resolved);
   if (!adapters.length && !persist) return;
   const now = Date.now();
   let accepted = true;
   await db.tx(async (tx) => {
     accepted = (await persist?.(tx)) ?? true;
     if (!accepted) return;
-    for (const { adapter } of adapters) {
-      await enqueueProviderRecords(tx, userUuid, adapter.id, [record], now);
+    for (const { adapter, authRef, generation } of adapters) {
+      const enqueued = await enqueueProviderRecords(
+        tx,
+        userUuid,
+        adapter.id,
+        authRef,
+        generation,
+        [record],
+        now
+      );
+      if (!enqueued)
+        throw new Error('Tracker link changed during Jellyfin fan-out');
     }
   });
   if (!accepted || !adapters.length) return;
@@ -770,9 +1073,23 @@ export function createTrackerRouter(
     if (!authenticated) {
       throw new APIError(constants.ErrorCode.UNAUTHORIZED);
     }
+    const user = typeof authenticated === 'object' ? authenticated : null;
+    if (user) {
+      // Legacy rows are seeded only from the authenticated saved config. The
+      // insert is do-nothing on conflict, so a concurrent relink always wins.
+      await dependencies
+        .database()
+        .tx((tx) =>
+          initializeTrackerProviderLinkStates(
+            tx,
+            credentials.uuid,
+            user.trackerProviders ?? {}
+          )
+        );
+    }
     return {
       uuid: credentials.uuid,
-      user: typeof authenticated === 'object' ? authenticated : null,
+      user,
     };
   }
 
@@ -780,23 +1097,54 @@ export function createTrackerRouter(
     return (await authenticatedAccount(req)).uuid;
   }
 
-  function linkedAdapters(
-    user: { trackerProviders?: Record<string, TrackerProviderLink> } | null
+  async function linkedAdapters(
+    userUuid: string,
+    user: { trackerProviders?: Record<string, TrackerProviderLink> } | null,
+    db: DbDriver
   ) {
-    return resolveLinkedAdapters(user, providerAdapters);
+    const resolved = resolveLinkedAdapters(user, providerAdapters);
+    const bound = await bindLinkedTrackerAdapters(
+      db,
+      userUuid,
+      resolved.adapters
+    );
+    return {
+      adapters: bound.adapters,
+      unsupported: [...resolved.unsupported, ...bound.stale],
+    };
   }
 
   router.post('/refresh', async (req, res, next) => {
     try {
       const { uuid: userUuid, user } = await authenticatedAccount(req);
       const db = dependencies.database();
-      const { adapters, unsupported } = linkedAdapters(user);
+      const { adapters, unsupported } = await linkedAdapters(
+        userUuid,
+        user,
+        db
+      );
       const pullable = adapters.filter(
         ({ adapter }) => adapter.pullChanges || adapter.pullSnapshot
       );
       const outcomes = await Promise.all(
-        pullable.map(async ({ adapter, authRef }) => {
+        pullable.map(async ({ adapter, authRef, generation }) => {
           try {
+            if (
+              !(await isCurrentTrackerProviderLink(
+                db,
+                userUuid,
+                adapter.id,
+                authRef,
+                generation
+              ))
+            ) {
+              return {
+                success: false as const,
+                id: adapter.id,
+                reason: 'tracker_link_changed',
+                endpoint: undefined,
+              };
+            }
             const state = await db.maybeOne<{
               checkpoint_at_ms: number | string;
             }>(
@@ -995,7 +1343,19 @@ export function createTrackerRouter(
             let accepted: ReturnType<typeof TrackerRecordSchema.parse>[] = [];
             const replayable: ReturnType<typeof TrackerRecordSchema.parse>[] =
               [];
-            await db.tx(async (tx) => {
+            const persistedForCurrentLink = await db.tx(async (tx) => {
+              if (
+                !(await isCurrentTrackerProviderLink(
+                  tx,
+                  userUuid,
+                  adapter.id,
+                  authRef,
+                  generation,
+                  true
+                ))
+              ) {
+                return false;
+              }
               for (const record of mergedInput) {
                 const existing = await tx.maybeOne<{
                   record_json: string;
@@ -1083,7 +1443,17 @@ export function createTrackerRouter(
                   ]
                 );
               }
+              return true;
             });
+
+            if (!persistedForCurrentLink) {
+              return {
+                success: false as const,
+                id: adapter.id,
+                reason: 'tracker_link_changed',
+                endpoint: undefined,
+              };
+            }
 
             // On first connection seed the newly linked provider from the existing
             // merged ledger. Later journal updates fan out only their accepted
@@ -1101,6 +1471,8 @@ export function createTrackerRouter(
             return {
               success: true as const,
               id: adapter.id,
+              authRef,
+              generation,
               initial,
               accepted,
               toFanOut,
@@ -1154,12 +1526,16 @@ export function createTrackerRouter(
         if (!sourceRecords.length) continue;
         try {
           await db.tx(async (tx) => {
-            await enqueueProviderRecords(
+            const enqueued = await enqueueProviderRecords(
               tx,
               userUuid,
               destination.adapter.id,
+              destination.authRef,
+              destination.generation,
               sourceRecords
             );
+            if (!enqueued)
+              throw new Error('Tracker link changed before fan-out was queued');
           });
         } catch (error) {
           queueWriteFailures.push(destination.adapter.id);
@@ -1222,7 +1598,19 @@ export function createTrackerRouter(
             continue;
           }
           try {
-            await db.tx(async (tx) => {
+            const checkpointCommitted = await db.tx(async (tx) => {
+              if (
+                !(await isCurrentTrackerProviderLink(
+                  tx,
+                  userUuid,
+                  outcome.id,
+                  outcome.authRef,
+                  outcome.generation,
+                  true
+                ))
+              ) {
+                return false;
+              }
               const current = await tx.maybeOne<{
                 checkpoint_at_ms: number | string;
               }>(
@@ -1301,7 +1689,16 @@ export function createTrackerRouter(
                   );
                 }
               }
+              return true;
             });
+            if (!checkpointCommitted) {
+              allPending.push(outcome.id);
+              pendingDetails.push({
+                providerId: outcome.id,
+                stage: 'checkpoint',
+                reason: 'tracker_link_changed',
+              });
+            }
           } catch (error) {
             allPending.push(outcome.id);
             pendingDetails.push({
@@ -1412,7 +1809,11 @@ export function createTrackerRouter(
     try {
       const { uuid: userUuid, user } = await authenticatedAccount(req);
       const db = dependencies.database();
-      const { adapters, unsupported } = linkedAdapters(user);
+      const { adapters, unsupported } = await linkedAdapters(
+        userUuid,
+        user,
+        db
+      );
       if (!adapters.length) {
         res.status(unsupported.length ? 501 : 409).json({
           error: unsupported.length
@@ -1556,24 +1957,30 @@ export function createTrackerRouter(
         ...(typeof durationMs === 'number' ? { durationMs } : {}),
         media: normalizedMedia!,
       };
-      await db.tx((tx) => enqueueScrobbleEvents(tx, userUuid, adapters, event));
+      const staleProviders = await db.tx((tx) =>
+        enqueueScrobbleEvents(tx, userUuid, adapters, event)
+      );
       const delivery = await flushScrobbleOutbox(
         db,
         userUuid,
         adapters,
         providerApiFor
       );
-      if (delivery.pendingProviders.length) {
+      const pendingProviders = [
+        ...new Set([...delivery.pendingProviders, ...staleProviders]),
+      ];
+      if (pendingProviders.length) {
         res.status(503).json({
           success: false,
-          error:
-            'Scrobble is durably queued for one or more tracker providers.',
+          error: staleProviders.length
+            ? 'A tracker link changed during scrobble; retry the event.'
+            : 'Scrobble is durably queued for one or more tracker providers.',
           data: {
             action,
             progress,
             syncedProviders: delivery.syncedProviders,
             ignoredProviders: delivery.ignoredProviders,
-            pendingProviders: delivery.pendingProviders,
+            pendingProviders,
             unsupportedProviders: unsupported,
           },
         });
@@ -1609,9 +2016,14 @@ export function createTrackerRouter(
           'records must contain 1–200 valid tracker records'
         );
       const db = dependencies.database();
-      const { adapters, unsupported } = linkedAdapters(user);
+      const { adapters, unsupported } = await linkedAdapters(
+        userUuid,
+        user,
+        db
+      );
       const now = Date.now();
       let accepted = 0;
+      let staleDestination = false;
       const fanoutCandidates: ReturnType<
         typeof TrackerBatchSchema.parse
       >['records'] = [];
@@ -1664,22 +2076,35 @@ export function createTrackerRouter(
             fanoutCandidates.push(record);
           }
         }
-        for (const { adapter } of adapters) {
+        for (const { adapter, authRef, generation } of adapters) {
           const providerRecords = fanoutCandidates.filter((record) => {
             if (record.origin === adapter.id) return false;
             if (record.state !== 'in_progress') return true;
             const key = `${userUuid}:${adapter.id}:${record.id}`;
             return now - (lastProviderProgressWrite.get(key) ?? 0) >= 60_000;
           });
-          await enqueueProviderRecords(
+          const enqueued = await enqueueProviderRecords(
             tx,
             userUuid,
             adapter.id,
+            authRef,
+            generation,
             providerRecords,
             now
           );
+          if (!enqueued) staleDestination = true;
         }
       });
+
+      if (staleDestination) {
+        res.status(409).json(
+          createResponse({
+            success: false,
+            detail: 'A tracker link changed during sync; retry the update.',
+          })
+        );
+        return;
+      }
 
       // Keep accepted changes retryable after transient provider failures.
       const outbox = await flushProviderOutbox(
@@ -1804,22 +2229,39 @@ export function createTrackerRouter(
           return;
         }
       }
-      const { adapters, unsupported } = linkedAdapters(user);
+      const { adapters, unsupported } = await linkedAdapters(
+        userUuid,
+        user,
+        db
+      );
       const applicable = adapters.filter(
         ({ adapter }) => adapter.id !== tombstoneForProvider?.origin
       );
       const now = Date.now();
+      let staleDestination = false;
       await db.tx(async (tx) => {
-        for (const { adapter } of applicable) {
-          await enqueueProviderRecords(
+        for (const { adapter, authRef, generation } of applicable) {
+          const enqueued = await enqueueProviderRecords(
             tx,
             userUuid,
             adapter.id,
+            authRef,
+            generation,
             [tombstoneForProvider!],
             now
           );
+          if (!enqueued) staleDestination = true;
         }
       });
+      if (staleDestination) {
+        res.status(409).json(
+          createResponse({
+            success: false,
+            detail: 'A tracker link changed during sync; retry the deletion.',
+          })
+        );
+        return;
+      }
       const outbox = await flushProviderOutbox(
         db,
         userUuid,

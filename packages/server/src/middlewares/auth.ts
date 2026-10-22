@@ -23,7 +23,13 @@ function readCookie(req: Request, name: string): string | undefined {
     if (idx === -1) continue;
     const key = part.slice(0, idx).trim();
     if (key === name) {
-      return decodeURIComponent(part.slice(idx + 1).trim());
+      try {
+        return decodeURIComponent(part.slice(idx + 1).trim());
+      } catch {
+        // Malformed client-controlled cookie encoding is an absent/invalid
+        // credential, not an exception that should escape authentication.
+        return undefined;
+      }
     }
   }
   return undefined;

@@ -37,6 +37,9 @@ export async function readBodyUpTo(
   res: Response,
   maxBytes: number
 ): Promise<CappedBody> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError('maxBytes must be a nonnegative safe integer');
+  }
   if (!res.body) return { body: Buffer.alloc(0), bytes: 0, truncated: false };
   const chunks: Buffer[] = [];
   let total = 0;
@@ -67,6 +70,9 @@ export async function readBodyCapped(
   res: Response,
   maxBytes: number
 ): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError('maxBytes must be a nonnegative safe integer');
+  }
   const declared = Number(res.headers.get('content-length') ?? 0);
   if (declared > maxBytes) {
     throw new Error(`response exceeds the ${maxBytes} byte limit`);
@@ -87,9 +93,36 @@ export async function fetchRemoteCapped(
   url: string,
   options: FetchRemoteOptions
 ): Promise<FetchRemoteResult> {
+  if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0) {
+    throw new RangeError('maxBytes must be a nonnegative safe integer');
+  }
+  if (
+    !Number.isSafeInteger(options.timeoutMs) ||
+    options.timeoutMs <= 0 ||
+    options.timeoutMs > 0xffffffff
+  ) {
+    throw new RangeError('timeoutMs must be a positive supported integer');
+  }
+  if (
+    options.maxRedirects !== undefined &&
+    (!Number.isSafeInteger(options.maxRedirects) || options.maxRedirects < 0)
+  ) {
+    throw new RangeError('maxRedirects must be a nonnegative safe integer');
+  }
+
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const signal = AbortSignal.timeout(options.timeoutMs);
   let current = url;
   for (let hop = 0; hop <= maxRedirects; hop++) {
+    let parsed: URL;
+    try {
+      parsed = new URL(current);
+    } catch {
+      throw new Error('URL refused (invalid URL)');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('URL refused (unsafe scheme)');
+    }
     if (!options.allowPrivateHosts && isUnsafeRemoteUrl(current)) {
       throw new Error('URL refused (unsafe scheme or private address)');
     }
@@ -100,7 +133,7 @@ export async function fetchRemoteCapped(
       method: options.method ?? 'GET',
       headers,
       redirect: 'manual',
-      signal: AbortSignal.timeout(options.timeoutMs),
+      signal,
     }).catch((err: unknown) => {
       throw err instanceof Error && err.cause instanceof PrivateAddressError
         ? err.cause

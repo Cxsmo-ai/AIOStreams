@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 480" role="img" aria-labelledby="title desc">
+  <title id="title">Cxsmo AIOStreams fork</title>
+  <desc id="desc">Minimal purple and cyan source paths merge into one stream on a midnight background.</desc>
+  <rect width="1600" height="480" rx="28" fill="#0b1020" />
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M320 100c260 0 270 140 540 140" stroke="#8b5cf6" stroke-width="6" opacity=".68" />
+    <path d="M260 180c260 0 300 60 600 60" stroke="#22d3ee" stroke-width="7" opacity=".9" />
+    <path d="M320 380c260 0 270-140 540-140" stroke="#8b5cf6" stroke-width="6" opacity=".68" />
+    <path d="M860 240h345" stroke="#22d3ee" stroke-width="7" opacity=".9" />
+    <path d="m1190 202 42 38-42 38" stroke="#8b5cf6" stroke-width="7" />
+  </g>
+  <g fill="#8b5cf6">
+    <circle cx="320" cy="100" r="10" />
+    <circle cx="320" cy="380" r="10" />
+  </g>
+  <circle cx="260" cy="180" r="11" fill="#22d3ee" />
+  <circle cx="860" cy="240" r="9" fill="#22d3ee" />
+</svg>

@@ -23,6 +23,11 @@ import { ConfigProfileRepository } from './config-profiles.js';
 import { ConfigSessionRepository } from './config-sessions.js';
 import { JellyfinAddressRepository } from './jellyfin-addresses.js';
 import { LinkedAccountRepository } from './linked-accounts.js';
+import {
+  changedTrackerProviderLinks,
+  clearTrackerProviderLinkState,
+  saveTrackerProviderLinkState,
+} from '../../tracking/provider-link-state.js';
 
 const APIError = constants.APIError;
 const logger = createLogger('users');
@@ -109,6 +114,9 @@ export class UserRepository {
         );
       }
       const merged = mergeConfigs(parent, config);
+      // Tracker links are credentials owned by this saved config, not
+      // inheritable settings. Never copy a parent's account reference.
+      merged.trackerProviders = config.trackerProviders;
       merged.trusted = parent.trusted || config.trusted;
       configToValidate = merged;
     }
@@ -207,7 +215,10 @@ export class UserRepository {
             config.parentConfig.uuid,
             config.parentConfig.password
           );
+          const ownTrackerProviders = config.trackerProviders;
           config = mergeConfigs(parent, config);
+          // Credentials remain scoped to the saved child config.
+          config.trackerProviders = ownTrackerProviders;
           // mergeConfigs starts from the child, so trust has to be carried
           // over by hand, the way both save paths already do it.
           config.trusted = parent.trusted || config.trusted;
@@ -384,7 +395,7 @@ export class UserRepository {
 
     const db = getDb();
     const current = await db.maybeOne<UserRow>(
-      sql`SELECT config_salt, password_hash FROM users WHERE uuid = ${uuid}`
+      sql`SELECT config, config_salt, password_hash FROM users WHERE uuid = ${uuid}`
     );
     if (!current) {
       throw new APIError(constants.ErrorCode.USER_INVALID_DETAILS);
@@ -393,6 +404,12 @@ export class UserRepository {
     if (!isValid) {
       throw new APIError(constants.ErrorCode.USER_INVALID_DETAILS);
     }
+
+    const previousConfig = await this.getRawUser(uuid, password);
+    const changedTrackerProviders = changedTrackerProviderLinks(
+      previousConfig?.trackerProviders,
+      config.trackerProviders
+    );
 
     let configToValidate: UserData = config;
     if (config.parentConfig?.uuid) {
@@ -404,6 +421,8 @@ export class UserRepository {
         throw new APIError(constants.ErrorCode.PARENT_CONFIG_UNAVAILABLE);
       }
       const merged = mergeConfigs(rawParent, config);
+      // Tracker links belong to each saved config independently.
+      merged.trackerProviders = config.trackerProviders;
       merged.trusted = rawParent.trusted || config.trusted;
       configToValidate = merged;
     }
@@ -438,9 +457,38 @@ export class UserRepository {
 
     try {
       await db.tx(async (tx) => {
-        await tx.exec(
-          sql`UPDATE users SET config = ${encryptedConfig}, updated_at = CURRENT_TIMESTAMP WHERE uuid = ${uuid}`
+        const updated = await tx.exec(
+          sql`UPDATE users SET config = ${encryptedConfig}, updated_at = CURRENT_TIMESTAMP WHERE uuid = ${uuid} AND config = ${current.config}`
         );
+        if (updated.rowCount !== 1) {
+          throw new APIError(
+            constants.ErrorCode.INTERNAL_SERVER_ERROR,
+            409,
+            'Configuration changed while saving; reload and retry'
+          );
+        }
+        for (const providerId of changedTrackerProviders) {
+          await clearTrackerProviderLinkState(tx, uuid, providerId);
+        }
+        const providerIds = new Set([
+          ...Object.keys(previousConfig?.trackerProviders ?? {}),
+          ...Object.keys(config.trackerProviders ?? {}),
+        ]);
+        for (const providerId of providerIds) {
+          const oldRef =
+            previousConfig?.trackerProviders?.[providerId]?.authRef;
+          const newRef = config.trackerProviders?.[providerId]?.authRef;
+          const changed = oldRef !== newRef;
+          if (changed || newRef !== undefined) {
+            await saveTrackerProviderLinkState(
+              tx,
+              uuid,
+              providerId,
+              newRef ?? null,
+              changed
+            );
+          }
+        }
         await JellyfinAddressRepository.syncForUuid(
           tx,
           uuid,

@@ -15,6 +15,5 @@ export const corsMiddleware = (
     'Access-Control-Expose-Headers',
     'Content-Length, Content-Range, Accept-Ranges'
   );
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   next();
 };

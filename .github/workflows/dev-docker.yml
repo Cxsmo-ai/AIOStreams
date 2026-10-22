@@ -26,10 +26,19 @@ jobs:
           INPUT_REF: ${{ inputs.ref }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
+          if [[ -z "$INPUT_REF" || "$INPUT_REF" == *$'\n'* || "$INPUT_REF" == *$'\r'* ]]; then
+            echo "Invalid Git ref" >&2
+            exit 1
+          fi
+
           if [[ "$INPUT_REF" =~ ^[0-9]+$ ]]; then
             RESOLVED_REF="refs/pull/${INPUT_REF}/merge"
             DEFAULT_TAG="pr-${INPUT_REF}"
           else
+            if ! git check-ref-format "refs/heads/${INPUT_REF}" >/dev/null; then
+              echo "Invalid Git branch name" >&2
+              exit 1
+            fi
             RESOLVED_REF="${INPUT_REF}"
             # Strip conventional prefixes (feat/, fix/, chore/, etc.), then sanitise
             STRIPPED=$(echo "$INPUT_REF" | sed -E 's|^[a-z]+/||')
@@ -39,8 +48,26 @@ jobs:
 
           FINAL_TAG="${INPUT_TAG:-$DEFAULT_TAG}"
 
-          echo "ref=${RESOLVED_REF}" >> $GITHUB_OUTPUT
-          echo "tag=${FINAL_TAG}" >> $GITHUB_OUTPUT
+          # Docker tags are limited to 128 characters and a restricted alphabet.
+          # Validate user overrides before they reach build arguments or scripts.
+          if [[ ! "$FINAL_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid Docker image tag" >&2
+            exit 1
+          fi
+
+          # Keep development builds from moving mutable release channels or
+          # colliding with stable/nightly tags published by deploy-docker.yml.
+          if [[ "$FINAL_TAG" == "latest" ||
+                "$FINAL_TAG" == "nightly" ||
+                "$FINAL_TAG" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ||
+                "$FINAL_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+-nightly$ ||
+                "$FINAL_TAG" =~ ^main-[0-9a-f]{7}$ ]]; then
+            echo "Development builds cannot overwrite release tags" >&2
+            exit 1
+          fi
+
+          printf 'ref=%s\n' "$RESOLVED_REF" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$FINAL_TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved ref: ${RESOLVED_REF}, tag: ghcr.io/${{ github.repository_owner }}/aiostreams:${FINAL_TAG}"
 
   build:
@@ -88,7 +115,10 @@ jobs:
         run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Generate metadata
-        run: node scripts/generateMetadata.cjs --channel=dev --ref=${{ needs.setup.outputs.tag }} --commit=${{ steps.commit.outputs.sha }}
+        env:
+          BUILD_REF: ${{ needs.setup.outputs.tag }}
+          BUILD_COMMIT: ${{ steps.commit.outputs.sha }}
+        run: node scripts/generateMetadata.cjs --channel=dev --ref="$BUILD_REF" --commit="$BUILD_COMMIT"
 
       - name: Build & Push
         id: build

@@ -103,7 +103,7 @@ export function TraktTrackerCard() {
               trakt: { authRef: result.authRef, enabled: true },
             },
           }));
-          setMessage('Trakt is linked to this AIOStreams profile. Playback events and enabled tracker records now merge through AIOStreams.');
+          setMessage('Trakt is linked to this saved AIOStreams configuration. Playback events and enabled tracker records now merge through AIOStreams.');
           setClientSecret('');
           setFlow(null);
           return;
@@ -258,7 +258,7 @@ export function TraktTrackerCard() {
           <Button type="button" intent="gray-outline" onClick={disconnect} loading={busy}>Disconnect</Button>
         </div>
       )}
-      <p className="text-xs text-[--muted]">Each AIOStreams profile uses its own app credentials. The secret is submitted only during device linking and then retained inside the encrypted server-side token record so Trakt refresh continues to work. Unsupported tracker-specific features are reported instead of silently claimed as synced.</p>
+      <p className="text-xs text-[--muted]">Each saved AIOStreams configuration uses its own app credentials. The secret is submitted only during device linking and then retained inside the encrypted server-side token record so Trakt refresh continues to work. Unsupported tracker-specific features are reported instead of silently claimed as synced.</p>
     </section>
   );
 }

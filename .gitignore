@@ -9,4 +9,5 @@ next-env.d.ts
 .env
 data/
 testing/
+aiostreams-*.tar
 build/

@@ -142,3 +142,11 @@ export type {
 
 export * from './metadata/service.js';
 export * from './tracking/types.js';
+export {
+  changedTrackerProviderLinks,
+  clearTrackerProviderLinkState,
+  getTrackerProviderLinkState,
+  initializeTrackerProviderLinkStates,
+  isCurrentTrackerProviderLink,
+  saveTrackerProviderLinkState,
+} from './tracking/provider-link-state.js';

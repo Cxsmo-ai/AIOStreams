@@ -917,12 +917,12 @@ function WeTrakrTrackerCard() {
             <h3 className="text-lg font-semibold">WeTrakr</h3>
           </div>
           <p className="mt-1 max-w-3xl text-sm text-[--muted]">
-            Link WeTrakr to this AIOStreams profile. AIOStreams is the single
+            Link your WeTrakr account to this saved AIOStreams configuration. AIOStreams is the single
             tracker hub Nuvio connects to: it merges enabled providers and
             forwards live playback, watch-state, list, rating, and deletion
             changes to them. While Nuvio sync is active, AIOStreams checks
             WeTrakr's change journal every five minutes; playback events are
-            forwarded immediately. Each AIOStreams profile supplies its own
+            forwarded immediately. Each saved AIOStreams configuration supplies its own
             WeTrakr app key; credentials are not saved in shareable config and
             tokens are encrypted server-side.
           </p>

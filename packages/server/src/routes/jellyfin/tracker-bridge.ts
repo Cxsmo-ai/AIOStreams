@@ -16,7 +16,7 @@ import {
   type ListChangeInput,
 } from '@aiostreams/core';
 import {
-  resolveLinkedAdapters,
+  resolveCurrentLinkedAdapters,
   enqueueScrobbleEvents,
   flushScrobbleOutbox,
   defaultProviderApiFor,
@@ -311,18 +311,34 @@ export async function syncTrackerRecordsToWatchState(
             switch (record.deletedState) {
               case 'watchlist':
               case 'favorite':
-                clearRows.push({ identity, facet: 'watchlist', externalAt: updatedAt });
+                clearRows.push({
+                  identity,
+                  facet: 'watchlist',
+                  externalAt: updatedAt,
+                });
                 break;
               case 'dropped':
-                clearRows.push({ identity, facet: 'dropped', externalAt: updatedAt });
+                clearRows.push({
+                  identity,
+                  facet: 'dropped',
+                  externalAt: updatedAt,
+                });
                 break;
               case 'rated':
-                clearRows.push({ identity, facet: 'rating', externalAt: updatedAt });
+                clearRows.push({
+                  identity,
+                  facet: 'rating',
+                  externalAt: updatedAt,
+                });
                 break;
               case 'watched':
               case 'in_progress':
               case 'play':
-                clearRows.push({ identity, facet: 'playback', externalAt: updatedAt });
+                clearRows.push({
+                  identity,
+                  facet: 'playback',
+                  externalAt: updatedAt,
+                });
                 break;
               default:
                 totalSkipped++;
@@ -499,7 +515,11 @@ export async function reportPlaybackToMergedTracker(
           : 0;
 
     const user = ctx.userData as any;
-    const { adapters } = resolveLinkedAdapters(user);
+    const { adapters } = await resolveCurrentLinkedAdapters(
+      getDb(),
+      userUuid,
+      user
+    );
 
     if (adapters.length > 0) {
       let action: 'start' | 'pause' | 'stop' = 'start';

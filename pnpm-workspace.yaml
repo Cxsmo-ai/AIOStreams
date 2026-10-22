@@ -1,6 +1,13 @@
 packages:
   - packages/*
 
+overrides:
+  compression: 1.8.2
+  # Upstream's security-only 6.x backport for Tailwind 3; GHSA version range
+  # still flags 6.1.5, although the 6.1.5 release marks it as patched.
+  postcss-selector-parser@6: 6.1.5
+  zod@3.22.0: 3.22.3
+
 allowBuilds:
   '@webos-tools/cli': false
   bcrypt: true

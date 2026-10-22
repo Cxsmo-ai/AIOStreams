@@ -48,7 +48,7 @@ export function FloppyTrackerCard() {
   const authRef = provider?.authRef;
   const enabled = provider?.enabled !== false;
   const [baseUrl, setBaseUrl] = useState(
-    provider?.baseUrl ?? 'https://floppy.deepascension.net'
+    provider?.baseUrl ?? ''
   );
   const [apiToken, setApiToken] = useState('');
   const [busy, setBusy] = useState(false);
@@ -57,7 +57,7 @@ export function FloppyTrackerCard() {
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    setBaseUrl(provider?.baseUrl ?? 'https://floppy.deepascension.net');
+    setBaseUrl(provider?.baseUrl ?? '');
     setApiToken('');
   }, [uuid, provider?.baseUrl]);
 
@@ -81,7 +81,7 @@ export function FloppyTrackerCard() {
         },
       }));
       setApiToken('');
-      setMessage('Floppy is connected to this AIOStreams profile. Tracker refresh will merge its library, ratings, history and resume positions with your other enabled providers.');
+      setMessage('Floppy is connected to this saved AIOStreams configuration. Tracker refresh will merge its supported library, ratings, history and resume data with your other enabled providers.');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not connect Floppy.');
     } finally {
@@ -103,7 +103,7 @@ export function FloppyTrackerCard() {
         delete trackerProviders.floppy;
         return { ...previous, trackerProviders };
       });
-      setMessage('Floppy was disconnected from this AIOStreams profile.');
+      setMessage('Floppy was disconnected from this saved AIOStreams configuration.');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not disconnect Floppy.');
     } finally {
@@ -170,7 +170,7 @@ export function FloppyTrackerCard() {
 
       {authRef ? (
         <div className="space-y-3">
-          <p className="text-sm text-green-300">Connected to {provider?.baseUrl ?? 'Floppy'} for this AIOStreams profile.</p>
+          <p className="text-sm text-green-300">Connected to {provider?.baseUrl ?? 'Floppy'} for this saved AIOStreams configuration.</p>
           <div className="flex flex-wrap gap-2">
             <Button type="button" intent="primary" onClick={() => void syncNow()} disabled={syncing || !enabled} loading={syncing}>
               Sync all trackers
@@ -204,7 +204,7 @@ export function FloppyTrackerCard() {
               className="w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2"
             />
           </label>
-          <p className="text-xs text-gray-400">The token is encrypted in AIOStreams server storage and scoped to this profile; it is not added to addon URLs or config exports.</p>
+          <p className="text-xs text-gray-400">Use your own Floppy API token. It is encrypted in AIOStreams server storage and linked to this saved configuration; it is not added to addon URLs or config exports. Other saved configurations must connect their own Floppy account.</p>
           <Button type="button" intent="primary" onClick={() => void connect()} disabled={busy || !apiToken.trim()} loading={busy}>
             Connect Floppy
           </Button>
