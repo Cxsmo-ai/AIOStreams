@@ -19,7 +19,8 @@ import {
   type PosterLine,
   type PosterSize,
 } from '../lib/settings';
-import { RowScroller, ScrollRoot, watch } from '../lib/use-in-view';
+import { onScreen, RowScroller, ScrollRoot, watch } from '../lib/use-in-view';
+import { keyboardFocus } from '../lib/input';
 import { easeLayers, GLIDE_LAYERS } from '../lib/input/glide';
 
 /**
@@ -53,16 +54,19 @@ const reducedMotion =
     : null;
 
 // Script animations, as CSS ones send each card's start and end through the
-// page's event handling.
+// page's event handling. Only cards on screen: an unseen start or end still
+// costs a frame.
 const CARD_IN = Array.from(
   { length: 20 },
-  (_, i) => (el: HTMLElement | null) =>
-    void el?.animate(
+  (_, i) => (el: HTMLElement | null) => {
+    if (!el || !onScreen(el)) return;
+    el.animate(
       reducedMotion?.matches
         ? { opacity: [0, 1] }
         : { opacity: [0, 1], transform: ['translateY(8px)', 'none'] },
       { duration: 300, delay: i * 25, easing: 'ease-out', fill: 'backwards' }
-    )
+    );
+  }
 );
 
 /** Cards fade in a little after one another, a page at a time. */
@@ -219,6 +223,9 @@ const savedScroll = new Map<string, number>();
 /** The room after a focused card in a TV row; a card's padding leaves the room before. */
 const ROOM = 16;
 
+/** Keys, a remote or a gamepad keep focus where a row's first card starts, until its end. */
+const anchored = () => !!keyboardFocus();
+
 /**
  * A TV's or touch screen's row: a plain scroller, as Embla's measuring and
  * scripted easing are too much for a TV's CPU and stutter a swipe. Focus jumps
@@ -272,8 +279,13 @@ function NativeRow({
       const left = startOf(row, el) + startOf(card, row);
       const right = left + card.offsetWidth;
       const from = scrolled(el);
-      const to =
-        left < from
+      const to = anchored()
+        ? Math.min(
+            startOf(card, row) -
+              startOf(row.firstElementChild as HTMLElement, row),
+            el.scrollWidth - el.clientWidth
+          )
+        : left < from
           ? left
           : right + ROOM > from + el.clientWidth
             ? Math.min(right + ROOM - el.clientWidth, left)
@@ -432,16 +444,14 @@ export function MediaRow({
       {title ? (
         <h2
           data-ui="media-row-title"
-          data-nav-tv="skip"
+          data-nav="skip"
           // Room inside the truncating box for a link's focus outline.
           className="-m-1 min-w-0 truncate p-1 text-lg font-semibold sm:text-xl"
         >
           {title}
         </h2>
       ) : (
-        <div data-nav-tv="skip" className="min-w-0">
-          {header}
-        </div>
+        <div className="min-w-0">{header}</div>
       )}
       <div className="flex flex-none items-center gap-2">
         {action && (
@@ -461,6 +471,7 @@ export function MediaRow({
       data-shape={shape}
       data-nav-group
       data-nav-box
+      data-nav-resume
       style={{ '--poster-text': posterText(lines) } as React.CSSProperties}
     >
       {native ? (
@@ -480,14 +491,15 @@ export function MediaRow({
         <Carousel
           opts={{ align: 'start', dragFree: true, startIndex: start }}
           restoreKey={restoreKey}
+          anchor={anchored}
         >
           {onEndReached && <EndWatcher onEnd={onEndReached} />}
           {onView && <ViewWatcher onView={onView} />}
           {head}
           {/* Embla counts the last card's margin as the row's end gap. */}
           <CarouselContent
-            contentClass="-me-4 lg:-me-10"
-            className="mt-3 [&>*:last-child]:me-4"
+            contentClass="-mb-1.5 -me-4 -ms-1.5 pb-1.5 lg:-me-10"
+            className="mt-3 ps-1.5 [&>*:last-child]:me-4"
           >
             {cards}
           </CarouselContent>

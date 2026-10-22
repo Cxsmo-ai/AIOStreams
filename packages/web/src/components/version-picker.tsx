@@ -46,13 +46,20 @@ import {
 import { chosenPlayer } from '../lib/playback/player-choice';
 import { party } from '../lib/party/party';
 import {
+  isNotice,
   lastVersions,
-  noticeSources,
+  placedNotices,
   playableSources,
   usePlay,
 } from '../lib/playback/play';
 import { currentHost } from '../lib/hosts';
-import { focusOn, keyboardFocus, useRestoreFocus } from '../lib/input';
+import {
+  focusOn,
+  keyboardFocus,
+  tab,
+  tabList,
+  useRestoreFocus,
+} from '../lib/input';
 import { clock, itemSubtitle, itemTitle, ticksToMs } from '../lib/format';
 import { cn } from '@aiostreams/ui/core/styling';
 import { backdropUrl, landscapeUrl } from '../lib/images';
@@ -69,6 +76,7 @@ interface Request {
   startMs: number;
   /** From the player: the version playing, which a pick replaces. */
   playing?: string;
+  replace?: boolean;
   /** A pick downloads `items`, which start with `item`, or replaces `replace`'s version. */
   download?: { items: BaseItemDto[]; replace?: Download };
 }
@@ -76,8 +84,19 @@ interface Request {
 interface PickerValue {
   /** Lists the item's versions; nothing is resolved until this is called. */
   open(item: BaseItemDto, opts?: { startMs?: number; playing?: string }): void;
-  /** What Play does (see `useStraightPlay`); a hold does the other. */
-  play(item: BaseItemDto, opts?: { startMs?: number; held?: boolean }): void;
+  /**
+   * What Play does (see `useStraightPlay`); a hold does the other. A `version`
+   * plays straight, in place of the one remembered.
+   */
+  play(
+    item: BaseItemDto,
+    opts?: {
+      startMs?: number;
+      held?: boolean;
+      version?: string;
+      replace?: boolean;
+    }
+  ): void;
   /**
    * Downloads the items, the first one's pick deciding the rest, or with
    * `replace` gives that download another version.
@@ -158,9 +177,14 @@ export function VersionPickerProvider({
 
   const value = React.useMemo<PickerValue>(() => {
     // The version last played when resuming, else the first; the list when none plays.
-    const playStraight = async (item: BaseItemDto, startMs: number) => {
+    const playStraight = async (
+      item: BaseItemDto,
+      startMs: number,
+      opts: { version?: string; replace?: boolean } = {}
+    ) => {
       const { queryClient, infoOptions, playVersion } = latest.current;
-      const last = rememberedVersion(item, startMs);
+      const { replace } = opts;
+      const last = opts.version ?? rememberedVersion(item, startMs);
       // The player page finds the version itself, and lists them if it is gone.
       if (
         last &&
@@ -168,7 +192,7 @@ export function VersionPickerProvider({
         chosenPlayer().kind !== 'link' &&
         party.state()?.status !== 'live'
       ) {
-        navigate(to.play(item.Id!, last, startMs));
+        navigate(to.play(item.Id!, last, startMs), { replace });
         return;
       }
       const notice = toast.loading(t`Finding a version…`);
@@ -176,15 +200,16 @@ export function VersionPickerProvider({
         const info = await queryClient.fetchQuery(infoOptions(item.Id!));
         const sources = playableSources(info);
         const source = sources.find((s) => s.Id === last) ?? sources[0];
-        if (!source) setRequest({ item, startMs });
+        if (!source) setRequest({ item, startMs, replace });
         else
           await playVersion(item, {
             source,
             startMs,
+            replace,
             onExternal: () => setExternal(item),
           });
       } catch {
-        setRequest({ item, startMs });
+        setRequest({ item, startMs, replace });
       } finally {
         setTimeout(() => toast.dismiss(notice));
       }
@@ -198,15 +223,21 @@ export function VersionPickerProvider({
         }),
       play: (item, opts) => {
         const startMs = opts?.startMs ?? 0;
+        const version = opts?.version;
+        const replace = opts?.replace;
         // Holding still lists the versions.
         const local = !opts?.held && latest.current.downloaded(item);
-        if (local && chosenPlayer().kind !== 'link') {
-          navigate(to.play(item.Id!, local.source!.Id!, startMs));
+        if (
+          local &&
+          chosenPlayer().kind !== 'link' &&
+          (!version || version === local.source!.Id)
+        ) {
+          navigate(to.play(item.Id!, local.source!.Id!, startMs), { replace });
           return;
         }
-        if (latest.current.straight(item, startMs) !== !!opts?.held)
-          void playStraight(item, startMs);
-        else setRequest({ item, startMs });
+        if (version || latest.current.straight(item, startMs) !== !!opts?.held)
+          void playStraight(item, startMs, { version, replace });
+        else setRequest({ item, startMs, replace });
       },
       download: (items, opts) => {
         if (!items.length || !downloadsHost()) return;
@@ -226,6 +257,7 @@ export function VersionPickerProvider({
   const open = !!request;
   // A sheet over the player, or where a short screen leaves a dialog no room.
   const short = useMediaQuery('(max-height: 500px)');
+  const touch = useMediaQuery('(pointer: coarse)') && !currentHost().tv;
   // Kept while it closes, so it leaves the way it came.
   const [sheet, setSheet] = React.useState(false);
   const wantSheet = !!request?.playing || short;
@@ -252,6 +284,7 @@ export function VersionPickerProvider({
           data-name="versions"
           open={open}
           onOpenChange={(open) => !open && setRequest(null)}
+          onOpenAutoFocus={touch ? focusSelf : undefined}
           onCloseAutoFocus={restoreFocus}
           title={item ? itemTitle(item) : t`Versions`}
           headerClass="sr-only"
@@ -268,6 +301,7 @@ export function VersionPickerProvider({
           data-name="versions"
           open={open}
           onOpenChange={(open) => !open && setRequest(null)}
+          onOpenAutoFocus={touch ? focusSelf : undefined}
           onCloseAutoFocus={restoreFocus}
           title={item ? itemTitle(item) : undefined}
           description={
@@ -289,6 +323,12 @@ export function VersionPickerProvider({
 
 const FILTER_FROM = 8;
 
+/** Opens with no field focused, so a phone's keyboard stays down. */
+function focusSelf(e: Event) {
+  e.preventDefault();
+  (e.target as HTMLElement).focus();
+}
+
 /** Versions drawn at a time; more come as the list nears its end. */
 const PAGE = 40;
 
@@ -306,11 +346,12 @@ function Versions({
 }) {
   const { client } = useSession();
   const { item } = request;
+  const purpose = request.download ? 'download' : undefined;
   const info = usePlaybackInfo(
     item.Id!,
-    request.playing ? { kept: true } : { listing: true }
+    request.playing ? { kept: true } : { listing: true, purpose }
   );
-  const refresh = useRefreshPlaybackInfo(item.Id!);
+  const refresh = useRefreshPlaybackInfo(item.Id!, purpose);
   const refreshing = info.isFetching || refresh.isPending;
   const canRefresh = useFeature('refreshVersions');
   const play = usePlay();
@@ -351,7 +392,10 @@ function Versions({
   const chosen = quick.find((q) => q.name === quickName);
   const typed = React.useMemo(() => compileQuery(filter), [filter]);
   const filtered = !!filter.trim() || !!chosen;
-  const notices = noticeSources(info.data);
+  const notices = React.useMemo(
+    () => placedNotices(info.data, sources),
+    [info.data, sources]
+  );
   const shown = sources.filter((s) => {
     const text = texts.get(s)!;
     return (!chosen || !!chosen.test?.(text)) && !!typed?.(text);
@@ -360,6 +404,13 @@ function Versions({
   const [paged, setPaged] = React.useState({ key: pageKey, limit: PAGE });
   const limit = paged.key === pageKey ? paged.limit : PAGE;
   const partial = limit < shown.length;
+  const page = shown.slice(0, limit);
+  const rows = filtered
+    ? page
+    : [
+        ...(notices.get(null) ?? []),
+        ...page.flatMap((s) => [s, ...(notices.get(s) ?? [])]),
+      ];
   const more = React.useRef<HTMLDivElement>(null);
   const art =
     backdropUrl(client, item, { maxWidth: 896 }) ??
@@ -428,7 +479,7 @@ function Versions({
     play(item, {
       source,
       startMs,
-      replace: !!request.playing,
+      replace: !!request.playing || !!request.replace,
       onExternal,
     }).catch((e: Error) => toast.error(e.message));
   };
@@ -448,7 +499,11 @@ function Versions({
       })
     : t`Finding versions`;
   const others = download ? download.items.length - 1 : 0;
-  const filtering = sources.length >= FILTER_FROM && !currentHost().tv;
+  const phoneLandscape = useMediaQuery(
+    '(max-height: 500px) and (pointer: coarse)'
+  );
+  const filtering =
+    sources.length >= FILTER_FROM && !currentHost().tv && !phoneLandscape;
   const loadError = info.error?.message ?? '';
   const searchAgain = canRefresh && (
     <Tooltip
@@ -484,20 +539,16 @@ function Versions({
     <div
       data-ui="versions-quick"
       data-nav-group
-      data-nav-enter="[role=tab][aria-selected=true]"
-      role="tablist"
+      {...tabList}
       aria-label={t`Quick filters`}
       className="-m-1 flex gap-1.5 overflow-x-auto p-1 [scrollbar-width:none]"
     >
       <Button
         data-ui="versions-quick-filter"
-        role="tab"
         size="sm"
         intent={chosen ? 'gray-subtle' : 'white'}
         className="flex-none rounded-full"
-        aria-selected={!chosen}
-        tabIndex={chosen ? -1 : 0}
-        onFocus={() => setQuickName(null)}
+        {...tab(!chosen, () => setQuickName(null), 0)}
         onClick={() => setQuickName(null)}
       >
         <Trans>All</Trans>
@@ -506,16 +557,13 @@ function Versions({
         <Button
           key={q.name}
           data-ui="versions-quick-filter"
-          role="tab"
           size="sm"
           intent={chosen === q ? 'white' : 'gray-subtle'}
           className="flex-none rounded-full"
-          aria-selected={chosen === q}
-          tabIndex={chosen === q ? 0 : -1}
+          {...tab(chosen === q, () => setQuickName(q.name), 0)}
           data-count={q.count}
           data-empty={!q.count || undefined}
           disabled={!q.count && chosen !== q}
-          onFocus={() => setQuickName(q.name)}
           onClick={() => setQuickName(q.name)}
         >
           {q.name}
@@ -691,7 +739,9 @@ function Versions({
           </p>
         )}
 
-        {shown.slice(0, limit).map((source) => {
+        {rows.map((source) => {
+          if (isNotice(source))
+            return <Notice key={source.Id} notice={source} />;
           const link = directUrl(client, item.Id!, source);
           const actions = [
             ...(!download && downloadable(source)
@@ -870,9 +920,6 @@ function Versions({
         })}
 
         {partial && <div ref={more} aria-hidden className="h-px" />}
-        {!filtered &&
-          !partial &&
-          notices.map((notice) => <Notice key={notice.Id} notice={notice} />)}
       </div>
     </>
   );

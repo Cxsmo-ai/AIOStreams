@@ -62,7 +62,7 @@ function assertNotForeign(applied: Map<number, string>): void {
 }
 
 /**
- * Upstream migrations are assigned fork-local IDs 900012–900039 to preserve
+ * Upstream migrations are assigned fork-local IDs 900012–900040 to preserve
  * IDs already published by this fork. An upstream database may therefore
  * record the same stable migration name under its original numeric ID.
  * Custom migrations retain strict ID+name identity because some historical
@@ -75,7 +75,7 @@ function isMigrationApplied(
   if (applied.get(migration.id) === migration.name) return true;
   return (
     migration.id >= 900012 &&
-    migration.id <= 900039 &&
+    migration.id <= 900040 &&
     [...applied.values()].includes(migration.name)
   );
 }
@@ -162,7 +162,10 @@ export async function runMigrations(driver: DbDriver): Promise<void> {
     // v2 detection: if baseline isn't marked applied but the v2 tables
     // are already present, mark it applied without re-running.
     const baseline = MIGRATIONS[0];
-    if (!isMigrationApplied(baseline, appliedRows) && (await tableExists(driver, 'users'))) {
+    if (
+      !isMigrationApplied(baseline, appliedRows) &&
+      (await tableExists(driver, 'users'))
+    ) {
       logger.info(
         `Detected pre-existing v2 schema; marking baseline migration as applied`
       );
@@ -174,7 +177,9 @@ export async function runMigrations(driver: DbDriver): Promise<void> {
       appliedRows.set(baseline.id, baseline.name);
     }
 
-    const pending = MIGRATIONS.filter((m) => !isMigrationApplied(m, appliedRows));
+    const pending = MIGRATIONS.filter(
+      (m) => !isMigrationApplied(m, appliedRows)
+    );
     if (pending.length === 0) {
       logger.debug('No pending migrations');
       return;

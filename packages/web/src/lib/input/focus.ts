@@ -92,6 +92,13 @@ export function ownsKey(el: Element | null, input: string): boolean {
     el.readOnly
   )
     return false;
+  // Up and down leave a many-line field from its first and last line.
+  if (el instanceof HTMLTextAreaElement && VERTICAL.includes(input)) {
+    const { value, selectionStart, selectionEnd } = el;
+    return input === 'ArrowUp'
+      ? value.slice(0, selectionStart).includes('\n')
+      : value.slice(selectionEnd).includes('\n');
+  }
   if (
     el.matches(
       'textarea, select, [contenteditable=""], [contenteditable=true], [role=spinbutton]'
@@ -115,9 +122,8 @@ function scope(): Element {
 /** Out of reach by its markup alone, before anything is measured. */
 const ruledOut = (el: HTMLElement) =>
   el.matches(
-    ':disabled, input[type=hidden], [contenteditable=false], [role=tabpanel], [data-nav=skip], [tabindex="-1"]:not([role=tab]):not([role=radio])'
-  ) ||
-  !!el.closest('[inert], [aria-hidden=true], [data-tv] [data-nav-tv=skip]');
+    ':disabled, input[type=hidden], [contenteditable=false], [role=tabpanel], [tabindex="-1"]:not([role=tab]):not([role=radio])'
+  ) || !!el.closest('[inert], [aria-hidden=true], [data-nav=skip]');
 
 /** A focusable standing for its whole card (`data-nav-card`) is measured as its `data-nav-box`. */
 const rectOf = (el: HTMLElement) => {
@@ -381,7 +387,8 @@ function pick(
     if (!canFocus(way.el, way.rect)) continue;
     const bar = barOf(way.el);
     if (bar === home) {
-      if (way.inLine) return way.el;
+      if (way.inLine)
+        return (!sideways && rowBefore(scored, way, rect, dir, home)) || way.el;
       if (sideways) beside ||= way.off <= rect.height;
       else if (!other) return inNearestRow(scored, way, home);
     } else if (inView(way.el)) {
@@ -426,6 +433,43 @@ function inNearestRow(
 }
 
 /**
+ * The best of the nearest `data-nav-group` whose box lies across the way before
+ * `to`, as a short row's cards may all sit to one side of focus.
+ */
+function rowBefore(
+  ways: Candidate[],
+  to: Candidate,
+  rect: DOMRect,
+  dir: Direction,
+  home: Element | null
+): HTMLElement | null {
+  const seen = new Set<Element>();
+  let row: { group: Element; gap: number } | null = null;
+  for (const way of ways) {
+    if (way.gap >= to.gap) continue;
+    const group = way.el.closest(GROUP);
+    if (!group || seen.has(group) || group.contains(to.el)) continue;
+    seen.add(group);
+    const box = settled(group, group.getBoundingClientRect());
+    const across = distance(rect, box, dir);
+    if (!across?.inLine || across.gap < 0) continue;
+    const past = distance(box, to.rect, dir);
+    if (!past || past.gap < 0) continue;
+    if (!row || across.gap < row.gap) row = { group, gap: across.gap };
+  }
+  if (!row) return null;
+  const { group } = row;
+  return (
+    ways.find(
+      (way) =>
+        group.contains(way.el) &&
+        barOf(way.el) === home &&
+        canFocus(way.el, way.rect)
+    )?.el ?? null
+  );
+}
+
+/**
  * How far a bar, or part of the page, lies wholly that way from the one focus
  * leaves, which focus crosses into only then.
  */
@@ -466,8 +510,9 @@ function waitsFor(
 
 /**
  * Focus coming into a box from outside lands on what its `data-nav-enter`
- * selector names. From outside any group, a `data-nav-group` is entered where
- * focus last was there, else at the start of the row it lands in.
+ * selector names. From outside any group, or into a `data-nav-resume` row from
+ * anywhere, a `data-nav-group` is entered where focus last was there, else at
+ * the start of the row it lands in.
  */
 function entry(to: HTMLElement, from: HTMLElement): HTMLElement {
   const box = to.closest<HTMLElement>('[data-nav-enter]');
@@ -476,8 +521,9 @@ function entry(to: HTMLElement, from: HTMLElement): HTMLElement {
     if (named && canFocus(named)) return named;
   }
   const group = to.closest(GROUP);
+  if (!group || group.contains(from)) return to;
   // From another group, as from one row to the next, the one beside it.
-  if (!group || group.contains(from) || from.closest(GROUP)) return to;
+  if (from.closest(GROUP) && !to.closest('[data-nav-resume]')) return to;
   const last = lastIn.get(group);
   if (last && group.contains(last) && canFocus(last)) return last;
   const row = rectOf(to);
@@ -571,13 +617,16 @@ export function startOf(root: ParentNode = document): HTMLElement | null {
   return el && canFocus(el) ? el : null;
 }
 
-/** The page's start, else the first thing on screen, in its main content where it has one. */
+/** The page's start, else the first thing on screen in its main content, before any navigation there. */
 function first(root: Element): HTMLElement | null {
   const start = startOf(root);
   if (start) return start;
   const area = root.querySelector('main') ?? root;
   const all = (el: Element) => [...el.querySelectorAll<HTMLElement>(FOCUSABLE)];
   return (
+    all(area).find(
+      (el) => onScreen(el) && canFocus(el) && !el.closest('nav')
+    ) ??
     all(area).find((el) => onScreen(el) && canFocus(el)) ??
     all(root).find((el) => canFocus(el)) ??
     null

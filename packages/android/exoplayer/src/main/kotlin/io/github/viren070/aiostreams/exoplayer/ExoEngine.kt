@@ -27,6 +27,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.util.Util
 import androidx.media3.datasource.DataSourceUtil
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
@@ -63,6 +64,7 @@ import io.github.viren070.aiostreams.playback.PlayerTrack
 import io.github.viren070.aiostreams.playback.Skip
 import io.github.viren070.aiostreams.playback.Sound
 import io.github.viren070.aiostreams.playback.Style
+import io.github.viren070.aiostreams.playback.TimeRange
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -123,7 +125,10 @@ class ExoEngine(private val context: Context) :
 
     @Volatile
     private var shown = false
-    private val texts = TextTracks()
+    private val texts = TextTracks { delayUs }
+    private val subtitleLines = SubtitleLines()
+    /** The file's own subtitle whose lines the page asked for. */
+    private var reference: Int? = null
     private var shownCues: List<Cue> = emptyList()
 
     // Read on the playback thread too.
@@ -171,7 +176,7 @@ class ExoEngine(private val context: Context) :
         cache.onMemoryShort = { ass.setCacheLimit(SHORT_ASS_CACHE_MB) }
         val extractors = Extractors(
             readBack = { readBack },
-            sink = { SubtitleSink(ass.sink(), texts.sink()) },
+            sink = { subtitleLines.sink(SubtitleSink(ass.sink(), texts.sink())) },
             route = { dolbyVisionRoute(it, caps, useDolbyVision) },
             onRoute = { codecs, route -> dolbyVision = codecs to route },
             onSeekMap = { map ->
@@ -306,6 +311,12 @@ class ExoEngine(private val context: Context) :
         addSubtitle(url, "select", title, language)
     }
 
+    override fun watchSubtitleLines(track: String?) = post {
+        reference = track?.toIntOrNull()
+        subtitleLines.watch(referenceKey())
+        sendLines()
+    }
+
     override fun setSkips(skips: List<Skip>) = post {
         this.skips = skips
         updateSkips()
@@ -376,11 +387,17 @@ class ExoEngine(private val context: Context) :
             }
             for ((key, value) in ass.stats()) put(key, value)
             for ((key, value) in cache.stats()) put(key, value)
+            if (cache.caching && seekMap?.isSeekable == true) {
+                val position = player.currentPosition.toDouble()
+                val held = reported.buffered?.find { position >= it.startMs && position <= it.endMs }
+                put("cacheBehindMs", held?.let { position - it.startMs } ?: 0.0)
+            }
         }
     }
 
     override fun release() {
         main.post {
+            main.removeCallbacks(poll)
             player.release()
             cache.release()
             closeFonts()
@@ -409,6 +426,7 @@ class ExoEngine(private val context: Context) :
         seekMap = null
         ass.reset()
         texts.reset()
+        subtitleLines.reset()
         readBack = if (options.none) null else Extractors.ANY_TRACK
         listener?.onEvent("start")
         state(PlayerState(idle = false))
@@ -423,6 +441,7 @@ class ExoEngine(private val context: Context) :
             .build()
         player.setMediaItem(MediaItem.fromUri(request.url), request.startMs.toLong())
         player.prepare()
+        updatePolling()
     }
 
     private fun seekTo(ms: Long, parameters: SeekParameters) {
@@ -432,7 +451,7 @@ class ExoEngine(private val context: Context) :
         seeking = true
         restarting = true
         state(PlayerState(seeking = true))
-        reportPosition()
+        updatePolling()
     }
 
     /** Automatic skips are held from a little past their start, as the page skips once playback is in them. */
@@ -724,6 +743,7 @@ class ExoEngine(private val context: Context) :
         reportTracks()
         reportChapters()
         showSubtitles()
+        subtitleLines.watch(referenceKey())
     }
 
     private fun reportTracks() {
@@ -789,32 +809,93 @@ class ExoEngine(private val context: Context) :
         audioTrackConfig: AudioSink.AudioTrackConfig,
     ) {
         audioTrack = audioTrackConfig
+        state(PlayerState(passthrough = !Util.isEncodingLinearPcm(audioTrackConfig.encoding)))
     }
 
+    /** Paused or waiting, polls go on while the cache fills, until nothing changes. */
     private val poll = object : Runnable {
         override fun run() {
-            reportPosition()
-            main.postDelayed(this, POLL_MS)
+            val grew = reportPosition()
+            idlePolls = if (player.isPlaying || grew) 0 else idlePolls + 1
+            if (url != null && idlePolls < IDLE_POLLS) main.postDelayed(this, pollMs())
         }
     }
 
+    private var idlePolls = 0
+
+    private fun pollMs() = if (player.isPlaying) POLL_MS else IDLE_POLL_MS
+
     private fun updatePolling() {
         main.removeCallbacks(poll)
-        if (player.isPlaying) main.postDelayed(poll, POLL_MS)
+        idlePolls = 0
+        if (url != null) main.postDelayed(poll, pollMs())
         reportPosition()
     }
 
-    private fun reportPosition() {
-        if (url == null) return
+    /** True when what's buffered changed. */
+    private fun reportPosition(): Boolean {
+        if (url == null) return false
         val stalled = loaded && !seeking && player.playWhenReady && player.playbackState == Player.STATE_BUFFERING
         cache.setPlayer(player.totalBufferedDuration * 1000, player.isPlaying && !seeking || stalled)
         texts.trimHidden(text, player.currentPosition * 1000)
-        state(
-            PlayerState(
-                positionMs = player.currentPosition.toDouble(),
-                bufferedMs = player.bufferedPosition.toDouble(),
-            ),
-        )
+        sendLines()
+        val buffered = buffered()
+        val grew = buffered != reported.buffered
+        state(PlayerState(positionMs = player.currentPosition.toDouble(), buffered = buffered))
+        return grew
+    }
+
+    private fun buffered(): List<TimeRange> {
+        val spans = mutableListOf(player.currentPosition * 1000 to player.bufferedPosition * 1000)
+        val map = seekMap?.takeIf { it.isSeekable }
+        val held = cache.held()
+        val durationUs = map?.durationUs?.takeIf { it > 0 }
+        if (map != null && held != null && durationUs != null) {
+            // Runs past the last seek point hold the index and other data after the media.
+            val last = map.getSeekPoints(durationUs).first.position
+            for (run in held.runs) {
+                if (run.first < last) spans += timeAt(map, run.first, durationUs, held.length) to timeAt(map, run.last + 1, durationUs, held.length)
+            }
+        }
+        val ranges = mutableListOf<TimeRange>()
+        for ((startUs, endUs) in spans.filter { it.second > it.first }.sortedBy { it.first }) {
+            val start = (startUs / 1000).toDouble()
+            val end = (endUs / 1000).toDouble()
+            val previous = ranges.lastOrNull()
+            if (previous != null && start <= previous.endMs) ranges[ranges.lastIndex] = previous.copy(endMs = max(previous.endMs, end))
+            else ranges += TimeRange(start, end)
+        }
+        return ranges
+    }
+
+    private fun timeAt(map: SeekMap, position: Long, durationUs: Long, length: Long): Long {
+        if (length > 0 && position >= length) return durationUs
+        var low = 0L
+        var high = durationUs
+        while (high - low > SEARCH_US) {
+            val mid = (low + high) ushr 1
+            if (map.getSeekPoints(mid).first.position <= position) low = mid else high = mid
+        }
+        val before = map.getSeekPoints(low).first
+        if (position <= before.position) return before.timeUs
+        val next = map.getSeekPoints(before.timeUs + 1)
+        val (afterUs, afterPosition) = when {
+            next.second != next.first -> next.second.timeUs to next.second.position
+            length > 0 -> durationUs to length
+            else -> return before.timeUs
+        }
+        if (afterPosition <= before.position) return before.timeUs
+        val fraction = (position - before.position).toDouble() / (afterPosition - before.position)
+        return before.timeUs + (fraction * (afterUs - before.timeUs)).toLong()
+    }
+
+    /** The reader's name for [reference]. */
+    private fun referenceKey() = reference?.let { tracks.format("sub", it) }?.id?.substringAfter(':')
+
+    private fun sendLines() {
+        val track = reference ?: return
+        val read = subtitleLines.take()
+        if (read.isNotEmpty()) listener?.onSubtitleLines(track.toString(), read)
     }
 
     private fun state(update: PlayerState) {
@@ -838,6 +919,9 @@ class ExoEngine(private val context: Context) :
     private companion object {
         const val TAG = "exo"
         const val POLL_MS = 250L
+        const val IDLE_POLL_MS = 1000L
+        const val IDLE_POLLS = 10
+        const val SEARCH_US = 1000L
         const val FRAMES_STOPPED_NS = 100_000_000L
         const val VOLUME_MAX = 130.0
         const val SMALL_FONTS_BYTES = 8L shl 20
@@ -845,6 +929,7 @@ class ExoEngine(private val context: Context) :
         const val SKIP_REACTION_MS = 2_000.0
         const val SMALL_ASS_CACHE_MB = 32
         const val SHORT_ASS_CACHE_MB = 8
+        const val REASON_CHARS = 200
 
         /** The layouts the page offers. */
         val CHANNELS = mapOf("stereo" to 2, "5.1" to 6, "7.1" to 8)
@@ -886,9 +971,18 @@ class ExoEngine(private val context: Context) :
             undecodable(error)?.let { return it }
             val causes = generateSequence<Throwable>(error) { it.cause }.toList()
             if (causes.any { it is UnrecognizedInputFormatException }) return "ExoPlayer doesn't recognise this file's format"
+            val code = error.errorCodeName.removePrefix("ERROR_CODE_").lowercase().replace('_', ' ')
             val reason = causes.filterIsInstance<ParserException>().firstNotNullOfOrNull { reasonOf(it) }
-                ?: error.errorCodeName.removePrefix("ERROR_CODE_").lowercase().replace('_', ' ')
+                ?: listOfNotNull(code, unexpected(error, causes)).joinToString(": ")
             return "ExoPlayer can't play this file: $reason"
+        }
+
+        /** The words of an exception Media3 didn't expect, which its code says nothing of. */
+        fun unexpected(error: PlaybackException, causes: List<Throwable>): String? {
+            if (error.errorCode !in UNEXPECTED) return null
+            return causes.drop(1)
+                .firstNotNullOfOrNull { cause -> cause.message?.lineSequence()?.first()?.trim()?.takeIf { it.isNotEmpty() } }
+                ?.take(REASON_CHARS)
         }
 
         /** The parser's message, in plain words where it's a known one. */
@@ -937,5 +1031,7 @@ class ExoEngine(private val context: Context) :
             PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
             PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
         )
+
+        val UNEXPECTED = setOf(PlaybackException.ERROR_CODE_UNSPECIFIED, PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK)
     }
 }

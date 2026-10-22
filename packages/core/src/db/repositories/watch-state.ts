@@ -352,8 +352,45 @@ export class WatchStateRepository {
               sink_id = excluded.sink_id,
               external_at = excluded.external_at,
               sort_at = excluded.sort_at,
-              match_key = COALESCE(excluded.match_key, watch_state.match_key)`
+              match_key = COALESCE(excluded.match_key, watch_state.match_key)
+            WHERE watch_state.origin = 'import'
+               OR COALESCE(watch_state.updated_at, 0) <= COALESCE(excluded.external_at, 0)`
       );
+    }
+  }
+
+  /** Clear only the merged-tracker-owned facet, never newer/local Jellyfin state. */
+  static async clearImportedFacet(
+    scope: WatchScope,
+    identity: WatchIdentity,
+    facet: 'playback' | 'watchlist' | 'dropped' | 'rating',
+    sinkId: string,
+    externalAt: number,
+    db: DbDriver = getDb()
+  ): Promise<void> {
+    const common = sql`uuid = ${scope.uuid} AND persona = ${scope.persona}
+      AND item_key = ${identity.itemKey}`;
+    const now = Date.now();
+    if (facet === 'playback') {
+      await db.exec(sql`UPDATE watch_state SET played = 0, position_ms = 0,
+        last_played_at = NULL, updated_at = ${now}
+        WHERE ${common} AND origin = 'import' AND sink_id = ${sinkId}
+          AND COALESCE(external_at, 0) <= ${externalAt}`);
+    } else if (facet === 'watchlist') {
+      await db.exec(sql`UPDATE watch_state SET favorite = 0,
+        favorite_sink_id = NULL, favorite_at = NULL, updated_at = ${now}
+        WHERE ${common} AND favorite_sink_id = ${sinkId}
+          AND COALESCE(favorite_at, 0) <= ${externalAt}`);
+    } else if (facet === 'dropped') {
+      await db.exec(sql`UPDATE watch_state SET dropped = 0,
+        dropped_sink_id = NULL, dropped_at = NULL, updated_at = ${now}
+        WHERE ${common} AND dropped_sink_id = ${sinkId}
+          AND COALESCE(dropped_at, 0) <= ${externalAt}`);
+    } else {
+      await db.exec(sql`UPDATE watch_state SET rating = NULL,
+        rating_sink_id = NULL, rating_at = NULL, updated_at = ${now}
+        WHERE ${common} AND rating_sink_id = ${sinkId}
+          AND COALESCE(rating_at, 0) <= ${externalAt}`);
     }
   }
 
@@ -378,7 +415,8 @@ export class WatchStateRepository {
   static async upsert(
     scope: WatchScope,
     identity: WatchIdentity,
-    patch: WatchStatePatch
+    patch: WatchStatePatch,
+    db: DbDriver = getDb()
   ): Promise<WatchStateRow> {
     const now = Date.now();
     const pos = patch.positionMs ?? null;
@@ -410,7 +448,7 @@ export class WatchStateRepository {
     const sinkId = patch.sinkId ?? null;
     const externalAt = patch.externalAt ?? null;
 
-    const row = await getDb().maybeOne<DbRow>(
+    const row = await db.maybeOne<DbRow>(
       sql`INSERT INTO watch_state
             (uuid, persona, item_key, kind, media_type, base_id, season, episode,
              video_id, series_key, position_ms, duration_ms, played, play_count,
@@ -880,10 +918,19 @@ export class WatchStateRepository {
             VALUES ${join(values)}
             ON CONFLICT(uuid, persona, item_key) DO UPDATE SET
               favorite = 1,
-              favorite_sink_id = excluded.favorite_sink_id,
-              favorite_at = excluded.favorite_at,
-              favorite_seen_at = excluded.favorite_seen_at,
-              match_key = COALESCE(excluded.match_key, watch_state.match_key)`
+              favorite_sink_id = CASE
+                WHEN watch_state.favorite = 1 AND watch_state.favorite_sink_id IS NULL
+                THEN NULL ELSE excluded.favorite_sink_id END,
+              favorite_at = CASE
+                WHEN watch_state.favorite = 1 AND watch_state.favorite_sink_id IS NULL
+                THEN watch_state.favorite_at ELSE excluded.favorite_at END,
+              favorite_seen_at = CASE
+                WHEN watch_state.favorite = 1 AND watch_state.favorite_sink_id IS NULL
+                THEN watch_state.favorite_seen_at ELSE excluded.favorite_seen_at END,
+              match_key = COALESCE(excluded.match_key, watch_state.match_key)
+            WHERE watch_state.favorite = 0
+               OR (watch_state.favorite_sink_id = excluded.favorite_sink_id
+                   AND COALESCE(watch_state.favorite_at, 0) <= excluded.favorite_at)`
       );
     }
   }
@@ -932,7 +979,10 @@ export class WatchStateRepository {
               dropped = 1,
               dropped_sink_id = excluded.dropped_sink_id,
               dropped_at = COALESCE(watch_state.dropped_at, excluded.dropped_at),
-              dropped_seen_at = excluded.dropped_seen_at`
+              dropped_seen_at = excluded.dropped_seen_at
+            WHERE watch_state.dropped = 0
+               OR (watch_state.dropped_sink_id = excluded.dropped_sink_id
+                   AND COALESCE(watch_state.dropped_at, 0) <= excluded.dropped_at)`
       );
     }
   }
@@ -1019,7 +1069,11 @@ export class WatchStateRepository {
               rating_sink_id = excluded.rating_sink_id,
               rating_at = excluded.rating_at,
               rating_seen_at = excluded.rating_seen_at,
-              match_key = COALESCE(excluded.match_key, watch_state.match_key)`
+              match_key = COALESCE(excluded.match_key, watch_state.match_key)
+            WHERE watch_state.rating_sink_id = excluded.rating_sink_id
+               OR (watch_state.rating_sink_id IS NULL
+                   AND (watch_state.rating IS NULL
+                     OR COALESCE(watch_state.rating_at, 0) <= excluded.rating_at))`
       );
     }
   }

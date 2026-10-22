@@ -118,7 +118,7 @@ export function registerJellyfinTasks(): void {
     id: 'jellyfin-tracker-bridge-sync',
     label: 'Sync merged tracker records to Jellyfin',
     description:
-      'Synchronizes progress, watched states, favorites, and ratings from the AIOStreams merged tracker database into the Jellyfin watch state for all active users.',
+      'Synchronizes progress, watched states, favorites, and ratings from the primary AIOStreams account tracker ledger into its Jellyfin watch history.',
     category: 'jellyfin',
     kind: 'scheduled',
     intervalMs: 60 * 1000,
@@ -134,16 +134,23 @@ export function registerJellyfinTasks(): void {
         'SELECT DISTINCT user_uuid as uuid FROM tracker_records'
       );
       let totalImported = 0;
+      let totalSkipped = 0;
+      const failures: string[] = [];
       for (const { uuid } of users) {
-        const { imported } = await syncTrackerRecordsToWatchState(
-          { uuid, persona: '' },
-          db
-        );
-        totalImported += imported;
+        try {
+          const { imported, skipped } = await syncTrackerRecordsToWatchState(
+            { uuid, persona: '' },
+            db
+          );
+          totalImported += imported;
+          totalSkipped += skipped;
+        } catch {
+          failures.push(uuid);
+        }
       }
       return {
-        ok: true,
-        message: `synced ${totalImported} tracker records across ${users.length} user(s)`,
+        ok: failures.length === 0,
+        message: `synced ${totalImported} tracker records across ${users.length - failures.length} user(s); skipped ${totalSkipped} unsupported or invalid records; failed ${failures.length} user(s)`,
       };
     },
   });

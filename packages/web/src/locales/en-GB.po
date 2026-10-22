@@ -264,6 +264,10 @@ msgstr "+{db} dB"
 msgid "+{seconds}s"
 msgstr "+{seconds}s"
 
+#: src/lib/subtitles/delay.ts
+msgid "+{time}"
+msgstr "+{time}"
+
 #: src/lib/playback/sound.ts
 msgid "−{amount} ms"
 msgstr "−{amount} ms"
@@ -271,6 +275,10 @@ msgstr "−{amount} ms"
 #: src/lib/subtitles/delay.ts
 msgid "−{seconds}s"
 msgstr "−{seconds}s"
+
+#: src/lib/subtitles/delay.ts
+msgid "−{time}"
+msgstr "−{time}"
 
 #: src/lib/input/actions.ts
 msgid "0 to 9"
@@ -556,6 +564,7 @@ msgid "At 0% there is no background."
 msgstr "At 0% there is no background."
 
 #: src/components/player/options.tsx
+#: src/components/remote-sheet.tsx
 #: src/pages/settings/index.tsx
 msgid "Audio"
 msgstr "Audio"
@@ -767,6 +776,10 @@ msgstr "Change"
 msgid "Change folder"
 msgstr "Change folder"
 
+#: src/components/party/reaction-setting.tsx
+msgid "Change reactions"
+msgstr "Change reactions"
+
 #: src/components/no-catalogs.tsx
 #: src/pages/settings/account.tsx
 #: src/pages/sign-in.tsx
@@ -776,6 +789,10 @@ msgstr "Change server"
 #: src/components/input-setup.tsx
 msgid "Change shortcuts"
 msgstr "Change shortcuts"
+
+#: src/components/party/party-sheet.tsx
+msgid "Change speed to catch up"
+msgstr "Change speed to catch up"
 
 #: src/components/version-settings.tsx
 msgid "Change these on a phone, a computer or in a browser."
@@ -877,6 +894,10 @@ msgstr "Combine movie and show results"
 #: src/pages/settings/audio.tsx
 msgid "Commentary"
 msgstr "Commentary"
+
+#: src/pages/settings/apps.tsx
+msgid "Compatibility"
+msgstr "Compatibility"
 
 #: src/components/people.tsx
 msgid "Composer"
@@ -1045,6 +1066,10 @@ msgstr "Could not load your catalogs"
 #: src/pages/favourites.tsx
 msgid "Could not load your favourites"
 msgstr "Could not load your favourites"
+
+#: src/components/random-pick.tsx
+msgid "Could not pick one."
+msgstr "Could not pick one."
 
 #: src/lib/subtitles/files.ts
 msgid "Could not read that file"
@@ -1268,6 +1293,10 @@ msgstr "Docked keeps it in a column of its own. Floating hovers it over the page
 msgid "Documentation"
 msgstr "Documentation"
 
+#: src/components/player/options.tsx
+msgid "Doesn't match the video's own subtitles"
+msgstr "Doesn't match the video's own subtitles"
+
 #: src/pages/settings/playback.tsx
 msgid "Dolby Vision"
 msgstr "Dolby Vision"
@@ -1280,6 +1309,7 @@ msgstr "Donate"
 msgid "Donate to Me"
 msgstr "Donate to Me"
 
+#: src/components/party/reaction-setting.tsx
 #: src/components/player/subtitle-sync.tsx
 #: src/components/send-report.tsx
 #: src/components/version-settings.tsx
@@ -1365,6 +1395,10 @@ msgstr "Each filter shows as a pill above the version list. Its search is words 
 #: src/components/version-settings.tsx
 msgid "Edit"
 msgstr "Edit"
+
+#: src/components/player/controls.tsx
+msgid "Ends at {endsAt}"
+msgstr "Ends at {endsAt}"
 
 #: src/pages/settings/playback.tsx
 msgid "Engine"
@@ -1466,6 +1500,7 @@ msgstr "Fade"
 msgid "Failed"
 msgstr "Failed"
 
+#: src/components/remote-sheet.tsx
 #: src/lib/input/keys.ts
 msgid "Fast forward"
 msgstr "Fast forward"
@@ -1847,6 +1882,14 @@ msgstr "just now"
 msgid "Keep"
 msgstr "Keep"
 
+#: src/pages/settings/playback.tsx
+msgid "Keep in step by changing speed"
+msgstr "Keep in step by changing speed"
+
+#: src/components/party/party-sheet.tsx
+msgid "Keeping in step"
+msgstr "Keeping in step"
+
 #: src/pages/settings/apps.tsx
 msgid "Keeps the sound going with the screen off, or when you leave the app."
 msgstr "Keeps the sound going with the screen off, or when you leave the app."
@@ -1911,6 +1954,10 @@ msgstr "Later"
 #: src/app.tsx
 msgid "Leave {from} to add {adding}?"
 msgstr "Leave {from} to add {adding}?"
+
+#: src/app.tsx
+msgid "Leave {from} to open this on {target}?"
+msgstr "Leave {from} to open this on {target}?"
 
 #: src/components/party/party-sheet.tsx
 msgid "Leave the party"
@@ -1996,6 +2043,10 @@ msgstr "Lost the connection to {relay}. Reconnecting… Your player carries on, 
 #: src/lib/input/actions.ts
 msgid "Lower subtitles"
 msgstr "Lower subtitles"
+
+#: src/pages/settings/apps.tsx
+msgid "macOS draws the video, using less power, and shows Dolby Vision itself. Shaders and mpv's picture options do not apply."
+msgstr "macOS draws the video, using less power, and shows Dolby Vision itself. Shaders and mpv's picture options do not apply."
 
 #: src/lib/i18n.ts
 msgid "Magenta"
@@ -2125,6 +2176,7 @@ msgid "Moves between what's on screen, and to Search and Home. A gamepad's d-pad
 msgstr "Moves between what's on screen, and to Search and Home. A gamepad's d-pad and left stick move too."
 
 #: src/components/kind-tabs.tsx
+#: src/components/random-pick.tsx
 #: src/lib/format.ts
 #: src/pages/discover.tsx
 #: src/pages/favourites.tsx
@@ -2143,6 +2195,10 @@ msgstr "Moving around"
 #: src/pages/settings/apps.tsx
 msgid "mpv configuration"
 msgstr "mpv configuration"
+
+#: src/pages/settings/apps.tsx
+msgid "mpv draws the video, with your mpv.conf and shaders."
+msgstr "mpv draws the video, with your mpv.conf and shaders."
 
 #: src/pages/settings/playback.tsx
 msgid "mpv inside this window, with this app's controls and playback settings. Your own mpv.conf, scripts and shaders work here too: put them in its mpv folder under Desktop app."
@@ -2185,6 +2241,7 @@ msgstr "Never"
 msgid "New code"
 msgstr "New code"
 
+#: src/components/remote-sheet.tsx
 #: src/lib/i18n.ts
 msgid "Next"
 msgstr "Next"
@@ -2266,6 +2323,10 @@ msgstr "No line matches."
 #: src/components/party/party-sheet.tsx
 msgid "No messages yet. Say hello."
 msgstr "No messages yet. Say hello."
+
+#: src/components/remote-sheet.tsx
+msgid "No other device is ready. Open the app on another device signed in here, and it shows up."
+msgstr "No other device is ready. Open the app on another device signed in here, and it shows up."
 
 #: src/lib/party/party.ts
 msgid "No party has that code on {relay}."
@@ -2360,6 +2421,11 @@ msgstr "Nothing found."
 msgid "Nothing here."
 msgstr "Nothing here."
 
+#: src/components/remote-sheet.tsx
+msgid "Nothing is playing there."
+msgstr "Nothing is playing there."
+
+#: src/components/random-pick.tsx
 #: src/pages/favourites.tsx
 msgid "Nothing marked as a favourite yet."
 msgstr "Nothing marked as a favourite yet."
@@ -2412,6 +2478,7 @@ msgid "Ocean"
 msgstr "Ocean"
 
 #: src/components/player/options.tsx
+#: src/components/remote-sheet.tsx
 #: src/lib/playback/sound.ts
 #: src/pages/settings/audio.tsx
 #: src/pages/settings/subtitles.tsx
@@ -2421,6 +2488,10 @@ msgstr "Off"
 #: src/pages/settings/theme.tsx
 msgid "Off for this visit, since the address ends in <0>?safe</0>. Fix or clear it here, then open the app without it."
 msgstr "Off for this visit, since the address ends in <0>?safe</0>. Fix or clear it here, then open the app without it."
+
+#: src/components/party/party-sheet.tsx
+msgid "Off, the video jumps instead."
+msgstr "Off, the video jumps instead."
 
 #: src/pages/settings/cache.tsx
 msgid "Older ones wait for the server instead. Without a connection, everything saved is shown."
@@ -2492,6 +2563,7 @@ msgstr "Opacity: {backgroundOpacity}%"
 
 #: src/components/hero.tsx
 #: src/components/item-menu.tsx
+#: src/components/random-pick.tsx
 #: src/pages/history.tsx
 #: src/pages/settings/account.tsx
 #: src/pages/settings/apps.tsx
@@ -2564,6 +2636,10 @@ msgstr "Options for the built-in mpv, one per line, as mpv's manual lists them."
 msgid "Options the app keeps for itself."
 msgstr "Options the app keeps for itself."
 
+#: src/components/party/reaction-setting.tsx
+msgid "Or type one"
+msgstr "Or type one"
+
 #: src/pages/settings/audio.tsx
 msgid "Original language"
 msgstr "Original language"
@@ -2571,6 +2647,10 @@ msgstr "Original language"
 #: src/lib/playback/player-choice.ts
 msgid "Other app"
 msgstr "Other app"
+
+#: src/components/remote-sheet.tsx
+msgid "Other devices"
+msgstr "Other devices"
 
 #: src/pages/sign-in.tsx
 msgid "Other user"
@@ -2666,6 +2746,7 @@ msgid "Pattern"
 msgstr "Pattern"
 
 #: src/components/player/controls.tsx
+#: src/components/remote-sheet.tsx
 #: src/lib/input/actions.ts
 #: src/lib/input/keys.ts
 #: src/pages/downloads.tsx
@@ -2708,9 +2789,17 @@ msgstr "People and invite"
 msgid "Pick a colour"
 msgstr "Pick a colour"
 
+#: src/components/party/reaction-setting.tsx
+msgid "Pick a slot, then what goes in it."
+msgstr "Pick a slot, then what goes in it."
+
 #: src/pages/downloads.tsx
 msgid "Pick a version"
 msgstr "Pick a version"
+
+#: src/components/random-pick.tsx
+msgid "Pick again"
+msgstr "Pick again"
 
 #: src/components/version-settings.tsx
 msgid "Pick fields to search only those parts of a version."
@@ -2759,6 +2848,8 @@ msgstr "Pink"
 #: src/components/hero.tsx
 #: src/components/item-menu.tsx
 #: src/components/player/controls.tsx
+#: src/components/random-pick.tsx
+#: src/components/remote-sheet.tsx
 #: src/lib/input/actions.ts
 #: src/lib/input/keys.ts
 #: src/pages/item.tsx
@@ -2792,6 +2883,12 @@ msgstr "Play lists the versions to choose from, but resuming goes back to the ve
 #: src/components/player/next-episode.tsx
 msgid "Play now"
 msgstr "Play now"
+
+#: src/components/item-menu.tsx
+#: src/components/remote-sheet.tsx
+#: src/pages/item.tsx
+msgid "Play on another device"
+msgstr "Play on another device"
 
 #: src/lib/input/actions.ts
 msgid "Play or pause"
@@ -2879,6 +2976,10 @@ msgstr "Playing in {launchedName}"
 msgid "Playing in your player"
 msgstr "Playing in your player"
 
+#: src/components/remote-sheet.tsx
+msgid "Playing on {name}"
+msgstr "Playing on {name}"
+
 #: src/pages/settings/playback.tsx
 msgid "Playing on and the next and previous buttons pass over episodes marked as filler. You can still play one yourself."
 msgstr "Playing on and the next and previous buttons pass over episodes marked as filler. You can still play one yourself."
@@ -2886,6 +2987,10 @@ msgstr "Playing on and the next and previous buttons pass over episodes marked a
 #: src/components/party/party-sheet.tsx
 msgid "Plays <0>{title}</0> for everyone who joins."
 msgstr "Plays <0>{title}</0> for everyone who joins."
+
+#: src/pages/settings/playback.tsx
+msgid "Plays a little faster or slower to catch up with the party. Off, the video jumps instead."
+msgstr "Plays a little faster or slower to catch up with the party. Off, the video jumps instead."
 
 #: src/pages/settings/playback.tsx
 msgid "Plays Dolby Vision where the screen shows it. Turn it off to play the HDR10 picture most of these videos also carry, if Dolby Vision looks dim or flickers. Videos with no HDR10 picture still play in Dolby Vision."
@@ -2898,6 +3003,10 @@ msgstr "Plays faster for as long as the key is held, at the speed set in Playbac
 #: src/pages/settings/about.tsx
 msgid "Plays the video."
 msgstr "Plays the video."
+
+#: src/components/remote-sheet.tsx
+msgid "Position"
+msgstr "Position"
 
 #: src/pages/settings/interface.tsx
 msgid "Poster size"
@@ -2915,6 +3024,10 @@ msgstr "Presets"
 msgid "Press a key"
 msgstr "Press a key"
 
+#: src/lib/hosts/shell/android.ts
+msgid "Press Back again to leave"
+msgstr "Press Back again to leave"
+
 #: src/components/version-settings.tsx
 #: src/pages/settings/subtitles.tsx
 msgid "Preview"
@@ -2924,6 +3037,7 @@ msgstr "Preview"
 msgid "Previews"
 msgstr "Previews"
 
+#: src/components/remote-sheet.tsx
 #: src/lib/i18n.ts
 msgid "Previous"
 msgstr "Previous"
@@ -2992,6 +3106,20 @@ msgstr "Raise subtitles"
 msgid "Raises the centre channel, where surround sound puts dialogue. Not for sound passed through."
 msgstr "Raises the centre channel, where surround sound puts dialogue. Not for sound passed through."
 
+#: src/components/item-menu.tsx
+#: src/components/random-pick.tsx
+#: src/pages/item.tsx
+msgid "Random episode"
+msgstr "Random episode"
+
+#: src/components/random-pick.tsx
+msgid "Random favourite"
+msgstr "Random favourite"
+
+#: src/pages/favourites.tsx
+msgid "Random pick"
+msgstr "Random pick"
+
 #: src/components/rating.tsx
 msgid "Rate"
 msgstr "Rate"
@@ -3005,6 +3133,7 @@ msgid "React with {emoji}"
 msgstr "React with {emoji}"
 
 #: src/components/party/party-sheet.tsx
+#: src/components/party/reaction-setting.tsx
 msgid "Reactions"
 msgstr "Reactions"
 
@@ -3117,6 +3246,7 @@ msgstr "Report copied"
 msgid "Request failed ({status})"
 msgstr "Request failed ({status})"
 
+#: src/components/party/reaction-setting.tsx
 #: src/components/player/options.tsx
 #: src/pages/history.tsx
 msgid "Reset"
@@ -3150,9 +3280,17 @@ msgstr "Reset history"
 msgid "Reset theme"
 msgstr "Reset theme"
 
+#: src/pages/settings/apps.tsx
+msgid "Restart"
+msgstr "Restart"
+
 #: src/lib/hosts/shell/index.ts
 msgid "Restart now"
 msgstr "Restart now"
+
+#: src/pages/settings/apps.tsx
+msgid "Restart to switch"
+msgstr "Restart to switch"
 
 #: src/components/window-controls.tsx
 msgid "Restore"
@@ -3163,6 +3301,7 @@ msgid "Results of what you searched for."
 msgstr "Results of what you searched for."
 
 #: src/components/item-menu.tsx
+#: src/components/random-pick.tsx
 #: src/pages/downloads.tsx
 msgid "Resume"
 msgstr "Resume"
@@ -3181,10 +3320,15 @@ msgstr "Resume all"
 msgid "Resume from {resumeAt}"
 msgstr "Resume from {resumeAt}"
 
+#: src/components/player/options.tsx
+msgid "Retimed and synced automatically"
+msgstr "Retimed and synced automatically"
+
 #: src/lib/i18n.ts
 msgid "Retry"
 msgstr "Retry"
 
+#: src/components/remote-sheet.tsx
 #: src/lib/input/keys.ts
 msgid "Rewind"
 msgstr "Rewind"
@@ -3204,6 +3348,10 @@ msgstr "Row"
 #: src/pages/settings/cache.tsx
 msgid "Rows, catalogs and the calendar."
 msgstr "Rows, catalogs and the calendar."
+
+#: src/components/player/options.tsx
+msgid "Runs at a different speed to the video"
+msgstr "Runs at a different speed to the video"
 
 #. A season and episode number, as in S01E04
 #: src/lib/format.ts
@@ -3324,6 +3472,10 @@ msgstr "See the download"
 msgid "Seek"
 msgstr "Seek"
 
+#: src/pages/settings/playback.tsx
+msgid "Seek bar previews"
+msgstr "Seek bar previews"
+
 #: src/lib/i18n.ts
 #: src/lib/input/actions.ts
 #: src/pages/history.tsx
@@ -3388,6 +3540,10 @@ msgstr "Server address"
 #: src/lib/hosts/shell/player.ts
 msgid "server error"
 msgstr "server error"
+
+#: src/components/player/options.tsx
+msgid "Set by hand"
+msgstr "Set by hand"
 
 #: src/components/layout.tsx
 #: src/pages/settings/index.tsx
@@ -3455,6 +3611,14 @@ msgstr "Show the controls"
 msgid "Show the prompt"
 msgstr "Show the prompt"
 
+#: src/components/player/controls.tsx
+msgid "Show time left"
+msgstr "Show time left"
+
+#: src/components/player/controls.tsx
+msgid "Show time played"
+msgstr "Show time played"
+
 #: src/components/layout.tsx
 msgid "Showing saved pages"
 msgstr "Showing saved pages"
@@ -3464,12 +3628,17 @@ msgid "Shown"
 msgstr "Shown"
 
 #: src/components/kind-tabs.tsx
+#: src/components/random-pick.tsx
 #: src/lib/format.ts
 #: src/pages/discover.tsx
 #: src/pages/favourites.tsx
 #: src/pages/search.tsx
 msgid "Shows"
 msgstr "Shows"
+
+#: src/pages/settings/playback.tsx
+msgid "Shows a picture of the video where you point, drag or skip to on the seek bar. Each one reads a little of the file, so turn them off to save data."
+msgstr "Shows a picture of the video where you point, drag or skip to on the seek bar. Each one reads a little of the file, so turn them off to save data."
 
 #: src/pages/settings/interface.tsx
 msgid "Shows next episodes in the continue watching row, after what you are partway through."
@@ -3613,6 +3782,10 @@ msgstr "Skipped segment"
 msgid "Skipping"
 msgstr "Skipping"
 
+#: src/components/party/reaction-setting.tsx
+msgid "Slot {n}: {emoji}"
+msgstr "Slot {n}: {emoji}"
+
 #: src/lib/input/actions.ts
 msgid "Slower"
 msgstr "Slower"
@@ -3689,6 +3862,10 @@ msgstr "Stable"
 msgid "Start a party"
 msgstr "Start a party"
 
+#: src/components/remote-sheet.tsx
+msgid "Starting…"
+msgstr "Starting…"
+
 #: src/pages/settings/subtitles.tsx
 msgid "Starts without subtitles."
 msgstr "Starts without subtitles."
@@ -3707,6 +3884,7 @@ msgstr "Status"
 msgid "Stereo"
 msgstr "Stereo"
 
+#: src/components/remote-sheet.tsx
 #: src/lib/input/actions.ts
 #: src/lib/input/keys.ts
 msgid "Stop"
@@ -3759,6 +3937,7 @@ msgid "Subtitle types"
 msgstr "Subtitle types"
 
 #: src/components/player/options.tsx
+#: src/components/remote-sheet.tsx
 #: src/pages/settings/index.tsx
 #: src/pages/settings/subtitles.tsx
 msgid "Subtitles"
@@ -3792,9 +3971,21 @@ msgstr "Subtitles off"
 msgid "Subtitles on or off"
 msgstr "Subtitles on or off"
 
+#: src/lib/subtitles/delay.ts
+msgid "Subtitles retimed and synced: {amount}"
+msgstr "Subtitles retimed and synced: {amount}"
+
+#: src/lib/subtitles/delay.ts
+msgid "Subtitles retimed to the video's speed"
+msgstr "Subtitles retimed to the video's speed"
+
 #: src/components/player/subtitle-sync.tsx
 msgid "Subtitles set to {amount}. Another line refines it."
 msgstr "Subtitles set to {amount}. Another line refines it."
+
+#: src/lib/subtitles/delay.ts
+msgid "Subtitles synced: {amount}"
+msgstr "Subtitles synced: {amount}"
 
 #: src/pages/settings/subtitles.tsx
 msgid "Subtitles the version marks as default or forced, in your language when it has them."
@@ -3820,6 +4011,10 @@ msgstr "Support AIOStreams"
 msgid "Switch"
 msgstr "Switch"
 
+#: src/app.tsx
+msgid "Switch server"
+msgstr "Switch server"
+
 #: src/components/layout.tsx
 #: src/components/no-catalogs.tsx
 #: src/pages/settings/account.tsx
@@ -3831,8 +4026,8 @@ msgid "Switches the TV to a refresh rate that suits each video, so motion plays 
 msgstr "Switches the TV to a refresh rate that suits each video, so motion plays smoothly, and back when you stop. The screen goes blank for a moment as it switches."
 
 #: src/components/player/options.tsx
-msgid "Sync"
-msgstr "Sync"
+msgid "Sync automatically"
+msgstr "Sync automatically"
 
 #: src/components/player/subtitle-sync.tsx
 #: src/lib/input/actions.ts
@@ -3850,6 +4045,18 @@ msgstr "Sync to a line"
 #: src/components/player/options.tsx
 msgid "Sync to a line…"
 msgstr "Sync to a line…"
+
+#: src/components/player/options.tsx
+msgid "Synced automatically"
+msgstr "Synced automatically"
+
+#: src/components/player/controls.tsx
+msgid "Syncing subtitles…"
+msgstr "Syncing subtitles…"
+
+#: src/pages/settings/apps.tsx
+msgid "System"
+msgstr "System"
 
 #: src/pages/settings/interface.tsx
 msgid "System ({system})"
@@ -3936,6 +4143,10 @@ msgstr "That relay is too busy for another party."
 msgid "That relay runs a different version of watch parties."
 msgstr "That relay runs a different version of watch parties."
 
+#: src/components/remote-target.tsx
+msgid "That title could not be opened"
+msgstr "That title could not be opened"
+
 #: src/pages/settings/apps.tsx
 msgid "That you are searching, not what for."
 msgstr "That you are searching, not what for."
@@ -4016,6 +4227,18 @@ msgstr "the link returned something other than a video"
 msgid "The movie or show whose page is open."
 msgstr "The movie or show whose page is open."
 
+#: src/pages/settings/apps.tsx
+msgid "The older way mpv draws, for Macs where the others fail. Some Dolby Vision videos show the wrong colours."
+msgstr "The older way mpv draws, for Macs where the others fail. Some Dolby Vision videos show the wrong colours."
+
+#: src/components/remote-sheet.tsx
+msgid "The other device could not be reached"
+msgstr "The other device could not be reached"
+
+#: src/components/crash-report.tsx
+msgid "The page restarted unexpectedly"
+msgstr "The page restarted unexpectedly"
+
 #: src/lib/party/party.ts
 msgid "The party ended after a long time with nothing playing."
 msgstr "The party ended after a long time with nothing playing."
@@ -4077,6 +4300,10 @@ msgstr "the TV's player failed ({code})"
 msgid "the video app Android picks"
 msgstr "the video app Android picks"
 
+#: src/pages/settings/apps.tsx
+msgid "The video output changes when the app opens again."
+msgstr "The video output changes when the app opens again."
+
 #: src/components/download-button.tsx
 msgid "The whole show"
 msgstr "The whole show"
@@ -4097,6 +4324,14 @@ msgstr "There is nothing here"
 #: src/components/version-settings.tsx
 msgid "These come before the packs' badges. Badges that share a group are alternatives: only the first that matches shows."
 msgstr "These come before the packs' badges. Badges that share a group are alternatives: only the first that matches shows."
+
+#: src/lib/subtitles/delay.ts
+msgid "These subtitles don't match the video's own"
+msgstr "These subtitles don't match the video's own"
+
+#: src/lib/subtitles/delay.ts
+msgid "These subtitles run at a different speed to the video"
+msgstr "These subtitles run at a different speed to the video"
 
 #: src/components/player/subtitle-sync.tsx
 msgid "These subtitles' lines could not be read."
@@ -4163,6 +4398,10 @@ msgstr "This server shares no movie or show catalogs with this account."
 msgid "This server styles the app for everyone. Your own CSS applies on top of it."
 msgstr "This server styles the app for everyone. Your own CSS applies on top of it."
 
+#: src/components/random-pick.tsx
+msgid "This show has no episodes to pick from yet."
+msgstr "This show has no episodes to pick from yet."
+
 #: src/pages/trailer.tsx
 msgid "This trailer can't play in the app."
 msgstr "This trailer can't play in the app."
@@ -4202,6 +4441,10 @@ msgstr "Those were too far apart to be one line. Try another line."
 #: src/pages/settings/cache.tsx
 msgid "Three days"
 msgstr "Three days"
+
+#: src/components/player/options.tsx
+msgid "Timing"
+msgstr "Timing"
 
 #: src/pages/history.tsx
 #: src/pages/settings/interface.tsx
@@ -4266,6 +4509,7 @@ msgid "Troubleshooting"
 msgstr "Troubleshooting"
 
 #: src/components/party/party-sheet.tsx
+#: src/components/random-pick.tsx
 #: src/components/version-picker.tsx
 #: src/pages/downloads.tsx
 #: src/pages/sign-in.tsx
@@ -4478,6 +4722,10 @@ msgstr "Versions play in this browser. Choose another player to open them in it 
 msgid "Video"
 msgstr "Video"
 
+#: src/pages/settings/apps.tsx
+msgid "Video output"
+msgstr "Video output"
+
 #: src/pages/settings/about.tsx
 msgid "Visit"
 msgstr "Visit"
@@ -4617,6 +4865,10 @@ msgstr "What the people you watch with say shows for a few seconds. It always st
 #: src/pages/settings/cache.tsx
 msgid "What to save"
 msgstr "What to save"
+
+#: src/components/party/reaction-setting.tsx
+msgid "What you can send from a party's chat."
+msgstr "What you can send from a party's chat."
 
 #: src/pages/settings/apps.tsx
 msgid "What your Discord profile shows. Kept on this device."

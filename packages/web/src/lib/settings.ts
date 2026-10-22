@@ -156,10 +156,12 @@ function publish(next: Synced) {
   announce();
 }
 
+let saving: Promise<unknown> = Promise.resolve();
+
 function push(prefs: Synced, target = session) {
   if (!target) return;
   const { client, userId } = target;
-  void client
+  saving = client
     .post(
       `/DisplayPreferences/${PREFS_ID}`,
       {
@@ -190,10 +192,14 @@ export function syncPreferences(
   );
   current = { ...older, ...(storage.get<Synced>(cacheKey(userId)) ?? {}) };
   announce();
-  void client
-    .get<{
-      CustomPrefs?: Record<string, string | null>;
-    }>(`/DisplayPreferences/${PREFS_ID}`, { client: PREFS_ID, userId })
+  // Else a change still saving reads back as its old value.
+  flushPush();
+  void saving
+    .then(() =>
+      client.get<{
+        CustomPrefs?: Record<string, string | null>;
+      }>(`/DisplayPreferences/${PREFS_ID}`, { client: PREFS_ID, userId })
+    )
     .then((remote) => {
       if (mine !== generation) return;
       if (remote.CustomPrefs?.[SAVED_MARK]) {
@@ -218,6 +224,13 @@ export function signedIn(): boolean {
 }
 
 let pushTimer: ReturnType<typeof setTimeout> | undefined;
+let pendingPush: (() => void) | undefined;
+
+function flushPush() {
+  clearTimeout(pushTimer);
+  pendingPush?.();
+  pendingPush = undefined;
+}
 
 function update(key: string, value: string | undefined) {
   const was = moved.get(key)?.was;
@@ -229,7 +242,8 @@ function update(key: string, value: string | undefined) {
   // A dragged colour or typed CSS saves once it settles.
   clearTimeout(pushTimer);
   const target = session;
-  pushTimer = setTimeout(() => push(next, target), 500);
+  pendingPush = () => push(next, target);
+  pushTimer = setTimeout(flushPush, 500);
 }
 
 /** A setting that follows the user; `format` returns undefined for the default. */
@@ -299,6 +313,31 @@ function syncedNumber(
     },
     (value) => (value === fallback ? undefined : String(value)),
     was
+  );
+}
+
+/** A fixed-length list of short strings, kept as JSON. */
+function syncedList(
+  key: string,
+  fallback: readonly string[]
+): Setting<readonly string[]> {
+  const same = (list: readonly string[]) =>
+    JSON.stringify(list) === JSON.stringify(fallback);
+  return synced<readonly string[]>(
+    key,
+    (raw) => {
+      try {
+        const list: unknown = raw && JSON.parse(raw);
+        if (
+          Array.isArray(list) &&
+          list.length === fallback.length &&
+          list.every((v) => typeof v === 'string' && v && v.length <= 32)
+        )
+          return list as string[];
+      } catch {}
+      return fallback;
+    },
+    (value) => (same(value) ? undefined : JSON.stringify(value))
   );
 }
 
@@ -484,6 +523,8 @@ export type AudioChannels = (typeof AUDIO_CHANNELS)[number];
 export const PLAYER_ENGINES = ['auto', 'mpv', 'exoplayer'] as const;
 export type PlayerEngine = (typeof PLAYER_ENGINES)[number];
 /** Megabytes, or `auto` to size it from the device's memory. */
+export const PARTY_REACTIONS = ['👍', '😂', '😮', '😢', '❤️', '🔥'] as const;
+
 export const CACHE_SIZES = ['auto', '128', '256', '512', '1000'] as const;
 export type CacheSize = (typeof CACHE_SIZES)[number];
 
@@ -771,6 +812,9 @@ export const settings = {
     /** What other members send shows over the video. */
     messages: syncedFlag('partyMessages', true),
     reactions: syncedFlag('partyReactions', true),
+    /** The ones this user sends. */
+    reactionSet: syncedList('partyReactionSet', PARTY_REACTIONS),
+    speedSync: syncedFlag('partySpeedSync', true),
   },
   controls: {
     seekStep: device<number>(
@@ -796,6 +840,8 @@ export const settings = {
     shortcuts: deviceLists('aiostreams-web-controls-shortcuts', [
       'aiostreams-web-shortcuts',
     ]),
+    thumbnails: device<boolean>('aiostreams-web-controls-thumbnails', true),
+    timeLeft: device<boolean>('aiostreams-web-controls-time-left', false),
   },
   player: {
     /** `app`, a player's id, or `custom` for `link`. */

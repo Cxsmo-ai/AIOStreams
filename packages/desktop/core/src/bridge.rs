@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::discord::Presence;
 use crate::now_playing::{self, MediaKey};
-use crate::playback::{Change, Chapter, Load, PlayerState, Settings, Style, Track};
+use crate::playback::{Change, Chapter, Load, PlayerState, Settings, Style, SubtitleLine, Track};
 
 /// Bumped when a message changes shape, so pages can tell shells apart.
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -64,6 +64,22 @@ pub enum Inbound {
         #[serde(default)]
         external: bool,
     },
+    /// Reports the lines of one of the file's own subtitles as mpv reads them, or stops with `None`.
+    PlayerSubtitleLines {
+        track: Option<String>,
+    },
+    /// Answered with `player-subtitle-index` once the file's index has been read.
+    PlayerSubtitleIndex,
+    /// Answered with `player-thumbnail`s for the keyframe at or before the position, newest asked
+    /// first, except the one at `showing_ms` the page has; without a position, reads the file's
+    /// index ahead of the first.
+    PlayerThumbnail {
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        position_ms: Option<f64>,
+        showing_ms: Option<f64>,
+    },
     /// Reports the player's whole state again.
     PlayerSync {
         #[serde(default)]
@@ -119,6 +135,13 @@ pub enum Inbound {
         visible: bool,
     },
     AppInfo,
+    /// Picks the output that draws the video from the next start, then answers with a
+    /// `video-output`; `None` only asks.
+    VideoOutput {
+        output: Option<String>,
+    },
+    /// Quits and opens the app again.
+    Restart,
     OpenMpvConfig,
     OpenLogs,
     /// Versions, paths and the recent log, for a bug report; the page names its own build and the server's.
@@ -245,11 +268,32 @@ pub enum Outbound {
         #[serde(skip_serializing_if = "is_false")]
         external: bool,
     },
+    PlayerSubtitleLines {
+        track: String,
+        lines: Vec<SubtitleLine>,
+    },
+    /// Each of the file's own subtitles' lines from its index by mpv id, or none without one.
+    PlayerSubtitleIndex {
+        tracks: Option<BTreeMap<String, Vec<SubtitleLine>>>,
+    },
+    /// Where the page loads the JPEG of the keyframe at `position_ms`; without a `src` the file
+    /// has no thumbnails.
+    PlayerThumbnail {
+        url: String,
+        #[serde(rename = "positionMs", skip_serializing_if = "Option::is_none")]
+        position_ms: Option<u64>,
+        src: Option<String>,
+    },
     /// `start`, `loaded` or `restart`.
     PlayerEvent {
         name: &'static str,
         #[serde(skip_serializing_if = "is_false")]
         external: bool,
+    },
+    /// For the app's own HDR output; never sent to the page.
+    VideoColour {
+        gamma: Option<String>,
+        primaries: Option<String>,
     },
     PlayerEnded {
         reason: &'static str,
@@ -283,6 +327,12 @@ pub enum Outbound {
         ffmpeg: Option<String>,
         #[serde(rename = "ac3Encoder")]
         ac3_encoder: bool,
+    },
+    /// `outputs` is empty where there is no choice.
+    VideoOutput {
+        outputs: Vec<&'static str>,
+        running: &'static str,
+        chosen: &'static str,
     },
     /// mpv's `audio-device-list`.
     AudioDevices {

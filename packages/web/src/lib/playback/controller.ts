@@ -5,6 +5,7 @@ import type { Chapter } from './chapters';
 import type { SubtitleStyle } from '../settings';
 import type { SubtitleLine } from '../subtitles/cues';
 import type { Playhead } from './playhead';
+import type { ThumbnailFeed } from './thumbnails';
 import type { PlannedSkip } from './engine';
 import type { PlaybackPrefs } from '../user-config';
 import type { BaseItemDto, MediaStream, SourceInfo } from '../types';
@@ -13,6 +14,8 @@ export interface Track {
   id: string;
   label: string;
   lang?: string;
+  /** One of the file's own, rather than one loaded beside it. */
+  file?: boolean;
 }
 
 export interface PlayerState {
@@ -36,6 +39,8 @@ export interface PlayerState {
   error: string | null;
   /** The video plays in a small window of its own, with nothing over it. */
   pictureInPicture?: boolean;
+  /** The sound goes out undecoded, which a change of speed can't stretch. */
+  passthrough?: boolean;
 }
 
 /** What some players add to what a browser's video can do. */
@@ -44,6 +49,14 @@ export type PlayerFeature = 'audio' | 'chapters' | 'stats' | 'headers';
 /** Engines that list a file's audio tracks let the page's own video switch them. */
 export const browserFeatures: readonly PlayerFeature[] =
   'audioTracks' in HTMLMediaElement.prototype ? ['audio'] : [];
+
+/** What lining an added subtitle up with the file's own found; `asked` when the user asked for it. */
+export type SyncOutcome = { asked: boolean } & (
+  | { delayMs: number; movedMs: number; first: boolean; retimed: boolean }
+  | { failed: 'unmatched' | 'speed' }
+);
+
+export type SyncStatus = 'hand' | 'synced' | 'retimed' | 'unmatched' | 'speed';
 
 /** One set of controls over whichever player the page runs in. */
 export interface PlayerController {
@@ -69,8 +82,20 @@ export interface PlayerController {
   subtitleLines?: () => Promise<SubtitleLine[] | null>;
   /** Whether `subtitleLines` can read this subtitle; every one when missing. */
   canReadSubtitle?: (id: string) => boolean;
+  /** Lines the shown subtitle up with the file's own, for an added one the player can. */
+  autoSync?: {
+    run(): void;
+    /** A run the user asked for waits on the file's lines. */
+    waiting: boolean;
+    /** A new object each time a run finds something. */
+    outcome: SyncOutcome | null;
+    /** How the shown subtitle's delay was set, once known. */
+    status?: SyncStatus;
+  };
   /** The subtitle the page draws, for a player that draws none itself. */
   subtitleText?: string;
+  /** Missing where the player has no pictures for the seek bar. */
+  thumbnails?: ThumbnailFeed;
   /** Missing where the page always fills the screen. */
   toggleFullscreen?: () => void;
   /** The file's chapters, where the player reads them. */

@@ -3,6 +3,7 @@ import { Trans } from '@lingui/react/macro';
 import React from 'react';
 import { flushSync } from 'react-dom';
 import {
+  BiCast,
   BiCheck,
   BiCheckDouble,
   BiDownload,
@@ -11,6 +12,7 @@ import {
   BiListUl,
   BiPlay,
   BiReset,
+  BiShuffle,
   BiSkipNext,
   BiSolidHeart,
   BiTv,
@@ -24,11 +26,15 @@ import {
   ContextMenuTrigger,
 } from '@aiostreams/ui/context-menu';
 import {
+  offersFavourite,
   useClearResume,
+  useRemoteDevices,
   useSetFavorite,
   useSetPlayed,
   useSetPlayedUpTo,
 } from '../lib/queries';
+import { openRemote } from './remote-sheet';
+import { openRandom } from './random-pick';
 import { toast } from 'sonner';
 import { itemTitle, ticksToMs } from '../lib/format';
 import { itemPath, navigate, to } from '../lib/paths';
@@ -45,6 +51,7 @@ function PlayEntries({ item }: { item: BaseItemDto }) {
   const picker = useVersionPicker();
   const resumeMs = ticksToMs(item.UserData?.PlaybackPositionTicks);
   const straight = useStraightPlay()(item, resumeMs);
+  const devices = useRemoteDevices();
   return (
     <>
       <ContextMenuItem
@@ -60,6 +67,14 @@ function PlayEntries({ item }: { item: BaseItemDto }) {
         {straight ? <BiListUl /> : <BiSkipNext />}
         {straight ? t`Choose a version` : t`Play straight away`}
       </ContextMenuItem>
+      {!!devices.data?.length && (
+        <ContextMenuItem
+          data-name="play-on"
+          onSelect={() => openRemote({ play: { item, startMs: resumeMs } })}
+        >
+          <BiCast /> <Trans>Play on another device</Trans>
+        </ContextMenuItem>
+      )}
     </>
   );
 }
@@ -225,6 +240,14 @@ function ItemMenuContent({ item, onPage, onDetails }: MenuTarget) {
           <BiInfoCircle /> <Trans>Details</Trans>
         </ContextMenuItem>
       )}
+      {item.Type === 'Series' && (
+        <ContextMenuItem
+          data-name="random-episode"
+          onSelect={() => openRandom({ kind: 'episode', series: item })}
+        >
+          <BiShuffle /> <Trans>Random episode</Trans>
+        </ContextMenuItem>
+      )}
       <DownloadEntry item={item} playable={playable} />
       {!onPage && (
         <ContextMenuItem
@@ -271,15 +294,17 @@ function ItemMenuContent({ item, onPage, onDetails }: MenuTarget) {
           )}
         </>
       )}
-      <ContextMenuItem
-        data-name="favourite"
-        onSelect={() =>
-          setFavorite.mutate({ itemId: item.Id!, favorite: !favorite })
-        }
-      >
-        {favorite ? <BiSolidHeart /> : <BiHeart />}
-        {favorite ? t`Remove favourite` : t`Add favourite`}
-      </ContextMenuItem>
+      {offersFavourite(item.Type, favorite) && (
+        <ContextMenuItem
+          data-name="favourite"
+          onSelect={() =>
+            setFavorite.mutate({ itemId: item.Id!, favorite: !favorite })
+          }
+        >
+          {favorite ? <BiSolidHeart /> : <BiHeart />}
+          {favorite ? t`Remove favourite` : t`Add favourite`}
+        </ContextMenuItem>
+      )}
     </ContextMenuContent>
   );
 }

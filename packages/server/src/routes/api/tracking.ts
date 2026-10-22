@@ -569,7 +569,7 @@ async function flushProviderOutbox(
           }
         }
         await db.tx(async (tx) => {
-          for (const row of rows) {
+          for (const row of claimed) {
             await tx.exec(
               'DELETE FROM tracker_provider_outbox WHERE user_uuid = ? AND provider_id = ? AND record_id = ? AND updated_at_ms = ? AND lease_token = ?',
               [
@@ -603,7 +603,7 @@ async function flushProviderOutbox(
             ? 'rate_limited'
             : 'provider_unavailable';
         await db.tx(async (tx) => {
-          for (const row of rows) {
+          for (const row of claimed) {
             const attempt = Number(row.attempt_count) + 1;
             const retry = trackerOutboxRetry(
               adapter,
@@ -656,9 +656,7 @@ export function resolveLinkedAdapters(
   );
   const adapters = active.flatMap(([id, link]) => {
     const adapter = providerAdapters.find((candidate) => candidate.id === id);
-    return adapter && link.authRef
-      ? [{ adapter, authRef: link.authRef }]
-      : [];
+    return adapter && link.authRef ? [{ adapter, authRef: link.authRef }] : [];
   });
   const unsupported = active
     .filter(
@@ -685,6 +683,36 @@ export function defaultProviderApiFor(
       `Tracker provider ${adapter.id} has no configured API transport`
     );
   };
+}
+
+/**
+ * Persisted Jellyfin list/rating mutations must enter the same durable provider
+ * outbox as writes made through the tracker API. This keeps retries, rate
+ * limits, origin suppression, and provider-specific delete semantics unified.
+ */
+export async function fanOutLinkedTrackerRecord(
+  userUuid: string,
+  user: { trackerProviders?: Record<string, TrackerProviderLink> } | null,
+  record: TrackerRecord,
+  db: DbDriver = getDb()
+): Promise<void> {
+  const adapters = resolveLinkedAdapters(user).adapters.filter(
+    ({ adapter }) => adapter.id !== record.origin
+  );
+  if (!adapters.length) return;
+  const now = Date.now();
+  await db.tx(async (tx) => {
+    for (const { adapter } of adapters) {
+      await enqueueProviderRecords(tx, userUuid, adapter.id, [record], now);
+    }
+  });
+  await flushProviderOutbox(
+    db,
+    userUuid,
+    adapters,
+    (adapter) => defaultProviderApiFor(adapter),
+    now
+  );
 }
 
 /** Factory keeps the mounted API testable without weakening production auth. */
@@ -1723,8 +1751,7 @@ export function createTrackerRouter(
         );
       const db = dependencies.database();
       let tombstoneForProvider:
-        | ReturnType<typeof TrackerRecordSchema.parse>
-        | undefined;
+        ReturnType<typeof TrackerRecordSchema.parse> | undefined;
       // Compare-and-swap the exact value we read. Without this guard, a concurrent
       // sync POST could write a newer record between the SELECT and UPDATE and the
       // DELETE would silently replace that newer value with a stale tombstone.

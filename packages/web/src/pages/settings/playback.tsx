@@ -41,6 +41,7 @@ import { useFeature } from '../../lib/server-info';
 import { SettingsCard, SettingsRow } from '../../components/settings-card';
 import { BadgesRow, QuickFiltersRow } from '../../components/version-settings';
 import { onDevice, followsYou } from './common';
+import { ReactionSetting } from '../../components/party/reaction-setting';
 
 const nextPromptHelp = (prompt: NextPrompt) =>
   ({
@@ -96,6 +97,7 @@ export function PlaybackSection() {
   const [seekStep, setSeekStep] = useSetting(settings.controls.seekStep);
   const [volumeStep, setVolumeStep] = useSetting(settings.controls.volumeStep);
   const [holdRate, setHoldRate] = useSetting(settings.controls.holdRate);
+  const [thumbnails, setThumbnails] = useSetting(settings.controls.thumbnails);
   const [autoPlay, setAutoPlay] = useSetting(settings.playback.autoPlayFirst);
   const [nextPrompt, setNextPrompt] = useSetting(settings.next.prompt);
   const [nextLead, setNextLead] = useSetting(settings.next.lead);
@@ -109,10 +111,12 @@ export function PlaybackSection() {
   const [skipFillers, setSkipFillers] = useSetting(settings.next.skipFillers);
   const [skipRecaps, setSkipRecaps] = useSetting(settings.next.skipRecaps);
   const marked = useFeature('fillers');
-  const parties = useFeature('parties');
   const [partyMessages, setPartyMessages] = useSetting(settings.party.messages);
   const [partyReactions, setPartyReactions] = useSetting(
     settings.party.reactions
+  );
+  const [partySpeedSync, setPartySpeedSync] = useSetting(
+    settings.party.speedSync
   );
   const autoplay = prefs.EnableNextEpisodeAutoPlay !== false;
   const [hardwareDecoding, setHardwareDecoding] = useSetting(
@@ -276,27 +280,33 @@ export function PlaybackSection() {
           />
         )}
       </SettingsCard>
-      {parties && (
-        <SettingsCard
-          name="watch-parties"
-          title={t`Watch parties`}
-          description={followsYou()}
-        >
-          <Switch
-            side="right"
-            label={t`Show messages over the video`}
-            help={t`What the people you watch with say shows for a few seconds. It always stays in the party's chat.`}
-            value={partyMessages}
-            onValueChange={setPartyMessages}
-          />
-          <Switch
-            side="right"
-            label={t`Show reactions over the video`}
-            value={partyReactions}
-            onValueChange={setPartyReactions}
-          />
-        </SettingsCard>
-      )}
+      <SettingsCard
+        name="watch-parties"
+        title={t`Watch parties`}
+        description={followsYou()}
+      >
+        <Switch
+          side="right"
+          label={t`Show messages over the video`}
+          help={t`What the people you watch with say shows for a few seconds. It always stays in the party's chat.`}
+          value={partyMessages}
+          onValueChange={setPartyMessages}
+        />
+        <Switch
+          side="right"
+          label={t`Show reactions over the video`}
+          value={partyReactions}
+          onValueChange={setPartyReactions}
+        />
+        <ReactionSetting />
+        <Switch
+          side="right"
+          label={t`Keep in step by changing speed`}
+          help={t`Plays a little faster or slower to catch up with the party. Off, the video jumps instead.`}
+          value={partySpeedSync}
+          onValueChange={setPartySpeedSync}
+        />
+      </SettingsCard>
       <SettingsCard
         name="controls"
         title={t`Controls`}
@@ -334,6 +344,15 @@ export function PlaybackSection() {
           value={String(holdRate)}
           onValueChange={(v) => setHoldRate(Number(v))}
         />
+        {shell && (
+          <Switch
+            side="right"
+            label={t`Seek bar previews`}
+            help={t`Shows a picture of the video where you point, drag or skip to on the seek bar. Each one reads a little of the file, so turn them off to save data.`}
+            value={thumbnails}
+            onValueChange={setThumbnails}
+          />
+        )}
       </SettingsCard>
       {shell && (
         <SettingsCard name="video" title={t`Video`} description={onDevice()}>
@@ -479,11 +498,9 @@ function PlayerCard() {
         value={player}
         onValueChange={setPlayer}
       />
-      {currentHost().name === 'android-app' &&
-        !launched &&
-        !preset &&
-        player !== CUSTOM_LINK && (
-          <>
+      {shellHost() && !launched && !preset && player !== CUSTOM_LINK && (
+        <>
+          {currentHost().name === 'android-app' && (
             <Select
               label={t`Engine`}
               help={engineHelp(engine)}
@@ -491,15 +508,16 @@ function PlayerCard() {
               value={engine}
               onValueChange={(v) => setEngine(v as PlayerEngine)}
             />
-            <Select
-              label={t`Cache size`}
-              help={t`How much of the video the player holds in memory: ahead, to ride out a slow connection, and behind, to seek back at once. Automatic sizes it from this device's memory.`}
-              options={cacheOptions()}
-              value={cacheSize}
-              onValueChange={(v) => setCacheSize(v as CacheSize)}
-            />
-          </>
-        )}
+          )}
+          <Select
+            label={t`Cache size`}
+            help={t`How much of the video the player holds in memory: ahead, to ride out a slow connection, and behind, to seek back at once. Automatic sizes it from this device's memory.`}
+            options={cacheOptions()}
+            value={cacheSize}
+            onValueChange={(v) => setCacheSize(v as CacheSize)}
+          />
+        </>
+      )}
       {launched && (
         <SettingsRow
           label={t`Your ${name}`}

@@ -7,6 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aiostreams-container = { path = "../../native/container" }
+aiostreams-thumbs = { path = "../../native/thumbs" }
 libloading.workspace = true
 log.workspace = true
 serde.workspace = true

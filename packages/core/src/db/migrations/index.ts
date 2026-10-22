@@ -56,6 +56,8 @@ import { trackerProviderOutbox } from './900008_tracker_provider_outbox.js';
 import { trackerProviderFacets } from './900009_tracker_provider_facets.js';
 import { trackerProviderFacetRetry } from './900010_tracker_provider_facet_retry.js';
 import { wetrakrRequestQuota } from './900011_wetrakr_request_quota.js';
+import { jellyfinTrackerBridgeChanges } from './901001_jellyfin_tracker_bridge_changes.js';
+import { watchSessionTracks } from './0048_watch_session_tracks.js';
 import type { Migration } from './types.js';
 
 export const MIGRATIONS: readonly Migration[] = [
@@ -91,7 +93,7 @@ export const MIGRATIONS: readonly Migration[] = [
   wetrakrRequestQuota,
   // The fork has already published id 20 as `addon_performance` and ids
   // 900001–900011 for its custom schema. Keep those identities untouched;
-  // reserve a monotonic range for upstream migrations while preserving their
+  // reserve a monotonic range (900012–900040) for upstream migrations while preserving their
   // original names so databases created by upstream can be recognized.
   ...[
     animeDatabase,
@@ -122,7 +124,9 @@ export const MIGRATIONS: readonly Migration[] = [
     mediaInfoSources,
     jellyfinUserAddresses,
     appReports,
+    watchSessionTracks,
   ].map((migration, index) => ({ ...migration, id: 900012 + index })),
+  jellyfinTrackerBridgeChanges,
 ];
 
 export type { Migration } from './types.js';

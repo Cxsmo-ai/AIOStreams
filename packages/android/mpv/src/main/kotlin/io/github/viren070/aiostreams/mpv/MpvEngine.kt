@@ -21,7 +21,9 @@ import io.github.viren070.aiostreams.playback.PlayerTrack
 import io.github.viren070.aiostreams.playback.Sound
 import io.github.viren070.aiostreams.playback.Style
 import io.github.viren070.aiostreams.playback.SubtitleFont
+import io.github.viren070.aiostreams.playback.SubtitleLine
 import io.github.viren070.aiostreams.playback.SubtitleMode
+import io.github.viren070.aiostreams.playback.TimeRange
 import `is`.xyz.mpv.MPV
 import `is`.xyz.mpv.MPVNode
 import java.io.File
@@ -29,6 +31,7 @@ import java.security.KeyStore
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -48,7 +51,7 @@ import kotlinx.serialization.json.put
 class MpvEngine(private val context: Context) : Engine {
     private lateinit var mpv: MPV
     // The page's calls wait on mpv, never the main thread.
-    private val calls = Executors.newSingleThreadExecutor { Thread(it, "mpv-calls") }
+    private val calls = Executors.newSingleThreadScheduledExecutor { Thread(it, "mpv-calls") }
     private var listener: Engine.Listener? = null
 
     @Volatile
@@ -65,6 +68,7 @@ class MpvEngine(private val context: Context) : Engine {
     private var filters: SoundFilters? = null
     private var subtitleScale: Double? = null
     private var ownFont = ""
+    private val styled = HashMap<String, String>()
     private var statsPage: String? = null
 
     // The shown subtitle and the file's picture subtitles, which keep their own size.
@@ -74,6 +78,12 @@ class MpvEngine(private val context: Context) : Engine {
     @Volatile
     private var pictures = emptySet<String>()
     private var picture = false
+
+    /** The file's own subtitle whose lines go to the page. */
+    @Volatile
+    private var reference: String? = null
+    private val sent = HashSet<SubtitleLine>()
+    private var readingAhead: ScheduledFuture<*>? = null
 
     private val tv = context.getSystemService(UiModeManager::class.java).currentModeType ==
         Configuration.UI_MODE_TYPE_TELEVISION
@@ -87,7 +97,7 @@ class MpvEngine(private val context: Context) : Engine {
         this.listener = listener
         dir.mkdirs()
         // mpv's TLS can't read Android's certificate store, so it gets a copy each start.
-        writeCertificates(context, File(dir, CA_BUNDLE))
+        File(dir, CA_BUNDLE).writeText(trustedRoots(context))
         fallbackFont(context)
         copyFonts()
         val options = mapOf(
@@ -118,6 +128,7 @@ class MpvEngine(private val context: Context) : Engine {
         mpv.addLogObserver(logs)
         for (name in OBSERVED) mpv.observeProperty(name, formatOf(name))
         mpv.observeProperty(AUDIO_PARAMS, MPV.mpvFormat.MPV_FORMAT_NODE)
+        mpv.observeProperty(REFERENCE_LINES, MPV.mpvFormat.MPV_FORMAT_STRING)
         calls.execute { filters = SoundFilters(mpv) }
     }
 
@@ -175,24 +186,30 @@ class MpvEngine(private val context: Context) : Engine {
     override fun addSubtitle(url: String, title: String?, language: String?) =
         command("sub-add", url, "select", title.orEmpty(), language.orEmpty())
 
+    // Sets only what changed, so the user's mpv.conf profiles keep what they set since.
     override fun setStyle(style: Style) = calls.execute {
         val s = style.subtitles
-        set("keepaspect", flag(style.fit != Fit.STRETCH))
-        set("panscan", if (style.fit == Fit.CROP) "1" else "0")
-        set("sub-ass-force-margins", flag(style.fit == Fit.CROP))
-        set("sub-bold", flag(s.bold))
-        set("sub-color", s.color)
-        set("sub-outline-color", s.outlineColor)
-        set("sub-outline-size", s.outlineSize.toString())
-        set("sub-shadow-offset", s.shadowSize.toString())
-        set("sub-shadow-color", s.outlineColor)
-        set("sub-font", s.font?.family ?: ownFont)
-        set("sub-back-color", s.backColor)
-        set("sub-border-style", if (s.box) "background-box" else "outline-and-shadow")
-        set("sub-ass-override", if (s.forceStyle) "force" else "scale")
-        set("sub-pos", Math.round(s.position).toString())
-        subtitleScale = s.scale
-        set("sub-scale", if (picture) "1" else s.scale.toString())
+        fun put(name: String, value: String) {
+            if (styled.put(name, value) != value) set(name, value)
+        }
+        put("keepaspect", flag(style.fit != Fit.STRETCH))
+        put("panscan", if (style.fit == Fit.CROP) "1" else "0")
+        put("sub-ass-force-margins", flag(style.fit == Fit.CROP))
+        put("sub-bold", flag(s.bold))
+        put("sub-color", s.color)
+        put("sub-outline-color", s.outlineColor)
+        put("sub-outline-size", s.outlineSize.toString())
+        put("sub-shadow-offset", s.shadowSize.toString())
+        put("sub-shadow-color", s.outlineColor)
+        put("sub-font", s.font?.family ?: ownFont)
+        put("sub-back-color", s.backColor)
+        put("sub-border-style", if (s.box) "background-box" else "outline-and-shadow")
+        put("sub-ass-override", if (s.forceStyle) "force" else "scale")
+        put("sub-pos", Math.round(s.position).toString())
+        if (subtitleScale != s.scale) {
+            subtitleScale = s.scale
+            set("sub-scale", if (picture) "1" else s.scale.toString())
+        }
     }
 
     // TVs copy MediaCodec's frames back: some draw direct ones wrong, and they have no battery to save.
@@ -213,6 +230,26 @@ class MpvEngine(private val context: Context) : Engine {
             val budget = CacheBudget.bytes(context, settings.cacheMb)
             set("demuxer-max-bytes", (budget - budget / 4).toString())
             set("demuxer-max-back-bytes", (budget / 4).toString())
+        }
+    }
+
+    // Through the secondary subtitle, which the page never shows.
+    override fun watchSubtitleLines(track: String?) = calls.execute {
+        reference = track
+        synchronized(sent) { sent.clear() }
+        readingAhead?.cancel(false)
+        readingAhead = null
+        if (track != null) {
+            set("secondary-sub-visibility", "no")
+            set("secondary-sid", track)
+            // Once mpv has decoded the newly picked track's lines, then as it reads on.
+            readingAhead = calls.scheduleWithFixedDelay(
+                { runCatching(::readAhead).onFailure { Log.w(TAG, "reading ahead failed", it) } },
+                1, READ_AHEAD_EVERY_S, TimeUnit.SECONDS,
+            )
+        } else {
+            set("secondary-sid", "no")
+            set("secondary-sub-visibility", "yes")
         }
     }
 
@@ -239,6 +276,12 @@ class MpvEngine(private val context: Context) : Engine {
     override fun setSound(sound: Sound) {
         this.sound = sound
         calls.execute { filters?.apply(sound) }
+    }
+
+    private fun audioParams(params: MPVNode?) {
+        updateFilters { decoded(params) }
+        val format = params?.get("format")?.asString()
+        listener?.onState(PlayerState(passthrough = format?.startsWith("spdif") == true))
     }
 
     private fun updateFilters(change: SoundFilters.() -> Unit) = calls.execute {
@@ -287,18 +330,19 @@ class MpvEngine(private val context: Context) : Engine {
 
     private val observer = object : MPV.EventObserver {
         override fun eventProperty(property: String) =
-            if (property == AUDIO_PARAMS) updateFilters { decoded(null) } else report(property, JsonNull)
+            if (property == AUDIO_PARAMS) audioParams(null) else report(property, JsonNull)
 
         override fun eventProperty(property: String, value: Long) = report(property, JsonPrimitive(value))
 
         override fun eventProperty(property: String, value: Boolean) = report(property, JsonPrimitive(value))
 
-        override fun eventProperty(property: String, value: String) = report(property, JsonPrimitive(value))
+        override fun eventProperty(property: String, value: String) =
+            if (property == REFERENCE_LINES) reportLines(subtitleLines(value)) else report(property, JsonPrimitive(value))
 
         override fun eventProperty(property: String, value: Double) = report(property, JsonPrimitive(value))
 
         override fun eventProperty(property: String, value: MPVNode) = if (property == AUDIO_PARAMS) {
-            updateFilters { decoded(value) }
+            audioParams(value)
         } else {
             report(property, runCatching { Json.parseToJsonElement(value.toJson()) }.getOrDefault(JsonNull))
         }
@@ -308,6 +352,7 @@ class MpvEngine(private val context: Context) : Engine {
             when (eventId) {
                 MPV.mpvEvent.MPV_EVENT_START_FILE -> {
                     cause = null
+                    synchronized(sent) { sent.clear() }
                     updateFilters { startFile() }
                     listener.onEvent("start")
                 }
@@ -357,6 +402,27 @@ class MpvEngine(private val context: Context) : Engine {
         }
     }
 
+    private fun reportLines(lines: List<SubtitleLine>) {
+        val track = reference ?: return
+        val fresh = lines.filter { synchronized(sent) { sent.add(it) } }
+        if (fresh.isNotEmpty()) listener?.onSubtitleLines(track, fresh)
+    }
+
+    /** The reference's events from the playing one to the end of what mpv has read. */
+    private fun readAhead() {
+        val lines = mutableListOf<SubtitleLine>()
+        var last = mpv.getPropertyString("secondary-sub-delay")
+        for (step in 0 until READ_AHEAD_STEPS) {
+            if (runCatching { mpv.command(*NEXT_REFERENCE_LINE) }.isFailure) break
+            val now = mpv.getPropertyString("secondary-sub-delay")
+            if (now == last) break
+            last = now
+            mpv.getPropertyString(REFERENCE_LINES)?.let { lines += subtitleLines(it) }
+        }
+        set("secondary-sub-delay", "0")
+        reportLines(lines)
+    }
+
     /** An observed property's change, in the page's terms. */
     private fun report(name: String, value: JsonElement) {
         val listener = listener ?: return
@@ -366,7 +432,7 @@ class MpvEngine(private val context: Context) : Engine {
         val state = when (name) {
             "time-pos" -> PlayerState(positionMs = (number ?: return) * 1000)
             "duration" -> PlayerState(durationMs = (number ?: return) * 1000)
-            "demuxer-cache-time" -> PlayerState(bufferedMs = (number ?: return) * 1000)
+            "demuxer-cache-state" -> PlayerState(buffered = cacheRanges(value as? JsonObject ?: return))
             "pause" -> PlayerState(paused = on)
             "paused-for-cache" -> PlayerState(buffering = on)
             "seeking" -> PlayerState(seeking = on)
@@ -408,7 +474,7 @@ class MpvEngine(private val context: Context) : Engine {
 
     companion object {
         private val OBSERVED = listOf(
-            "time-pos", "duration", "demuxer-cache-time", "pause", "paused-for-cache", "seeking",
+            "time-pos", "duration", "demuxer-cache-state", "pause", "paused-for-cache", "seeking",
             "idle-active", "volume", "volume-max", "mute", "speed", "aid", "sid",
             "track-list", "chapter-list", "video-params", "container-fps",
         )
@@ -434,6 +500,17 @@ class MpvEngine(private val context: Context) : Engine {
         private fun trackId(value: JsonPrimitive?) = value?.contentOrNull?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
 
         private fun JsonObject.text(name: String) = (this[name] as? JsonPrimitive)?.contentOrNull
+
+        private fun JsonObject.number(name: String) = (this[name] as? JsonPrimitive)?.doubleOrNull
+
+        /** The cache's seekable ranges, or where it reads to where it ends when it can't seek in itself. */
+        private fun cacheRanges(state: JsonObject): List<TimeRange> {
+            fun range(start: Double?, end: Double?) = if (start != null && end != null) TimeRange(start * 1000, end * 1000) else null
+            val ranges = (state["seekable-ranges"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
+                .mapNotNull { range(it.number("start"), it.number("end")) }
+            return ranges.ifEmpty { listOfNotNull(range(state.number("reader-pts"), state.number("cache-end"))) }
+                .sortedBy { it.startMs }
+        }
 
         private fun trackOf(track: JsonObject): PlayerTrack? {
             val type = when (track.text("type")) {
@@ -463,6 +540,28 @@ class MpvEngine(private val context: Context) : Engine {
         /** Observed for the sound filters rather than the page. */
         private const val AUDIO_PARAMS = "audio-params"
 
+        /** The secondary subtitle's events, which mpv reports whether it shows them or not. */
+        private const val REFERENCE_LINES = "secondary-sub-text/ass-full"
+
+        /** Steps the secondary subtitle on to its next event, reaching lines mpv has read but not yet played. */
+        private val NEXT_REFERENCE_LINE = arrayOf("no-osd", "sub-step", "1", "secondary")
+        private const val READ_AHEAD_EVERY_S = 15L
+        private const val READ_AHEAD_STEPS = 500
+
+        /** The times of [REFERENCE_LINES]' `Dialogue: layer,start,end,...` events. */
+        private fun subtitleLines(events: String) = events.lineSequence().mapNotNull { event ->
+            val fields = event.takeIf { it.startsWith("Dialogue: ") }?.split(',', limit = 4) ?: return@mapNotNull null
+            val start = assTime(fields.getOrNull(1)) ?: return@mapNotNull null
+            val end = assTime(fields.getOrNull(2)) ?: return@mapNotNull null
+            SubtitleLine(start, end).takeIf { end > start }
+        }.toList()
+
+        private fun assTime(time: String?): Double? {
+            val parts = time?.split(':')?.takeIf { it.size == 3 } ?: return null
+            val (hours, minutes, seconds) = parts.map { it.toDoubleOrNull() ?: return null }
+            return Math.round(((hours * 60 + minutes) * 60 + seconds) * 1000).toDouble()
+        }
+
         /** The user's own options, which mpv reads at start and on [reloadConfig]. */
         fun configFile(context: Context) = File(File(context.filesDir, "mpv"), "mpv.conf")
 
@@ -470,21 +569,21 @@ class MpvEngine(private val context: Context) : Engine {
         fun fallbackFont(context: Context): File =
             File(File(context.filesDir, "mpv").apply { mkdirs() }, FONT).also { copyAsset(context, FONT, it) }
 
-        /** Every certificate Android trusts, the user's own included, as PEM. */
-        private fun writeCertificates(context: Context, target: File) {
+        /** Every certificate Android trusts, the user's own included, as PEM, for TLS outside Android's own. */
+        fun trustedRoots(context: Context): String {
             val store = KeyStore.getInstance("AndroidCAStore").apply { load(null) }
-            target.writeText(buildString {
+            return buildString {
                 for (alias in store.aliases()) {
                     val certificate = store.getCertificate(alias) ?: continue
                     append("-----BEGIN CERTIFICATE-----\n")
                     append(Base64.encodeToString(certificate.encoded, Base64.DEFAULT))
                     append("-----END CERTIFICATE-----\n")
                 }
-                // Same extra roots as the network security config, for mpv's own TLS.
+                // Same extra roots as the network security config.
                 for (id in listOf(R.raw.isrg_root_x1, R.raw.isrg_root_x2)) {
                     append(context.resources.openRawResource(id).bufferedReader().use { it.readText() })
                 }
-            })
+            }
         }
 
         private fun copyAsset(context: Context, name: String, target: File) {
@@ -505,7 +604,7 @@ class MpvEngine(private val context: Context) : Engine {
         private fun formatOf(name: String): Int = when (name) {
             "pause", "paused-for-cache", "seeking", "idle-active", "mute" -> MPV.mpvFormat.MPV_FORMAT_FLAG
             "aid", "sid" -> MPV.mpvFormat.MPV_FORMAT_STRING
-            "track-list", "chapter-list", "video-params" -> MPV.mpvFormat.MPV_FORMAT_NODE
+            "track-list", "chapter-list", "video-params", "demuxer-cache-state" -> MPV.mpvFormat.MPV_FORMAT_NODE
             else -> MPV.mpvFormat.MPV_FORMAT_DOUBLE
         }
     }

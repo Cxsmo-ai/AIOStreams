@@ -57,7 +57,6 @@ import {
 } from '../../lib/party/party';
 import { UserAvatar } from '../user-avatar';
 import { QrCode } from './qr-code';
-import { PARTY_REACTIONS } from './reactions';
 
 interface Opening {
   /** What starting a party plays for it, once it has started. */
@@ -119,6 +118,7 @@ export function PartySheet() {
       side="right"
       // Narrow, so a phone on its side keeps most of the video in view.
       size="sm"
+      overlayClass="bg-black/40"
       contentClass="flex flex-col gap-0 overflow-hidden p-0"
       headerClass={cn(GUTTER, 'pb-3 pt-[calc(1rem+env(safe-area-inset-top))]')}
       closeClass="end-[max(0.5rem,env(safe-area-inset-right))] top-[calc(0.75rem+env(safe-area-inset-top))]"
@@ -366,7 +366,7 @@ function Household({ onJoin }: { onJoin(invite: PartyInvite): void }) {
             data-ui="party-listing"
             className="flex items-center gap-3 rounded-xl bg-white/5 p-3"
           >
-            <UserAvatar name={p.host} className="size-9" />
+            <UserAvatar name={p.host} src={p.avatar} className="size-9" />
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-semibold">
                 <Trans>{host}'s party</Trans>
@@ -534,14 +534,14 @@ function PreviewDetails({
   preview: PartyPreview;
   relay: string;
 }) {
-  const { host, others, playing } = preview;
+  const { host, hostAvatar, others, playing } = preview;
   const count = others.length + 1;
   const on = relayHost(relay);
   const names = nameList(others);
   return (
     <>
       <div className="flex items-center gap-3">
-        <UserAvatar name={host} className="size-10" />
+        <UserAvatar name={host} src={hostAvatar} className="size-10" />
         <div className="min-w-0">
           <p className="truncate font-semibold">
             <Trans>{host}'s party</Trans>
@@ -655,6 +655,7 @@ function PartyDetails({ state }: { state: PartyState }) {
   const host = !!state.members.find((m) => m.you)?.host;
   const [messages, setMessages] = useSetting(settings.party.messages);
   const [reactions, setReactions] = useSetting(settings.party.reactions);
+  const [speedSync, setSpeedSync] = useSetting(settings.party.speedSync);
   const watching = state.members.length;
   return (
     <>
@@ -701,6 +702,15 @@ function PartyDetails({ state }: { state: PartyState }) {
           label={t`Reactions`}
           value={reactions}
           onValueChange={setReactions}
+        />
+      </Section>
+      <Section name="sync" title={t`Keeping in step`}>
+        <Switch
+          side="right"
+          label={t`Change speed to catch up`}
+          help={t`Off, the video jumps instead.`}
+          value={speedSync}
+          onValueChange={setSpeedSync}
         />
       </Section>
       <Section name="leave">
@@ -875,9 +885,13 @@ function Member({ member, host }: { member: PartyMember; host: boolean }) {
   return (
     <li
       data-ui="party-member"
+      data-you={member.you || undefined}
+      data-host={member.host || undefined}
+      data-away={member.away || undefined}
+      data-buffering={member.buffering || undefined}
       className="flex items-center gap-3 rounded-xl p-2"
     >
-      <UserAvatar name={member.name} className="size-9" />
+      <UserAvatar name={member.name} src={member.avatar} className="size-9" />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-semibold">
           {member.name}
@@ -908,13 +922,14 @@ function Member({ member, host }: { member: PartyMember; host: boolean }) {
 }
 
 function Reactions({ live, compact }: { live: boolean; compact: boolean }) {
+  const [reactions] = useSetting(settings.party.reactionSet);
   return (
     <div
       className={cn('flex flex-wrap justify-center gap-2', compact && 'mb-2')}
     >
-      {PARTY_REACTIONS.map((emoji) => (
+      {reactions.map((emoji, i) => (
         <button
-          key={emoji}
+          key={i}
           type="button"
           data-ui="party-reaction"
           aria-label={t`React with ${emoji}`}
@@ -1031,6 +1046,7 @@ function ChatMessages({ chat, live }: { chat: PartyMessage[]; live: boolean }) {
         key={m.key}
         data-ui="party-message"
         data-status={m.status}
+        data-you={m.you || undefined}
         className={cn(
           'flex flex-col',
           m.you ? 'items-end' : 'items-start',

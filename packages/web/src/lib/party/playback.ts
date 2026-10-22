@@ -1,13 +1,16 @@
 import React from 'react';
 import type { GroupCommand } from '@aiostreams/core';
 import type { PlayerController, PlayerState } from '../playback/controller';
+import { settings } from '../settings';
 import { useLatest } from '../use-latest';
 import { party, positionAt, useParty, type Timeline } from './party';
 
 /*
  * Keeps one player on the party's timeline. Commands run at the moment they
- * name, on the relay's clock; between them, a small drift is taken up by
- * playing up to 5% faster or slower, and a larger one by a seek.
+ * name, on the relay's clock; between them, a drift is taken up by playing a
+ * little faster or slower until back in step, and a larger one by a seek.
+ * Each change of speed stretches the sound, so it changes seldom, and never
+ * for sound passed through undecoded.
  */
 
 /** After a seek, the position settles before drift is measured again. */
@@ -16,17 +19,18 @@ const SEEK_COOLDOWN_MS = 2_000;
 /** A shorter stall costs only this member, who catches up after it. */
 const BUFFER_AFTER_MS = 3_000;
 const TICK_MS = 250;
+const REPORTS_MS = 2_000;
 const RESUME_MS = 5_000;
 /** Positions this close count as there. */
 const ACCURATE_MS = 250;
-/** Close enough to play at normal speed. */
-const IN_STEP_MS = 30;
-const MAX_NUDGE = 0.05;
-/** The drift a full nudge takes up in about a second. */
-const NUDGE_SPAN_MS = 1_000;
-/** At 5%, more than this would take several seconds to take up. */
+/** Off by more than this for a second, the player starts catching up. */
+const NUDGE_FROM_MS = 150;
+const NUDGE_AFTER_MS = 1_000;
+/** Back within this, it plays at normal speed again. */
+const IN_STEP_MS = 50;
+const NUDGE = 0.03;
 const SEEK_DRIFT_MS = 400;
-/** A player that plays at one speed seeks sooner. */
+/** Without changes of speed, a player seeks only this far off. */
 const SEEK_DRIFT_FIXED_MS = 1_000;
 /** Behind by less than this at a pause, a member plays on to it. */
 const CATCH_UP_MS = 3_000;
@@ -34,8 +38,14 @@ const DEFAULT_LEAD_MS = 250;
 /** How long a pause or play this side made stays its own, not the user's. */
 const OWN_CHANGE_MS = 1_500;
 
+interface Report {
+  positionMs: number;
+  at: number;
+}
+
 class Follower {
-  private sample = { positionMs: 0, at: performance.now() };
+  private sample: Report = { positionMs: 0, at: performance.now() };
+  private reports: Report[] = [];
   private rate = 1;
   private settleUntil = 0;
   private lastSeekAt = -Infinity;
@@ -48,6 +58,7 @@ class Follower {
   private own: { paused: boolean; at: number } | null = null;
   private pauseAt: number | null = null;
   private lastResume = 0;
+  private offSince: number | null = null;
   private stopped = false;
 
   constructor(
@@ -56,10 +67,7 @@ class Follower {
     readonly playlistItemId: string
   ) {
     this.own = { paused: true, at: performance.now() };
-    this.sample = {
-      positionMs: player().playhead.positionMs,
-      at: performance.now(),
-    };
+    this.restart(player().playhead.positionMs);
   }
 
   private get timeline(): Timeline | null {
@@ -67,7 +75,7 @@ class Follower {
     return timeline?.playlistItemId === this.playlistItemId ? timeline : null;
   }
 
-  /** Where the player is now, carried on from its last report. */
+  /** Where the player is now, carried on from its timeliest report. */
   position(): number {
     const { state } = this.player();
     if (state.paused || state.waiting) return this.sample.positionMs;
@@ -82,7 +90,21 @@ class Follower {
   }
 
   onPosition(positionMs: number): void {
-    this.sample = { positionMs, at: performance.now() };
+    const at = performance.now();
+    const { state } = this.player();
+    if (state.paused || state.waiting) return this.restart(positionMs, at);
+    // Reports only ever arrive late, so the one furthest on came soonest.
+    const on = (r: Report) => r.positionMs - r.at * this.rate;
+    this.reports = [
+      ...this.reports.filter((r) => at - r.at < REPORTS_MS),
+      { positionMs, at },
+    ];
+    this.sample = this.reports.reduce((a, b) => (on(b) > on(a) ? b : a));
+  }
+
+  private restart(positionMs: number, at = performance.now()): void {
+    this.sample = { positionMs, at };
+    this.reports = [this.sample];
   }
 
   private after(ms: number, run: () => void): void {
@@ -102,16 +124,17 @@ class Follower {
 
   private setRate(rate: number): void {
     if (!this.speed || rate === this.rate) return;
-    this.sample = { positionMs: this.position(), at: performance.now() };
+    this.restart(this.position());
     this.rate = rate;
     this.speed(rate);
   }
 
   private seekTo(positionMs: number): void {
     const now = performance.now();
+    this.offSince = null;
     this.setRate(1);
     this.player().seek(Math.max(positionMs, 0));
-    this.sample = { positionMs: Math.max(positionMs, 0), at: now };
+    this.restart(Math.max(positionMs, 0), now);
     this.settleUntil = now + SETTLE_MS;
     this.lastSeekAt = now;
     this.seekStartedAt = now;
@@ -195,7 +218,7 @@ class Follower {
       previous &&
       (state.paused !== previous.paused || state.waiting !== previous.waiting)
     )
-      this.sample = { positionMs: this.player().playhead.positionMs, at: now };
+      this.restart(this.player().playhead.positionMs, now);
     if (this.seekStartedAt !== null && previous?.waiting && !state.waiting) {
       const took = now - this.seekStartedAt;
       if (took < 3_000)
@@ -251,6 +274,7 @@ class Follower {
       return;
     }
     if (!timeline.playing || state.paused || state.waiting) {
+      this.offSince = null;
       this.setRate(1);
       return;
     }
@@ -258,20 +282,25 @@ class Follower {
     const expected = this.expected(timeline);
     const drift = this.position() - expected;
     party.offset(-drift);
-    const limit = this.speed ? SEEK_DRIFT_MS : SEEK_DRIFT_FIXED_MS;
-    if (Math.abs(drift) > limit) {
+    const nudges =
+      !!this.speed && settings.party.speedSync.read() && !state.passthrough;
+    if (Math.abs(drift) > (nudges ? SEEK_DRIFT_MS : SEEK_DRIFT_FIXED_MS)) {
       if (now - this.lastSeekAt > SEEK_COOLDOWN_MS)
         this.seekTo(expected + this.seekLead);
       return;
     }
-    if (!this.speed) return;
-    const nudge = Math.max(
-      -MAX_NUDGE,
-      Math.min(MAX_NUDGE, drift / NUDGE_SPAN_MS)
-    );
-    const rate = Math.abs(drift) < IN_STEP_MS ? 1 : 1 - nudge;
-    if (rate === 1 || Math.abs(rate - this.rate) >= 0.01)
-      this.setRate(Math.round(rate * 1000) / 1000);
+    if (!nudges) return this.setRate(1);
+    // Ahead plays slower, behind faster, until in step or past it.
+    const way = drift > 0 ? 1 - NUDGE : 1 + NUDGE;
+    if (this.rate === 1) {
+      if (Math.abs(drift) <= NUDGE_FROM_MS) this.offSince = null;
+      else if ((this.offSince ??= now) <= now - NUDGE_AFTER_MS) {
+        this.offSince = null;
+        this.setRate(way);
+      }
+    } else if (Math.abs(drift) < IN_STEP_MS || this.rate !== way) {
+      this.setRate(1);
+    }
   }
 
   stop(): void {

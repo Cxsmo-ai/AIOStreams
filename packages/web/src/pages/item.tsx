@@ -3,6 +3,7 @@ import { t } from '@lingui/core/macro';
 import { Trans } from '@lingui/react/macro';
 import {
   BiCalendarAlt,
+  BiCast,
   BiCheck,
   BiChevronRight,
   BiDislike,
@@ -10,6 +11,7 @@ import {
   BiHeart,
   BiPlay,
   BiRevision,
+  BiShuffle,
   BiSolidDislike,
   BiSolidHeart,
   BiSolidStar,
@@ -31,14 +33,16 @@ import {
   useItem,
   useItemPages,
   useNextUpFor,
-  useNextUpLater,
+  useFetchNextUp,
   useSeasons,
   openingSeason,
   useSetDropped,
+  offersFavourite,
   useSetFavorite,
   useShowAhead,
   useSetPlayed,
   useSimilar,
+  useRemoteDevices,
 } from '../lib/queries';
 import {
   backdropUrls,
@@ -85,9 +89,12 @@ import { BackdropFrame } from '../components/hero';
 import type { BaseItemDto } from '../lib/types';
 import { useHold } from '../lib/use-hold';
 import { useExternalReturn } from '../lib/playback/external-return';
+import { tab, tabList } from '../lib/input';
 import { CachedImage } from '../components/cached-image';
 import { TrailerButton } from '../components/trailers';
 import { openPartySheet } from '../components/party/party-sheet';
+import { openRemote } from '../components/remote-sheet';
+import { openRandom } from '../components/random-pick';
 import { useParty } from '../lib/party/party';
 import {
   DownloadButton,
@@ -327,7 +334,7 @@ function Header({ item, season }: { item: BaseItemDto; season?: BaseItemDto }) {
   const { client } = useSession();
   const picker = useVersionPicker();
   const nextUp = useNextUpFor(item.Id!, item.Type === 'Series');
-  const nextUpLater = useNextUpLater(item.Id!);
+  const fetchNextUp = useFetchNextUp();
   // Play holds its place, and focus, while a show's next episode is on its way.
   const nextUpPending = item.Type === 'Series' && nextUp.isPending;
   const logo = logoUrl(client, item, { maxWidth: 416 });
@@ -364,6 +371,7 @@ function Header({ item, season }: { item: BaseItemDto; season?: BaseItemDto }) {
       : undefined
   );
   const inParty = !!useParty();
+  const devices = useRemoteDevices();
   const holdRestart = useHold(
     target ? () => picker.play(target, { startMs: 0, held: true }) : undefined
   );
@@ -451,7 +459,7 @@ function Header({ item, season }: { item: BaseItemDto; season?: BaseItemDto }) {
                 onClick={() =>
                   target
                     ? picker.play(target, { startMs: resumeMs })
-                    : void nextUpLater().then(
+                    : void fetchNextUp(item.Id!).then(
                         (episode) =>
                           episode &&
                           picker.play(episode, {
@@ -486,33 +494,71 @@ function Header({ item, season }: { item: BaseItemDto; season?: BaseItemDto }) {
             </div>
           )}
           <TrailerButton item={item} />
-          <Tooltip
-            trigger={
-              <IconButton
-                data-ui="item-action"
-                data-name="party"
-                intent="gray-subtle"
-                className="rounded-full"
-                icon={<BiGroup />}
-                aria-label={inParty ? t`Watch party` : t`Watch together`}
-                onClick={() =>
-                  openPartySheet(
-                    target && !inParty
-                      ? {
-                          play: {
-                            title: fullTitle(target),
-                            run: () =>
-                              picker.play(target, { startMs: resumeMs }),
-                          },
-                        }
-                      : {}
-                  )
-                }
-              />
-            }
-          >
-            {inParty ? t`Watch party` : t`Watch together`}
-          </Tooltip>
+          {item.Type === 'Series' && (
+            <Tooltip
+              trigger={
+                <IconButton
+                  data-ui="item-action"
+                  data-name="random"
+                  intent="gray-subtle"
+                  className="rounded-full"
+                  icon={<BiShuffle />}
+                  aria-label={t`Random episode`}
+                  onClick={() => openRandom({ kind: 'episode', series: item })}
+                />
+              }
+            >
+              <Trans>Random episode</Trans>
+            </Tooltip>
+          )}
+          {item.Type !== 'BoxSet' && (
+            <Tooltip
+              trigger={
+                <IconButton
+                  data-ui="item-action"
+                  data-name="party"
+                  intent="gray-subtle"
+                  className="rounded-full"
+                  icon={<BiGroup />}
+                  aria-label={inParty ? t`Watch party` : t`Watch together`}
+                  onClick={() =>
+                    openPartySheet(
+                      target && !inParty
+                        ? {
+                            play: {
+                              title: fullTitle(target),
+                              run: () =>
+                                picker.play(target, { startMs: resumeMs }),
+                            },
+                          }
+                        : {}
+                    )
+                  }
+                />
+              }
+            >
+              {inParty ? t`Watch party` : t`Watch together`}
+            </Tooltip>
+          )}
+          {target && !!devices.data?.length && (
+            <Tooltip
+              trigger={
+                <IconButton
+                  data-ui="item-action"
+                  data-name="play-on"
+                  intent="gray-subtle"
+                  className="rounded-full"
+                  icon={<BiCast />}
+                  aria-label={t`Play on another device`}
+                  onClick={() =>
+                    openRemote({ play: { item: target, startMs: resumeMs } })
+                  }
+                />
+              }
+            >
+              <Trans>Play on another device</Trans>
+            </Tooltip>
+          )}
           <ItemToggles
             itemId={item.Id!}
             type={item.Type}
@@ -584,23 +630,27 @@ const ItemToggles = React.memo(function ItemToggles({
           {played ? t`Mark unwatched` : t`Mark watched`}
         </Tooltip>
       )}
-      <Tooltip
-        trigger={
-          <IconButton
-            data-ui="item-action"
-            data-name="favourite"
-            data-active={favorite || undefined}
-            intent={favorite ? 'alert-subtle' : 'gray-subtle'}
-            className="rounded-full"
-            icon={favorite ? <BiSolidHeart /> : <BiHeart />}
-            aria-label={favorite ? t`Remove favourite` : t`Add favourite`}
-            loading={setFavorite.isPending}
-            onClick={() => setFavorite.mutate({ itemId, favorite: !favorite })}
-          />
-        }
-      >
-        {favorite ? t`Remove favourite` : t`Add favourite`}
-      </Tooltip>
+      {offersFavourite(type, favorite) && (
+        <Tooltip
+          trigger={
+            <IconButton
+              data-ui="item-action"
+              data-name="favourite"
+              data-active={favorite || undefined}
+              intent={favorite ? 'alert-subtle' : 'gray-subtle'}
+              className="rounded-full"
+              icon={favorite ? <BiSolidHeart /> : <BiHeart />}
+              aria-label={favorite ? t`Remove favourite` : t`Add favourite`}
+              loading={setFavorite.isPending}
+              onClick={() =>
+                setFavorite.mutate({ itemId, favorite: !favorite })
+              }
+            />
+          }
+        >
+          {favorite ? t`Remove favourite` : t`Add favourite`}
+        </Tooltip>
+      )}
       {canDrop && type === 'Series' && (
         <Tooltip
           trigger={
@@ -845,72 +895,75 @@ const SeasonPosters = React.memo(function SeasonPosters({
 }) {
   const { client } = useSession();
   return (
-    <MediaRow
-      id="seasons"
-      title={t`Episodes`}
-      shape="poster"
-      itemClass="basis-[7rem] sm:basis-[8rem] lg:basis-[8.5rem]"
-    >
-      {seasons.map((s) => {
-        const isSelected = s.Id === selected;
-        const poster = posterUrl(client, s, { maxWidth: 120 });
-        return (
-          <ItemMenu key={s.Id} item={s} onPage>
-            <button
-              type="button"
-              data-ui="season-poster"
-              data-selected={isSelected || undefined}
-              data-focus="own"
-              onClick={() => onSelect(s.Id!)}
-              className="group/season w-full space-y-2 text-start"
-            >
-              <div
-                data-focus-frame
-                className="relative aspect-[2/3] overflow-hidden rounded-lg bg-gray-900"
+    <div {...tabList}>
+      <MediaRow
+        id="seasons"
+        title={t`Episodes`}
+        shape="poster"
+        itemClass="basis-[7rem] sm:basis-[8rem] lg:basis-[8.5rem]"
+      >
+        {seasons.map((s) => {
+          const isSelected = s.Id === selected;
+          const poster = posterUrl(client, s, { maxWidth: 120 });
+          return (
+            <ItemMenu key={s.Id} item={s} onPage>
+              <button
+                type="button"
+                data-ui="season-poster"
+                data-selected={isSelected || undefined}
+                data-focus="own"
+                {...tab(isSelected, () => onSelect(s.Id!))}
+                onClick={() => onSelect(s.Id!)}
+                className="group/season w-full space-y-2 text-start"
               >
-                {poster && (
-                  <CachedImage
-                    src={poster}
-                    alt=""
-                    loading="lazy"
+                <div
+                  data-focus-frame
+                  className="relative aspect-[2/3] overflow-hidden rounded-lg bg-gray-900"
+                >
+                  {poster && (
+                    <CachedImage
+                      src={poster}
+                      alt=""
+                      loading="lazy"
+                      className={cn(
+                        'absolute inset-0 h-full w-full object-cover transition-opacity [transition-duration:250ms]',
+                        !isSelected &&
+                          'opacity-60 group-hover/season:opacity-100 group-focus-visible/season:opacity-100'
+                      )}
+                    />
+                  )}
+                  {/* Drawn inside, since the row clips anything outside it. */}
+                  <span
                     className={cn(
-                      'absolute inset-0 h-full w-full object-cover transition-opacity [transition-duration:250ms]',
-                      !isSelected &&
-                        'opacity-60 group-hover/season:opacity-100 group-focus-visible/season:opacity-100'
+                      'pointer-events-none absolute inset-0 rounded-lg ring-inset',
+                      isSelected ? 'ring-2 ring-white' : 'ring-1 ring-white/10'
                     )}
                   />
-                )}
-                {/* Drawn inside, since the row clips anything outside it. */}
-                <span
-                  className={cn(
-                    'pointer-events-none absolute inset-0 rounded-lg ring-inset',
-                    isSelected ? 'ring-2 ring-white' : 'ring-1 ring-white/10'
+                  {s.UserData?.Played && (
+                    <span
+                      data-ui="watched-badge"
+                      className="absolute end-1.5 top-1.5 flex size-5 items-center justify-center rounded-full bg-brand-500 text-white"
+                    >
+                      <BiCheck />
+                    </span>
                   )}
-                />
-                {s.UserData?.Played && (
-                  <span
-                    data-ui="watched-badge"
-                    className="absolute end-1.5 top-1.5 flex size-5 items-center justify-center rounded-full bg-brand-500 text-white"
-                  >
-                    <BiCheck />
-                  </span>
-                )}
-              </div>
-              <p
-                className={cn(
-                  'truncate text-sm',
-                  isSelected
-                    ? 'font-semibold text-white'
-                    : 'text-[--muted] group-hover/season:text-white group-focus-visible/season:text-white'
-                )}
-              >
-                {s.Name}
-              </p>
-            </button>
-          </ItemMenu>
-        );
-      })}
-    </MediaRow>
+                </div>
+                <p
+                  className={cn(
+                    'truncate text-sm',
+                    isSelected
+                      ? 'font-semibold text-white'
+                      : 'text-[--muted] group-hover/season:text-white group-focus-visible/season:text-white'
+                  )}
+                >
+                  {s.Name}
+                </p>
+              </button>
+            </ItemMenu>
+          );
+        })}
+      </MediaRow>
+    </div>
   );
 });
 
@@ -1016,7 +1069,9 @@ function SubCollections({ parent }: { parent: BaseItemDto }) {
             animated={animatedPosterOf(item)}
             title={item.Name ?? ''}
             subtitle={itemSubtitle(item)}
+            itemType={item.Type}
             watched={item.UserData?.Played}
+            favourite={item.UserData?.IsFavorite}
           />
         </ItemMenu>
       ))}
@@ -1161,7 +1216,9 @@ function Similar({ itemId }: { itemId: string }) {
                 animated={animatedPosterOf(item)}
                 title={item.Name ?? ''}
                 subtitle={itemSubtitle(item)}
+                itemType={item.Type}
                 watched={item.UserData?.Played}
+                favourite={item.UserData?.IsFavorite}
               />
             </ItemMenu>
           ))}

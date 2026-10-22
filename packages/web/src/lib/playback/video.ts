@@ -1,6 +1,6 @@
 import { t } from '@lingui/core/macro';
 import type React from 'react';
-import { checkSubtitleFile, readSubtitleCues } from '../subtitles/files';
+import { checkSubtitleFile, readSubtitleFile } from '../subtitles/files';
 import { subtitleLine } from '../subtitles/style';
 import { ownTrackLabel } from './controller';
 import type {
@@ -34,6 +34,7 @@ interface FileTrack {
   id: string;
   label: string;
   track: TextTrack;
+  text: string;
 }
 
 /**
@@ -142,13 +143,11 @@ export function videoEngine(
           el.volume = Math.min(1, next.volume.volume);
           el.muted = next.volume.muted;
         }
-        const bufferedEnd = () => {
-          for (let i = el.buffered.length - 1; i >= 0; i--) {
-            if (el.buffered.start(i) <= el.currentTime)
-              return el.buffered.end(i) * 1000;
-          }
-          return 0;
-        };
+        const buffered = () =>
+          Array.from({ length: el.buffered.length }, (_, i) => ({
+            startMs: el.buffered.start(i) * 1000,
+            endMs: el.buffered.end(i) * 1000,
+          }));
         const handlers: Record<string, () => void> = {
           loadedmetadata: () => {
             if (next.startMs) el.currentTime = next.startMs / 1000;
@@ -166,9 +165,9 @@ export function videoEngine(
             emit({
               type: 'position',
               positionMs: el.currentTime * 1000,
-              bufferedMs: bufferedEnd(),
+              buffered: buffered(),
             }),
-          progress: () => emit({ type: 'position', bufferedMs: bufferedEnd() }),
+          progress: () => emit({ type: 'position', buffered: buffered() }),
           volumechange: () => set({ volume: el.volume, muted: el.muted }),
           ratechange: () => set({ rate: el.playbackRate }),
           ended: () => emit({ type: 'ended' }),
@@ -253,20 +252,12 @@ export function videoEngine(
         placeCues();
       },
       toggleFullscreen: toggleDocumentFullscreen,
-      // Cues carry the shift already applied, so it comes off again.
-      ownLines: async (id) => {
-        const cues = files.find((f) => f.id === id)?.track.cues;
-        if (!cues?.length) return null;
-        return Array.from(cues).map((cue) => ({
-          startMs: cue.startTime * 1000 - delayMs,
-          text: (cue as VTTCue).text.replace(/<[^>]*>/g, ''),
-        }));
-      },
+      ownText: (id) => files.find((f) => f.id === id)?.text ?? null,
       subtitleFiles: {
         types: SUBTITLE_TYPES,
         add: async (added) => {
           checkSubtitleFile(added, SUBTITLE_TYPES);
-          const cues = await readSubtitleCues(added);
+          const { text, cues } = await readSubtitleFile(added);
           const el = video.current;
           if (!el) return;
           const track = el.addTextTrack('subtitles', added.name);
@@ -276,7 +267,7 @@ export function videoEngine(
               new VTTCue(cue.startMs / 1000, cue.endMs / 1000, cue.text)
             );
           const id = `file:${files.length}`;
-          files = [...files, { id, label: added.name, track }];
+          files = [...files, { id, label: added.name, track, text }];
           listTracks();
           placeCues();
           setSubtitle(id);

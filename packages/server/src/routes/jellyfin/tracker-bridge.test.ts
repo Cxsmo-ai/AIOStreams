@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { trackerRecordToWatchIdentity } from './tracker-bridge.js';
-import { TrackerRecordSchema, config as appConfig } from '@aiostreams/core';
+import { TrackerRecordSchema, runtimeSchemas } from '@aiostreams/core';
 
 describe('Jellyfin Tracker Bridge', () => {
   it('defaults tracker bridge to enabled', () => {
-    assert.equal(appConfig.jellyfin.trackerBridgeEnabled, true);
+    assert.equal(runtimeSchemas.jellyfin.trackerBridgeEnabled.default, true);
   });
 
   it('correctly maps movie tracker records to watch identity', () => {
@@ -16,6 +16,7 @@ describe('Jellyfin Tracker Bridge', () => {
       title: 'Test Movie',
       state: 'watched',
       updatedAt: 1000,
+      origin: 'test',
     });
     const identity = trackerRecordToWatchIdentity(movie);
     assert.ok(identity);
@@ -37,6 +38,7 @@ describe('Jellyfin Tracker Bridge', () => {
       positionMs: 60000,
       durationMs: 120000,
       updatedAt: 2000,
+      origin: 'test',
     });
     const identity = trackerRecordToWatchIdentity(episode);
     assert.ok(identity);
@@ -56,6 +58,7 @@ describe('Jellyfin Tracker Bridge', () => {
       title: 'The Mentalist',
       state: 'watchlist',
       updatedAt: 3000,
+      origin: 'test',
     });
     const identity = trackerRecordToWatchIdentity(series);
     assert.ok(identity);
@@ -72,11 +75,37 @@ describe('Jellyfin Tracker Bridge', () => {
       ids: { tmdb: '12345' },
       title: 'TMDB Movie',
       state: 'watched',
+      updatedAt: 4000,
+      origin: 'test',
     });
     const identity = trackerRecordToWatchIdentity(tmdbMovie);
     assert.ok(identity);
     assert.equal(identity.itemKey, 'm|tmdb:12345');
     assert.equal(identity.baseId, 'tmdb:12345');
   });
-});
 
+  it('rejects episodes without explicit coordinates instead of inventing episode zero', () => {
+    const episode = TrackerRecordSchema.parse({
+      id: 'episode:imdb:tt1196946',
+      kind: 'episode',
+      ids: { imdb: 'tt1196946' },
+      title: 'Incomplete Episode',
+      state: 'watched',
+      updatedAt: 5000,
+      origin: 'test',
+    });
+    assert.equal(trackerRecordToWatchIdentity(episode), null);
+  });
+
+  it('extracts a namespaced TMDB ID from legacy tracker record IDs', () => {
+    const movie = TrackerRecordSchema.parse({
+      id: 'movie:tmdb:12345',
+      kind: 'movie',
+      title: 'Legacy TMDB Movie',
+      state: 'watched',
+      updatedAt: 6000,
+      origin: 'test',
+    });
+    assert.equal(trackerRecordToWatchIdentity(movie)?.baseId, 'tmdb:12345');
+  });
+});

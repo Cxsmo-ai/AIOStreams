@@ -19,6 +19,7 @@ import android.provider.Settings
 import android.util.Log
 import android.hardware.input.InputManager
 import android.view.InputDevice
+import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -73,6 +74,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var controller: ListenableFuture<MediaController>
     private val screen = PlayerWindow(this)
     private val levels by lazy { Levels(this) }
+    private val watchNext by lazy { WatchNext(this) }
+    private val trustedRoots by lazy { MpvEngine.trustedRoots(this).toByteArray() }
     /** Run once the notification question is answered, either way. */
     private var afterNotifications: (() -> Unit)? = null
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -100,6 +103,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var frameRates: FrameRateMatch
     /** False when onCreate only showed the outdated WebView message. */
     private val started get() = ::bridge.isInitialized
+    /** The page's renderer ended, leaving a web view that can't be used. */
+    private var pageGone = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -123,7 +128,9 @@ class MainActivity : ComponentActivity() {
         })
 
         val app = WebApp(BuildConfig.WEB_URL.ifEmpty { null })
-        app.configure(web, ::chooseFiles, players::open)
+        app.configure(web, ::chooseFiles, players::open, ::onRendererGone) { path ->
+            if (::player.isInitialized) player.thumbnail(path) else null
+        }
         val queue = Downloads.queue(this)
         queue.send = { message -> runOnUiThread { bridge.send(message) } }
         downloads = DownloadChannel(queue, onAdd = { askForNotifications() })
@@ -147,6 +154,7 @@ class MainActivity : ComponentActivity() {
             frameRate = frameRates::match,
             showVideo = playback::showVideo,
             passthrough = passthrough::supported,
+            trustedRoots = { trustedRoots },
         )
         gamepads = hasGamepad()
         getSystemService(InputManager::class.java).registerInputDeviceListener(controllers, null)
@@ -243,6 +251,7 @@ class MainActivity : ComponentActivity() {
             "keyboard-completions" -> web.showCompletions(
                 (message["items"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty(),
             )
+            "watch-next" -> watchNext.publish((message["items"] as? JsonArray)?.filterIsInstance<JsonObject>().orEmpty())
             "voice-search" -> voice.listen()
             "voice-cancel" -> voice.cancel()
             "save-file" -> saveFile(
@@ -279,6 +288,7 @@ class MainActivity : ComponentActivity() {
                             put("at", report.at)
                             put("summary", report.summary)
                             put("details", report.details)
+                            if (report.page) put("page", true)
                         }
                     })
                 }
@@ -438,6 +448,24 @@ class MainActivity : ComponentActivity() {
 
     private fun deviceName(): String =
         Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL
+
+    /**
+     * Starts the page again in a new activity, once it shows: Android ends a
+     * renderer behind other apps to free memory, and would end a new one too.
+     */
+    private fun onRendererGone(crashed: Boolean) {
+        val shown = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        Crashes.rendererGone(this, crashed, shown)
+        pageGone = true
+        bridge.close()
+        (web.parent as? ViewGroup)?.removeView(web)
+        if (shown) recreate()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (pageGone) recreate()
+    }
 
     override fun onResume() {
         super.onResume()

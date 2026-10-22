@@ -4,7 +4,13 @@ import { cn } from '@aiostreams/ui/core/styling';
 import { clock } from '../../lib/format';
 import { chapterAt, type Chapter } from '../../lib/playback/chapters';
 import { usePlayhead, type Playhead } from '../../lib/playback/playhead';
+import type { ThumbnailFeed } from '../../lib/playback/thumbnails';
 import type { Segment } from './segments';
+
+const still = () => () => {};
+
+/** How long a skip's picture stays once the skip lands, or once a late picture arrives. */
+const SKIP_PICTURE_MS = 2000;
 
 export const arrowDirection = (key: string) =>
   key === 'ArrowRight' ? 1 : key === 'ArrowLeft' ? -1 : 0;
@@ -16,7 +22,9 @@ export function SeekBar({
   segments,
   chapters,
   previewMs,
+  previewPicture,
   handle,
+  thumbnails,
   onSeek,
   onStep,
   onTogglePlay,
@@ -29,14 +37,16 @@ export function SeekBar({
   chapters: Chapter[];
   /** Where a swipe on the video would seek to. */
   previewMs: number | null;
+  previewPicture: boolean;
   /** Shows the handle at rest, where nothing hovers. */
   handle: boolean;
+  thumbnails?: ThumbnailFeed;
   onSeek(ms: number): void;
   onStep(direction: number): void;
   onTogglePlay(): void;
 }) {
   const positionMs = usePlayhead(playhead, (h) => h.positionMs, live);
-  const bufferedMs = usePlayhead(playhead, (h) => h.bufferedMs, live);
+  const buffered = usePlayhead(playhead, (h) => h.buffered, live);
   const bar = React.useRef<HTMLDivElement>(null);
   const [hover, setHover] = React.useState<number | null>(null);
   const [drag, setDrag] = React.useState<number | null>(null);
@@ -49,6 +59,22 @@ export function SeekBar({
   const percent = (ms: number) =>
     durationMs ? `${Math.min(100, (ms / durationMs) * 100)}%` : '0%';
   const shown = drag ?? previewMs ?? positionMs;
+  const previewPeek = previewPicture ? previewMs : null;
+  // A skip lands about when its picture does, so the picture outlasts it.
+  const [held, setHeld] = React.useState<number | null>(null);
+  if (previewPeek !== null && previewPeek !== held) setHeld(previewPeek);
+  const peekMs = durationMs > 0 ? (drag ?? hover ?? previewPeek ?? held) : null;
+  React.useEffect(() => thumbnails?.want(peekMs), [thumbnails, peekMs]);
+  React.useEffect(() => () => thumbnails?.want(null), [thumbnails]);
+  const picture = React.useSyncExternalStore(
+    thumbnails?.subscribe ?? still,
+    () => thumbnails?.current() ?? null
+  );
+  React.useEffect(() => {
+    if (previewPeek !== null || held === null) return;
+    const timer = setTimeout(() => setHeld(null), SKIP_PICTURE_MS);
+    return () => clearTimeout(timer);
+  }, [previewPeek, held, picture]);
 
   return (
     <div
@@ -93,11 +119,17 @@ export function SeekBar({
         data-ui="seek-bar-track"
         className="relative h-1 w-full overflow-hidden rounded-full bg-white/20 transition-[height] group-hover/seek:h-1.5 group-focus-visible/seek:h-1.5"
       >
-        <div
-          data-ui="seek-bar-buffered"
-          className="absolute inset-y-0 left-0 bg-white/30"
-          style={{ width: percent(bufferedMs) }}
-        />
+        {buffered.map((r) => (
+          <div
+            key={r.startMs}
+            data-ui="seek-bar-buffered"
+            className="absolute inset-y-0 bg-white/30"
+            style={{
+              left: percent(r.startMs),
+              width: percent(r.endMs - r.startMs),
+            }}
+          />
+        ))}
         {segments.map((s) => (
           <div
             key={`${s.type}-${s.startMs}`}
@@ -137,15 +169,35 @@ export function SeekBar({
         )}
         style={{ left: percent(shown) }}
       />
-      {hover !== null && durationMs > 0 && (
+      {peekMs !== null && (hover !== null || picture) && (
         <div
           data-ui="seek-bar-tooltip"
-          className="pointer-events-none absolute bottom-6 -translate-x-1/2 rounded-md bg-black/80 px-2 py-1 text-xs tabular-nums"
-          style={{ left: percent(hover) }}
+          className={cn(
+            'pointer-events-none absolute bottom-6 flex -translate-x-1/2 flex-col items-center gap-1',
+            picture && 'w-32 [--half:4rem] sm:w-48 sm:[--half:6rem]'
+          )}
+          style={{
+            left: picture
+              ? `clamp(var(--half), ${percent(peekMs)}, calc(100% - var(--half)))`
+              : percent(peekMs),
+          }}
         >
-          {segments.find((s) => hover >= s.startMs && hover < s.endMs)?.type ??
-            chapters[chapterAt(chapters, hover)]?.title}{' '}
-          {clock(hover)}
+          {picture && (
+            <img
+              data-ui="seek-bar-thumbnail"
+              src={picture.src}
+              alt=""
+              decoding="async"
+              className="w-full rounded-md bg-black shadow-lg ring-1 ring-white/15"
+            />
+          )}
+          {hover !== null && (
+            <span className="rounded-md bg-black/80 px-2 py-1 text-xs tabular-nums">
+              {segments.find((s) => peekMs >= s.startMs && peekMs < s.endMs)
+                ?.type ?? chapters[chapterAt(chapters, peekMs)]?.title}{' '}
+              {clock(peekMs)}
+            </span>
+          )}
         </div>
       )}
     </div>

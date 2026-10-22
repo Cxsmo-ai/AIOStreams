@@ -2,7 +2,7 @@ import React from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { BiCheck, BiPlay } from 'react-icons/bi';
 import { cn } from '@aiostreams/ui/core/styling';
-import { useNear } from '../lib/use-in-view';
+import { onScreen, useNear } from '../lib/use-in-view';
 import {
   artworkKey,
   canShrink,
@@ -119,14 +119,21 @@ export function Artwork({
   const [failed, setFailed] = React.useState({ key: '', count: 0 });
   const attempt = failed.key === key ? failed.count : 0;
   const [loadedKey, setLoadedKey] = React.useState(early?.key ?? null);
+  // Loaded out of sight, it shows at once: a fade nobody sees still costs frames.
+  const [unseen, setUnseen] = React.useState(false);
   const [plain, setPlain] = React.useState<string | null>(null);
   const current = sources[attempt];
   const currentKey = current && artworkKey(current);
   const loaded = currentKey ? loadedKey === currentKey : !!early;
-  const onLoad = () => currentKey && setLoadedKey(currentKey);
+  const onLoad = (el: Element | null) => {
+    if (!currentKey) return;
+    setUnseen(!!el && !onScreen(el));
+    setLoadedKey(currentKey);
+  };
   const imageClass = cn(
     // A focus's scale keeps up with focus; a loaded image fades in slower.
-    'absolute inset-0 h-full w-full object-cover transition-[transform,opacity] [transition-duration:250ms,300ms]',
+    'absolute inset-0 h-full w-full object-cover [transition-duration:250ms,300ms]',
+    unseen ? 'transition-[transform]' : 'transition-[transform,opacity]',
     // Scaled at rest too: gaining or losing a transform costs a layout, changing one doesn't.
     'scale-100',
     loaded ? 'opacity-100' : 'opacity-0',
@@ -172,7 +179,7 @@ export function Artwork({
           loading="lazy"
           decoding="async"
           draggable={false}
-          onLoad={onLoad}
+          onLoad={(e) => onLoad(e.currentTarget)}
           onError={() =>
             setFailed((f) => ({
               key,
@@ -208,7 +215,7 @@ function ShrunkImage({
   className: string;
   size: { width: number; height: number } | undefined;
   measure: (el: Element | null) => void;
-  onLoad: () => void;
+  onLoad: (el: Element | null) => void;
   onPlain: () => void;
 }) {
   const [view, visible, sight] = useNear<HTMLElement>('300px');
@@ -239,7 +246,7 @@ function ShrunkImage({
         () => {
           if (!live) return;
           setShown(result.src);
-          done.current.onLoad();
+          done.current.onLoad(view.current);
         },
         () => live && done.current.onPlain()
       );
@@ -279,7 +286,7 @@ function ShrunkImage({
     // A CPU-backed canvas paints with the page instead of becoming a layer.
     el.getContext('2d', { willReadFrequently: true })?.drawImage(bitmap, 0, 0);
     bitmap.close();
-    done.current.onLoad();
+    done.current.onLoad(el);
   }, [bitmap]);
 
   return bitmap ? (
@@ -360,7 +367,9 @@ export interface PosterCardProps {
   image: ArtworkSource;
   title: string;
   subtitle?: string;
+  itemType?: string;
   watched?: boolean;
+  favourite?: boolean;
   /** Episodes left to watch, for a show. */
   unwatched?: number;
   progress?: number | null;
@@ -388,7 +397,8 @@ function AnimatedPoster({ src }: { src: string }) {
 }
 
 export function PosterCard(props: PosterCardProps) {
-  const { href, image, title, subtitle, watched, unwatched, progress } = props;
+  const { href, image, title, subtitle, itemType, watched } = props;
+  const { favourite, unwatched, progress } = props;
   const shape = props.shape ?? 'poster';
   // Mounted only while active, so a row of them decodes nothing at rest.
   const [active, setActive] = React.useState(false);
@@ -401,7 +411,9 @@ export function PosterCard(props: PosterCardProps) {
     <Anchor
       data-ui="poster-card"
       data-shape={shape}
+      data-type={itemType}
       data-watched={watched || undefined}
+      data-favourite={favourite || undefined}
       data-in-progress={(!!progress && progress > 0) || undefined}
       href={href}
       title={showTitle ? undefined : title}

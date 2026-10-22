@@ -7,7 +7,13 @@ app's bridge as `window.aiostreamsApp`, so `src/lib/hosts/shell` in the web app 
 ## Building
 
 Needs JDK 17 or later (Android Studio's own works) and the Android SDK with platform 37.2, found
-through `ANDROID_HOME`.
+through `ANDROID_HOME`. The Rust code in `packages/native` builds with rustup's toolchain, its Android
+targets and cargo-ndk:
+
+```sh
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+cargo install cargo-ndk
+```
 
 ```sh
 pnpm -F @aiostreams/web build:standalone   # bundled into the APK from web/dist-standalone
@@ -19,7 +25,7 @@ adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 Each build is an APK per processor (`arm64-v8a`, `armeabi-v7a`, `x86_64`). Debug builds install as
 `io.github.viren070.aiostreams.debug`, named "AIOStreams Debug", beside a released copy.
 
-libmpv comes from `libmpv.pin`: a release of [Viren070/mpv-android](https://github.com/Viren070/mpv-android),
+libmpv comes from `libs.pin`: a release of [Viren070/aiostreams-libs](https://github.com/Viren070/aiostreams-libs),
 which pins every source it builds, and the AAR's SHA-256. The `mpv` module downloads it and refuses one
 that hashes differently, so a new libmpv is a tag there, then its URL and hash here.
 
@@ -57,7 +63,8 @@ Keep a copy of the keystore: installed copies only update to builds signed with 
 | `mpv`         | libmpv                                                                       |
 | `exoplayer`   | Media3 ExoPlayer, with libmpv's libass drawing ASS subtitles                 |
 | `downloads`   | The download queue and its foreground service                                |
-| `build-logic` | The SDK levels, NDK and Java version every module shares; the libmpv fetch   |
+| `natives`     | The Rust library from `packages/native`, built with cargo-ndk                |
+| `build-logic` | Shared SDK levels, NDK, ABIs and Java version; the libmpv fetch, cargo-ndk   |
 
 ## Debugging
 

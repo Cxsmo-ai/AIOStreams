@@ -64,6 +64,8 @@ internal class ExoTracks {
 
     fun format(type: String): Format? = entries.firstOrNull { it.type == type && it.selected }?.format
 
+    fun format(type: String, id: Int): Format? = entries.find { it.type == type && it.id == id }?.format
+
     fun list(): List<PlayerTrack> = entries.filter { it.type != "video" }.map { entry ->
         val format = entry.format
         PlayerTrack(
@@ -149,6 +151,7 @@ internal class ExoTracks {
             MimeTypes.TEXT_SSA -> "ass"
             MimeTypes.APPLICATION_SUBRIP -> "subrip"
             MimeTypes.TEXT_VTT -> "webvtt"
+            MimeTypes.APPLICATION_TX3G -> "mov_text"
             MimeTypes.APPLICATION_PGS -> "hdmv_pgs_subtitle"
             MimeTypes.APPLICATION_VOBSUB -> "dvd_subtitle"
             MimeTypes.APPLICATION_DVBSUBS -> "dvb_subtitle"

@@ -52,7 +52,7 @@ android {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            include(*shippedAbis.toTypedArray())
             isUniversalApk = false
         }
     }
@@ -106,6 +106,7 @@ dependencies {
     implementation(libs.androidx.core)
     implementation(libs.androidx.media3.datasource)
     implementation(libs.androidx.media3.session)
+    implementation(libs.androidx.tvprovider)
     implementation(libs.androidx.webkit)
     implementation(libs.okhttp)
 }

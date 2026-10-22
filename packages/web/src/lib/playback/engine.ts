@@ -1,9 +1,10 @@
 import type { SubtitleStyle, VideoFit } from '../settings';
-import type { SubtitleLine } from '../subtitles/cues';
+import type { Span } from '../subtitles/align';
 import type { BaseItemDto, MediaStream, SourceInfo } from '../types';
 import type { PlaybackPrefs } from '../user-config';
 import type { Chapter } from './chapters';
 import type { PlayerState, QueuedEpisode, Track } from './controller';
+import type { TimeRange } from './playhead';
 
 /** One of the server's external subtitles, which an engine loads once picked. */
 export interface ServerSubtitle extends Track {
@@ -14,6 +15,7 @@ export interface ServerSubtitle extends Track {
 export interface EngineTrack extends Track {
   type: 'audio' | 'subtitle';
   title?: string;
+  codec?: string;
   forced?: boolean;
   hearingImpaired?: boolean;
   visualImpaired?: boolean;
@@ -63,12 +65,13 @@ export type EngineState = Partial<
     | 'audio'
     | 'subtitle'
     | 'pictureInPicture'
+    | 'passthrough'
   >
 >;
 
 export type EngineEvent =
   | { type: 'state'; state: EngineState }
-  | { type: 'position'; positionMs?: number; bufferedMs?: number }
+  | { type: 'position'; positionMs?: number; buffered?: readonly TimeRange[] }
   | { type: 'tracks'; tracks: EngineTrack[] }
   | { type: 'chapters'; chapters: Chapter[] }
   /** The file's tracks are listed, so the user's picks can apply. */
@@ -80,6 +83,12 @@ export type EngineEvent =
   | { type: 'closed' }
   | { type: 'subtitle-text'; text: string }
   | { type: 'stats-text'; text: string | undefined };
+
+/** A picture of the keyframe at `positionMs`, for the seek bar. */
+export interface Thumbnail {
+  positionMs: number;
+  src: string;
+}
 
 /** A stretch the page offers to skip; `auto` when it skips it unasked. */
 export interface PlannedSkip {
@@ -105,8 +114,22 @@ export interface PlayerEngine {
   skipAhead?(skips: PlannedSkip[]): void;
   setStyle?(style: EngineStyle): void;
   toggleFullscreen?(): void;
-  /** Lines of one of its own subtitles; server ones are read from their address. */
-  ownLines?(id: string): Promise<SubtitleLine[] | null> | null;
+  /** The text of a subtitle file it was given, null for one it can't read; server ones are read from their address. */
+  ownText?(id: string): string | null;
+  /** Reports when the lines of one of the file's own subtitles show, as it reads them, until stopped. */
+  watchLines?(id: string, onLines: (lines: Span[]) => void): () => void;
+  /** Every one of the file's own subtitles' lines from its index, by track; null when it has none. */
+  subtitleIndex?(): Promise<Record<string, Span[]> | null>;
+  /** Pictures of the keyframes at or before positions asked for, newest asked first; null once the file has none. `prepare` reads the file's index ahead of the first. */
+  thumbnails?(
+    file: { url: string; headers?: Record<string, string> },
+    onThumbnail: (thumbnail: Thumbnail | null) => void
+  ): {
+    /** `showingMs` is the keyframe of the picture on screen, which isn't sent again. */
+    want(ms: number, showingMs?: number): void;
+    prepare(): void;
+    stop(): void;
+  };
   subtitleFiles?: { types: readonly string[]; add(file: File): Promise<void> };
   stats?: { pages: Track[]; show(page: string | null): void };
   /** Picks tracks from the user's settings as the file opens. */
