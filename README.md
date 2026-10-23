@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/fork/cxsmo-mark.png" width="160" alt="AIOStreams+ fork badge using the official symbol and wordmark on a dark tile" />
+  <img src="https://raw.githubusercontent.com/Cxsmo-ai/AIOStreams/56a54681f1496d6dfd239bea3370854e9e218245/branding/fork/cxsmo-mark.png" width="160" alt="AIOStreams+ fork badge using the official symbol and wordmark on a dark tile" />
 </p>
 
 <h1 align="center">AIOStreams · Cxsmo fork</h1>
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="branding/fork/cxsmo-banner.png" alt="AIOStreams official symbol and wordmark with a violet plus identifying the independent Cxsmo fork" width="100%" />
+  <img src="https://raw.githubusercontent.com/Cxsmo-ai/AIOStreams/56a54681f1496d6dfd239bea3370854e9e218245/branding/fork/cxsmo-banner.png" alt="AIOStreams official symbol and wordmark with a violet plus identifying the independent Cxsmo fork" width="100%" />
 </p>
 
 <p align="center">
