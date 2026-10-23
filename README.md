@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/fork/cxsmo-mark.png" width="112" alt="Cxsmo AIOStreams fork mark: three streams converging into one" />
+  <img src="branding/fork/cxsmo-mark.png" width="112" alt="Cxsmo AIOStreams fork mark: flowing blue and violet streams joining a forward arrow" />
 </p>
 
 <h1 align="center">AIOStreams · Cxsmo fork</h1>
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="branding/fork/cxsmo-banner.png" alt="Official AIOStreams symbol alongside the AIOStreams name and a plus sign identifying the community fork" width="100%" />
+  <img src="branding/fork/cxsmo-banner.png" alt="Cxsmo AIOStreams fork banner: luminous blue and violet streams converging into a forward arrow" width="100%" />
 </p>
 
 <p align="center">

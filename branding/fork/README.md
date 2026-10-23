@@ -2,7 +2,8 @@
 
 These are visual identity assets for the Cxsmo community fork README and repository presentation:
 
-- `cxsmo-mark.svg` — editable vector mark; the compact PNG export is used in the README.
-- `cxsmo-banner.svg` — editable banner using the official AIOStreams symbol (`branding/SVG/Logo White (No BG).svg`) with an added `+` fork mark; the PNG export is used in the README.
+- `cxsmo-mark.png` — square transparent mark used in the README.
+- `cxsmo-banner.png` — wide banner used in the README.
+- `cxsmo-mark.svg` and `cxsmo-banner.svg` — previous vector identity drafts retained as editable alternatives; they are not the current README artwork.
 
-The compact Cxsmo mark remains original. The banner intentionally reuses the official AIOStreams symbol and adds a `+` to identify this community fork. The application and documentation retain upstream AIOStreams identity where they describe upstream functionality.
+The current artwork uses blue and violet streams converging into a forward arrow. The application and documentation retain upstream AIOStreams identity where they describe upstream functionality; this artwork identifies the Cxsmo community fork and is not presented as official upstream branding.
