@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="branding/fork/cxsmo-banner.png" alt="Cxsmo AIOStreams fork banner: luminous blue and violet streams converging into a forward arrow" width="100%" />
+  <img src="branding/fork/cxsmo-banner.png" alt="AIOStreams official symbol and wordmark with a violet plus identifying the independent Cxsmo fork" width="100%" />
 </p>
 
 <p align="center">
