@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/fork/cxsmo-mark.png" width="112" alt="Official AIOStreams symbol with a violet plus marking the independent Cxsmo fork" />
+  <img src="branding/fork/cxsmo-mark.png" width="112" alt="Official AIOStreams symbol with a violet plus on a dark tile, marking the independent Cxsmo fork" />
 </p>
 
 <h1 align="center">AIOStreams · Cxsmo fork</h1>
