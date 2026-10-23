@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/fork/cxsmo-mark.png" width="112" alt="Cxsmo AIOStreams fork mark: flowing blue and violet streams joining a forward arrow" />
+  <img src="branding/fork/cxsmo-mark.png" width="112" alt="Official AIOStreams symbol with a violet plus marking the independent Cxsmo fork" />
 </p>
 
 <h1 align="center">AIOStreams · Cxsmo fork</h1>
@@ -22,7 +22,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="AGPL-3.0-only license" /></a>
 </p>
 
-<p align="center"><sub>Independent community fork. The banner incorporates AIOStreams branding with a fork-specific +; this is not an official upstream release.</sub></p>
+<p align="center"><sub>Independent community fork with fork-specific artwork; this is not an official upstream release.</sub></p>
 
 <p align="center">
   <a href="#at-a-glance">At a glance</a> ·

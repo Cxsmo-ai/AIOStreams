@@ -1,15 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
-  <title id="title">Cxsmo AIOStreams fork mark</title>
-  <desc id="desc">Three source paths join at a shared hub and continue as one stream.</desc>
-  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="8">
-    <path d="M23 20c14 0 16 25 34 30" stroke="#8b5cf6" />
-    <path d="M23 50h34" stroke="#22d3ee" />
-    <path d="M23 80c14 0 16-25 34-30" stroke="#8b5cf6" />
-    <path d="M57 50h18" stroke="#22d3ee" />
-    <path d="m73 44 9 6-9 6" stroke="#8b5cf6" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">AIOStreams+ community fork mark</title>
+  <desc id="desc">The official AIOStreams symbol with a violet plus identifying this independent community fork.</desc>
+  <g transform="translate(20 8) scale(.44)" fill="#fff">
+    <ellipse cx="644.89" cy="644.5" rx="97.36" ry="99" />
+    <path d="M508.34,338.5h3.14c65.24,0,106.01,70.62,73.39,127.12l-160.44,277.88h0c-66.63,0-108.27-72.13-74.96-129.83l158.87-275.17Z" />
   </g>
-  <circle cx="23" cy="20" r="5" fill="#8b5cf6" />
-  <circle cx="23" cy="50" r="5" fill="#22d3ee" />
-  <circle cx="23" cy="80" r="5" fill="#8b5cf6" />
-  <circle cx="57" cy="50" r="6.5" fill="#22d3ee" />
+  <path d="M390 367v74m-37-37h74" fill="none" stroke="#a855f7" stroke-linecap="round" stroke-width="24" />
 </svg>
