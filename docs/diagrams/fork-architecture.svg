@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 540" role="img" aria-labelledby="title desc">
+  <title id="title">AIOStreams fork architecture</title>
+  <desc id="desc">Add-ons, source integrations, and Usenet feed the AIOStreams aggregation and filtering pipeline. A separate shared watch-state bridge connects saved configuration tracker links and Jellyfin playback to Trakt, WeTrakr, and Floppy adapters.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 z" fill="#a855f7"/></marker>
+    <marker id="arrow-start" markerWidth="10" markerHeight="10" refX="2" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M10 0 L0 5 L10 10 z" fill="#42d6c4"/></marker>
+    <marker id="arrow-end" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 z" fill="#42d6c4"/></marker>
+  </defs>
+  <rect width="1440" height="540" rx="24" fill="#0b0c12"/>
+  <text x="48" y="48" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="25" font-weight="700">How the fork fits together</text>
+  <text x="48" y="87" fill="#b8a0ff" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="700" letter-spacing="2">STREAM AGGREGATION</text>
+  <text x="48" y="401" fill="#b8a0ff" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="700" letter-spacing="2">TRACKER + JELLYFIN SYNC</text>
+
+  <path id="edge-addons-aggregate" d="M340 145 C375 145 390 193 430 205" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-sources-aggregate" d="M340 250 H430" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-usenet-aggregate" d="M340 345 C375 345 390 297 430 285" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-aggregate-pipeline" d="M690 245 H755" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-pipeline-clients" d="M1035 245 H1100" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-trackerLinks-bridge" d="M365 458 H535" fill="none" stroke="#42d6c4" stroke-width="3" marker-start="url(#arrow-start)" marker-end="url(#arrow-end)"/>
+  <path id="edge-jellyfin-bridge" d="M690 355 V405" fill="none" stroke="#42d6c4" stroke-width="3" marker-end="url(#arrow-end)"/>
+  <path id="edge-bridge-providers" d="M845 458 H1020" fill="none" stroke="#42d6c4" stroke-width="3" marker-start="url(#arrow-start)" marker-end="url(#arrow-end)"/>
+
+  <rect x="70" y="112" width="270" height="66" rx="14" fill="#151622" stroke="#414052" stroke-width="2"/>
+  <text x="205" y="140" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Stremio add-ons</text>
+  <text x="205" y="161" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">and built-ins</text>
+
+  <rect x="70" y="217" width="270" height="66" rx="14" fill="#151622" stroke="#414052" stroke-width="2"/>
+  <text x="205" y="245" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">TorrentClaw · Harbrr</text>
+  <text x="205" y="266" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">and other sources</text>
+
+  <rect x="70" y="312" width="270" height="66" rx="14" fill="#151622" stroke="#414052" stroke-width="2"/>
+  <text x="205" y="352" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Usenet integrations</text>
+
+  <rect x="430" y="205" width="260" height="80" rx="16" fill="#19142a" stroke="#8056d9" stroke-width="2"/>
+  <text x="560" y="238" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">AIOStreams</text>
+  <text x="560" y="263" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">aggregation</text>
+
+  <rect x="755" y="205" width="280" height="80" rx="16" fill="#19142a" stroke="#8056d9" stroke-width="2"/>
+  <text x="895" y="238" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Filter · sort</text>
+  <text x="895" y="263" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">deduplicate</text>
+
+  <rect x="1100" y="205" width="270" height="80" rx="16" fill="#151622" stroke="#414052" stroke-width="2"/>
+  <text x="1235" y="238" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Stremio-compatible</text>
+  <text x="1235" y="263" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">clients</text>
+
+  <rect x="70" y="425" width="295" height="66" rx="14" fill="#101d20" stroke="#328f85" stroke-width="2"/>
+  <text x="217" y="453" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Saved-config</text>
+  <text x="217" y="475" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">tracker links</text>
+
+  <rect x="535" y="405" width="310" height="90" rx="16" fill="#101d20" stroke="#328f85" stroke-width="2"/>
+  <text x="690" y="443" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Shared watch-state</text>
+  <text x="690" y="470" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">bridge</text>
+
+  <rect x="535" y="302" width="310" height="53" rx="14" fill="#101d20" stroke="#328f85" stroke-width="2"/>
+  <text x="690" y="335" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Jellyfin playback events</text>
+
+  <rect x="1020" y="425" width="350" height="66" rx="14" fill="#101d20" stroke="#328f85" stroke-width="2"/>
+  <text x="1195" y="453" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Trakt · WeTrakr · Floppy</text>
+  <text x="1195" y="475" text-anchor="middle" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="14">provider adapters</text>
+</svg>

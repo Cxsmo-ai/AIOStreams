@@ -1,0 +1,9 @@
+flowchart LR
+  addons["Stremio add-ons and built-ins"] --> aggregate["AIOStreams aggregation"]
+  aggregate --> pipeline["Filter, sort, and deduplicate"]
+  pipeline --> clients["Stremio-compatible clients"]
+  sources["TorrentClaw, Harbrr, and other sources"] --> aggregate
+  usenet["Usenet integrations"] --> aggregate
+  trackerLinks["Saved-config tracker links"] <--> bridge["Shared watch-state bridge"]
+  jellyfin["Jellyfin playback events"] --> bridge
+  bridge <--> providers["Trakt, WeTrakr, and Floppy adapters"]

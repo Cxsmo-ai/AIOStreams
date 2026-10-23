@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 440" role="img" aria-labelledby="title desc">
+  <title id="title">Multi-architecture container publishing</title>
+  <desc id="desc">A main-branch push or manual dispatch starts separate native AMD64 and ARM64 builds. Each produces an image digest; both digests are combined into an OCI multi-architecture manifest and published as GitHub Container Registry tags.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 z" fill="#a855f7"/></marker>
+  </defs>
+  <rect width="1440" height="440" rx="24" fill="#0b0c12"/>
+  <text x="48" y="48" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="25" font-weight="700">Native multi-architecture publishing</text>
+  <text x="48" y="76" fill="#b7b6c2" font-family="Arial,Helvetica,sans-serif" font-size="15">Independent native builds are joined by their digests into one OCI manifest.</text>
+
+  <path id="edge-trigger-amd64" d="M300 218 C335 218 345 130 385 130" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-trigger-arm64" d="M300 218 C335 218 345 306 385 306" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-amd64-digest" d="M625 130 H700" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-arm64-digest" d="M625 306 H700" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-amd64-manifest" d="M920 130 C950 130 960 190 990 200" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-arm64-manifest" d="M920 306 C950 306 960 246 990 236" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+  <path id="edge-manifest-tags" d="M1220 218 H1270" fill="none" stroke="#a855f7" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="60" y="178" width="240" height="80" rx="16" fill="#151622" stroke="#414052" stroke-width="2"/>
+  <text x="180" y="211" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Main push or</text>
+  <text x="180" y="237" text-anchor="middle" fill="#c6c5d0" font-family="Arial,Helvetica,sans-serif" font-size="14">manual dispatch</text>
+
+  <rect x="385" y="90" width="240" height="80" rx="16" fill="#101d20" stroke="#328f85" stroke-width="2"/>
+  <text x="505" y="123" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Native AMD64</text>
+  <text x="505" y="149" text-anchor="middle" fill="#c6c5d0" font-family="Arial,Helvetica,sans-serif" font-size="14">build</text>
+
+  <rect x="385" y="266" width="240" height="80" rx="16" fill="#101d20" stroke="#328f85" stroke-width="2"/>
+  <text x="505" y="299" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">Native ARM64</text>
+  <text x="505" y="325" text-anchor="middle" fill="#c6c5d0" font-family="Arial,Helvetica,sans-serif" font-size="14">build</text>
+
+  <rect x="700" y="90" width="220" height="80" rx="16" fill="#151622" stroke="#414052" stroke-width="2"/>
+  <text x="810" y="123" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">AMD64</text>
+  <text x="810" y="149" text-anchor="middle" fill="#c6c5d0" font-family="Arial,Helvetica,sans-serif" font-size="14">image digest</text>
+
+  <rect x="700" y="266" width="220" height="80" rx="16" fill="#151622" stroke="#414052" stroke-width="2"/>
+  <text x="810" y="299" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">ARM64</text>
+  <text x="810" y="325" text-anchor="middle" fill="#c6c5d0" font-family="Arial,Helvetica,sans-serif" font-size="14">image digest</text>
+
+  <rect x="990" y="178" width="230" height="80" rx="16" fill="#19142a" stroke="#8056d9" stroke-width="2"/>
+  <text x="1105" y="211" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">OCI multi-arch</text>
+  <text x="1105" y="237" text-anchor="middle" fill="#c6c5d0" font-family="Arial,Helvetica,sans-serif" font-size="14">manifest</text>
+
+  <rect x="1270" y="178" width="130" height="80" rx="16" fill="#19142a" stroke="#8056d9" stroke-width="2"/>
+  <text x="1335" y="211" text-anchor="middle" fill="#f4f4f5" font-family="Arial,Helvetica,sans-serif" font-size="18" font-weight="600">GHCR</text>
+  <text x="1335" y="237" text-anchor="middle" fill="#c6c5d0" font-family="Arial,Helvetica,sans-serif" font-size="14">tags</text>
+</svg>

@@ -1,0 +1,8 @@
+flowchart LR
+  trigger["Main push or manual workflow dispatch"] --> amd64["Native AMD64 build"]
+  trigger --> arm64["Native ARM64 build"]
+  amd64 --> amd64Digest["Image digest"]
+  arm64 --> arm64Digest["Image digest"]
+  amd64Digest --> manifest["OCI multi-architecture manifest"]
+  arm64Digest --> manifest
+  manifest --> tags["GHCR tags"]

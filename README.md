@@ -50,17 +50,9 @@ AIOStreams brings multiple Stremio addons and supported services behind one conf
 
 The fork keeps the upstream aggregation path intact and adds optional provider-specific adapters around it. Tracker credentials remain linked to a saved AIOStreams configuration; they are not copied into this repository or a shareable manifest.
 
-```mermaid
-flowchart LR
-  addons["Stremio add-ons and built-ins"] --> aggregate["AIOStreams aggregation"]
-  aggregate --> pipeline["Filter, sort, and deduplicate"]
-  pipeline --> clients["Stremio-compatible clients"]
-  sources["TorrentClaw, Harbrr, and other sources"] --> aggregate
-  usenet["Usenet integrations"] --> aggregate
-  trackerLinks["Saved-config tracker links"] <--> bridge["Shared watch-state bridge"]
-  jellyfin["Jellyfin playback events"] --> bridge
-  bridge <--> providers["Trakt, WeTrakr, and Floppy adapters"]
-```
+[![AIOStreams fork flowchart: add-ons, source integrations, and Usenet feed into aggregation and filtering; the shared tracker bridge connects saved-config providers and Jellyfin playback.](docs/diagrams/fork-architecture.svg)](docs/diagrams/fork-architecture.svg)
+
+[View editable Mermaid source](docs/diagrams/fork-architecture.mmd).
 
 <details>
 <summary>What the tracker bridge does (and does not promise)</summary>
@@ -162,16 +154,9 @@ docker pull ghcr.io/cxsmo-ai/aiostreams:latest
 
 The `deploy-docker.yml` and `dev-docker.yml` workflows build **separate native images** for `linux/amd64` and `linux/arm64`, upload their digests, and publish a combined multi-platform manifest. The ARM64 job uses an ARM runner; the workflow does not need QEMU emulation. Container clients select the matching architecture from the manifest when pulling. Upstream AIOStreams also publishes multi-platform images; this section documents how this fork builds and tags its own images, not an exclusive architecture feature.
 
-```mermaid
-flowchart LR
-  trigger["Main push or manual workflow dispatch"] --> amd64["Native AMD64 build"]
-  trigger --> arm64["Native ARM64 build"]
-  amd64 --> amd64Digest["Image digest"]
-  arm64 --> arm64Digest["Image digest"]
-  amd64Digest --> manifest["OCI multi-architecture manifest"]
-  arm64Digest --> manifest
-  manifest --> tags["GHCR tags"]
-```
+[![Multi-architecture container publishing flowchart: native AMD64 and ARM64 builds produce digests that combine into an OCI manifest and GHCR tags.](docs/diagrams/docker-publishing.svg)](docs/diagrams/docker-publishing.svg)
+
+[View editable Mermaid source](docs/diagrams/docker-publishing.mmd).
 
 | Workflow                           | Trigger                                                   | Published tags                                                                                                       |
 | ---------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
