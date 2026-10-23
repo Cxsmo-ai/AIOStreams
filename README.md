@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/fork/cxsmo-mark.png" width="112" alt="Official AIOStreams symbol with a violet plus on a dark tile, marking the independent Cxsmo fork" />
+  <img src="branding/fork/cxsmo-mark.png" width="160" alt="AIOStreams+ fork badge using the official symbol and wordmark on a dark tile" />
 </p>
 
 <h1 align="center">AIOStreams · Cxsmo fork</h1>
@@ -52,14 +52,14 @@ The fork keeps the upstream aggregation path intact and adds optional provider-s
 
 ```mermaid
 flowchart LR
-  A[Stremio add-ons and built-ins] --> B[AIOStreams aggregation]
-  B --> C[Filter · sort · deduplicate]
-  C --> D[Stremio-compatible clients]
-  E[TorrentClaw · Harbrr · other sources] --> B
-  F[Usenet integrations] --> B
-  G[Saved-config tracker links] <--> H[Shared watch-state bridge]
-  I[Jellyfin playback events] --> H
-  H <--> J[Trakt · WeTrakr · Floppy adapters]
+  addons["Stremio add-ons and built-ins"] --> aggregate["AIOStreams aggregation"]
+  aggregate --> pipeline["Filter, sort, and deduplicate"]
+  pipeline --> clients["Stremio-compatible clients"]
+  sources["TorrentClaw, Harbrr, and other sources"] --> aggregate
+  usenet["Usenet integrations"] --> aggregate
+  trackerLinks["Saved-config tracker links"] <--> bridge["Shared watch-state bridge"]
+  jellyfin["Jellyfin playback events"] --> bridge
+  bridge <--> providers["Trakt, WeTrakr, and Floppy adapters"]
 ```
 
 <details>
@@ -164,13 +164,13 @@ The `deploy-docker.yml` and `dev-docker.yml` workflows build **separate native i
 
 ```mermaid
 flowchart LR
-  A[Main push or manual workflow dispatch] --> B[Native AMD64 build]
-  A --> C[Native ARM64 build]
-  B --> D[Image digest]
-  C --> E[Image digest]
-  D --> F[OCI multi-architecture manifest]
-  E --> F
-  F --> G[GHCR tags]
+  trigger["Main push or manual workflow dispatch"] --> amd64["Native AMD64 build"]
+  trigger --> arm64["Native ARM64 build"]
+  amd64 --> amd64Digest["Image digest"]
+  arm64 --> arm64Digest["Image digest"]
+  amd64Digest --> manifest["OCI multi-architecture manifest"]
+  arm64Digest --> manifest
+  manifest --> tags["GHCR tags"]
 ```
 
 | Workflow                           | Trigger                                                   | Published tags                                                                                                       |

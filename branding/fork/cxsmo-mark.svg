@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
   <title id="title">AIOStreams+ community fork mark</title>
-  <desc id="desc">The official AIOStreams symbol and violet plus on a dark rounded tile, identifying this independent community fork.</desc>
+  <desc id="desc">The official AIOStreams symbol and name with a violet plus identifying the independent community fork.</desc>
   <rect width="512" height="512" rx="88" fill="#08090f" />
-  <g transform="translate(20 8) scale(.44)" fill="#fff">
-    <ellipse cx="644.89" cy="644.5" rx="97.36" ry="99" />
-    <path d="M508.34,338.5h3.14c65.24,0,106.01,70.62,73.39,127.12l-160.44,277.88h0c-66.63,0-108.27-72.13-74.96-129.83l158.87-275.17Z" />
-  </g>
-  <path d="M390 367v74m-37-37h74" fill="none" stroke="#a855f7" stroke-linecap="round" stroke-width="24" />
+  <svg x="86" y="30" width="220" height="220" viewBox="330 320 430 430" aria-hidden="true">
+    <ellipse cx="644.89" cy="644.5" rx="97.36" ry="99" fill="#fff" />
+    <path d="M508.34,338.5h3.14c65.24,0,106.01,70.62,73.39,127.12l-160.44,277.88h0c-66.63,0-108.27-72.13-74.96-129.83l158.87-275.17Z" fill="#fff" />
+  </svg>
+  <text x="256" y="365" text-anchor="middle" fill="#fff" font-family="Arial, Helvetica, sans-serif" font-size="52" font-weight="700" letter-spacing="-1">AIOStreams<tspan fill="#a855f7">+</tspan></text>
 </svg>
