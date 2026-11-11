@@ -78,45 +78,65 @@ For the complete upstream feature set and official usage guides, see the [upstre
 
 ## What this fork adds
 
-These are fork-specific additions, not claims about official AIOStreams. Integrations are optional and can depend on each provider's own account, API, plan, and feature support.
+The items below describe fork-specific code in this repository; they are not claims that every item is part of official AIOStreams. Most integrations are optional and require your own provider account, API access, and compatible client. Provider APIs are not interchangeable, so support is capability-based rather than a promise of identical behavior everywhere.
 
-### Linked trackers and Jellyfin sync
+### Tracker accounts, merged state, and sync
 
-- **Trakt, WeTrakr, and Floppy links** are configured from the AIOStreams **Services → Trackers** area. Each saved AIOStreams configuration links its own provider account; credentials are kept server-side and are not part of shareable addon configuration.
-- **Merged tracker delivery** routes supported watch-state and playback changes through provider adapters. WeTrakr change-journal support and provider snapshots are reconciled with a durable queue; provider-specific partial failures are tracked instead of being treated as an empty history.
-- **Jellyfin tracker bridge** connects Jellyfin-originated playback and supported rating/list state with the linked tracker layer. A provider only receives operations its adapter and API support; unsupported or rejected operations are not represented as successfully synced.
-- **Relink protection** associates queued work and sync checkpoints with the active provider link generation. Relinking or disconnecting a provider prevents stale queued work from being sent to the replacement account.
-- **Account scope matters:** tracker links belong to a saved AIOStreams configuration, not automatically to each Jellyfin household profile. Household profiles and saved configurations are different boundaries. Do not expect a household profile to have an independent direct tracker account unless that behavior is explicitly implemented for the provider.
+- **Direct tracker links:** Trakt, WeTrakr, and Floppy can be linked from **Services → Trackers**. Each saved AIOStreams configuration has its own provider link. Credentials and OAuth tokens stay in server-side storage; shareable addon configuration contains references, not the credentials themselves.
+- **A common record model:** provider records are normalized around media identity and supported state such as watched history, in-progress playback, ratings, watchlists/custom lists, comments/reactions, and removals. Movie/show/episode identity, episode coordinates, progress, and provider timestamps are retained when supplied. Each adapter only reads or writes fields the provider API actually supports.
+- **Live delivery and backfill:** supported playback changes can be queued for provider delivery; the tracker panel also exposes provider linking and sync controls, including WeTrakr backfill/merge and live-sync controls. Tracker writes and live scrobbles use separate durable queues with bounded batches, leases, retries, and generation checks. A locally accepted change is not proof of immediate remote delivery; unsupported operations are reported separately, and provider polling, journals, and API limits differ.
+- **WeTrakr:** account snapshots are read by independently tracked facets, with paginated history/list/comment data and an incremental change-journal checkpoint where available. Supported list and comment writes/reactions are provider-specific. The configuration UI also includes WeTrakr account/catalog browsing and search tools. A failed facet is reported separately rather than converted into an empty account snapshot.
+- **Floppy:** the adapter pages through account playback, history, library/list, and rating data where returned by its API. A snapshot is accepted only when its required pages and facets parse successfully, preventing an incomplete read from being treated as authoritative absence.
+- **Trakt:** the adapter maps supported history, watchlist, rating, and live scrobble operations to Trakt's own API endpoints. Provider-specific operation support still applies.
+- **Durable delivery and relink safety:** tracker work is stored in an outbox with retry/checkpoint state. Link generations fence old queued work after relink or disconnect, so a stale job is not silently sent to a newly linked account. Partial-provider failures remain visible and do not erase another provider's history.
+- **Important scope boundary:** these links belong to a saved AIOStreams configuration. A Jellyfin household user/profile is not automatically a separate set of direct tracker credentials. The Jellyfin bridge also skips non-primary personas; their activity is not automatically written to the primary account's linked trackers. The upstream [Watch State protocol](https://docs.aiostreams.viren070.me/reference/addon-protocol/watch-state) is distinct from the fork's direct provider links.
 
-The upstream [Watch State protocol](https://docs.aiostreams.viren070.me/reference/addon-protocol/watch-state) is separate from these direct tracker links. Provider APIs differ, so “merged” does not mean every provider supports every operation or field.
+### Jellyfin playback and tracker bridge
 
-### Additional discovery and Usenet tools
+- The fork's Jellyfin bridge maps supported Jellyfin playback events into the shared watch-state/tracker path, including progress and completion/scrobble events. Rating and list changes are forwarded only when the incoming operation and linked provider adapter support them.
+- Provider records are normalized using available external IDs and episode season/episode numbers before they enter the shared ledger. This reduces mismatches between provider IDs; records without a safe identity are not guessed into a different title.
+- Queue delivery is associated with the relevant saved configuration and provider link generation. A rejected or unsupported write is reported as a failure/unsupported operation rather than a successful sync.
+- The fork also includes Jellyfin playback-info efficiency work: version-list requests can defer external subtitle-addon lookup until a playback source is selected. This does not change Jellyfin's subtitle provider or convert subtitles globally.
 
-- **TorrentClaw**: built-in source integration with TorrentClaw-specific result handling, metadata/catalog support where configured, and optional resolution through compatible services.
-- **TorrentClaw Unarr (index-only)**: uses Unarr for NZB discovery while playback is handled by the selected AIOStreams Usenet service. Optional quota controls are available.
-- **Newshosting indexer**: native account-backed search and NZB handoff to supported AIOStreams Usenet playback paths.
-- **Deepbrid Usenet Finder**: supports Direct Resolve, Indexer Only, and combined Finder-plus-external-Usenet routing. Finder pagination, bounded request deadlines, shared concurrency limits, cached probes, and progressive-result merging are designed to retain valid results without letting a slow page stall the whole response. A zero result cap is supported; request time and concurrency remain bounded.
-- **Deepbrid player delivery**: choose the native/direct byte-range path, Remux, HLS, or expose all three as separate stream choices. This transport setting is independent of Finder routing.
-- **Optional Deepbrid subtitle conversion**: eligible ASS/SSA/SUB tracks from other subtitle addons can be converted to WebVTT through the Deepbrid player converter. OpenSubtitles sources are excluded, and SRT/WebVTT remain unchanged.
-- **Harbrr**: an additional built-in source integration.
-- **Ordered NNTP fallback tiers**: a primary provider can be followed by explicitly ordered emergency tiers; older `isBackup` settings are mapped for compatibility.
-- **Addon performance aggregates**: daily source-level metrics help compare latency and result outcomes without storing request titles, media IDs, stream URLs, IP addresses, or credentials in the aggregate rows.
+### Search, catalog, and metadata additions
 
-### Request and sync hardening
+- **TorrentClaw:** a configurable built-in source with provider-aware stream parsing, paginated candidate collection, supported-service routing, metadata/catalog enrichment where enabled, and safer merging with other results. Optional handling can repair known metadata-ID mismatches, inspect season-pack episode sizes, retain source/quality indicators supplied by TorrentClaw, pin its results, or preserve its results through final filtering. These options do not manufacture a TrueSpec verification or guarantee a playable result.
+- **Enhanced Cinemeta:** a Stremio-compatible metadata/catalog route keeps Cinemeta as the base and can add TorrentClaw season/episode metadata when the saved configuration has the relevant service enabled. If enrichment is unavailable or fails, the route falls back to the underlying Cinemeta response; this is metadata enrichment, not a replacement playback source. The separately listed configurable Cinemeta preset below is an upstream compatibility backport, not the source of this TorrentClaw enrichment.
+- **Harbrr (torrent-only in this fork):** searches selected public/private torrent indexers with source filtering, expanded queries, deduplication, and torrent download/magnet handling. The Harbrr API supports Usenet, but this AIOStreams integration intentionally returns no NZB results.
+- **Newshosting indexer:** a native account-backed search path that can create/hand off NZB content to configured compatible Usenet services. Credentials are supplied by the operator; the addon does not bundle an account.
+- **Unarr indexer:** an index-only discovery integration. Unarr finds NZB results; a separately selected compatible AIOStreams Usenet service handles playback. Optional quota/reservation controls avoid treating indexer discovery as a second playback engine.
+- **Newznab SearchNZB compatibility:** recognizes the optional SearchNZB endpoint when an indexer advertises it.
+- **Meteor cleanup:** removes known provider placeholder/no-results entries so support links and empty-result cards do not masquerade as media streams.
 
-The fork also adds URL/request validation and redirect controls, stronger authentication/CORS handling, and generation-aware tracker queues. These changes reduce specific request and stale-sync risks; they are not a security guarantee. Operators should still protect the configuration and manifest endpoints, keep instance secrets private, and use network-level controls appropriate to their deployment.
+### Deepbrid Usenet Finder and player delivery
 
-### Selected upstream compatibility updates
+- **Finder routing is separate from playback transport.** Finder mode can be **Direct Resolve** (keep Finder-resolved playback), **Indexer Only** (route Finder NZB handoffs when the API supplies an NZB URL), or **Both** (keep Finder playback and enable that optional external-Usenet handoff). Other indexer addons have their own service-routing settings; Finder results do not automatically become NZBs when the upstream Finder API supplies only a playable file.
+- **Result controls:** Finder requests support pagination, bounded retries/deadlines, per-addon and shared concurrency limits, and cached/in-flight request reuse. A result or content-resolve limit of `0` means unlimited candidates for that configured limit; network concurrency and timeouts remain bounded. The “Always Keep Results” option protects returned Deepbrid results from final result filtering/limits, but cannot create results when the provider has none or the request fails.
+- **Progressive responses:** the opt-in `/:type/:id.ndjson` route is for a compatible modified Nuvio client. It sends a hello event, cumulative snapshots, and a final authoritative response when delivered successfully; heartbeats, backpressure, and disconnect detection/cleanup are separate from the ordinary Stremio JSON route. Deepbrid's progressive resolver merges already-validated early results with the final Finder results by stable candidate identity, rather than depending on encrypted playback-URL equality. A disconnected client is not guaranteed to receive the terminal event.
+- **Player delivery choices:** each Finder result can use a native/direct byte-range proxy, Deepbrid **Remux**, **HLS**, or all three as separately labeled choices. Native playback capabilities are signed, encrypted, time-limited, and checked against allowed download hosts by the server. This is a delivery choice after resolution, not a Finder search mode or a promise that every player supports every transport equally.
+- **Deepbrid OpenSubtitles built-in:** an optional universal subtitle addon resolves a title from metadata/IMDb-style IDs, searches selected languages, supports hearing-impaired filters and a per-query result cap, and returns subtitle tracks through an AIOStreams WebVTT download proxy. This is a separate subtitle addon—not the player-side conversion toggle below.
+- **Optional subtitle conversion:** a per-addon toggle can send eligible ASS/SSA/SUB tracks from other subtitle addons through the Deepbrid player converter as WebVTT. OpenSubtitles/Deepbrid OpenSubtitles sources are excluded; SRT and WebVTT are passed through unchanged.
 
-This integration branch also carries focused fixes from the newer official AIOStreams source where they fit the fork without replacing its tracker, Jellyfin, or Usenet work:
+### Reliability, security, and operations
 
-- **Newznab SearchNZB discovery** recognizes the optional SearchNZB endpoint.
-- **Cinemeta catalog and metadata preset** provides configurable endpoint and request-timeout settings.
-- **Meteor result cleanup** filters provider placeholder entries such as no-results and support links.
-- **Jellyfin version-list efficiency** can defer external subtitle-addon lookup until a playback source is selected.
-- **Metadata accuracy** avoids assigning indexer-quality metadata when no language data exists, and recognizes additional Chinese language aliases.
+- **Ordered NNTP fallback tiers:** explicitly ordered secondary Usenet providers can be used as fallback tiers; legacy `isBackup` configuration is migrated for compatibility.
+- **Unlimited result-cap controls:** the filter UI offers a “set all limits to 0” action and treats zero/blank caps as unlimited across global, service, addon, resolution, quality, indexer, and release-group result limits. This changes final result caps; it does not remove provider limits, request deadlines, or concurrency safeguards.
+- **Source performance aggregates:** daily per-addon counters cover requests, result/error/cutoff outcomes, latency, stream sizes, cache state, and source categories. Aggregate entities use a one-way manifest-instance hash; those aggregate tables do not contain media titles, media IDs, stream URLs, client IP addresses, or credentials. This describes the aggregate tables, not every application log or database.
+- **Deepbrid diagnostics:** progressive failure details and stage counters use bounded, allowlisted fields rather than exposing raw provider URLs, signed download links, or arbitrary error bodies.
+- **Request hardening:** URL validation, redirect controls, bounded fetching, and authentication/CORS protections reduce specific SSRF, credential-handling, and stale-request risks. They are defense-in-depth, not a security guarantee; operators must still protect configuration/manifest access and private service credentials.
+- **ARM64 and release automation:** this fork's GHCR workflows publish distinct native AMD64 and ARM64 builds and combine their digests into multi-platform tags. The build pipeline and tags are detailed under [Container images and architectures](#container-images-and-architectures).
 
-These are selective compatibility backports, not a claim that this fork has wholesale-merged every upstream architectural or client change. See the [official AIOStreams repository](https://github.com/Viren070/AIOStreams) and [release history](https://github.com/Viren070/AIOStreams/releases) for upstream changes outside this fork's compatibility set.
+### Selected upstream compatibility backports
+
+The fork also carries focused changes from newer official AIOStreams source where they fit the custom integrations above:
+
+- **Cinemeta preset:** configurable metadata/catalog endpoint and timeout options.
+- **Newznab SearchNZB discovery:** recognizes the optional SearchNZB endpoint.
+- **Meteor placeholder filtering:** ignores provider no-results/support-link entries.
+- **Jellyfin version-list efficiency:** can skip subtitle-addon work until the chosen source is requested.
+- **Metadata corrections:** avoids assigning indexer-quality metadata when language data is absent and recognizes additional Chinese language aliases.
+
+These are selective compatibility backports, not a wholesale merge of every upstream architectural or client change. See the [official AIOStreams repository](https://github.com/Viren070/AIOStreams) and [release history](https://github.com/Viren070/AIOStreams/releases) for upstream changes outside this fork's compatibility set.
 
 ## AIOStreams application
 
