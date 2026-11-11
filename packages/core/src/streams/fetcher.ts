@@ -26,6 +26,8 @@ import {
   startRemuxDbLookup,
 } from '../remuxdb/wrap.js';
 import { resolveStoredMediaInfo } from '../media-info/lookup.js';
+import { countDeepbridFinderStreams } from './deepbrid-observability.js';
+import { ProgressiveResponseInterruptedError } from '../main/progressiveResponse.js';
 
 export function isTransientRateLimitError(error: {
   title?: string;
@@ -126,7 +128,8 @@ class StreamFetcher {
     onProgress?: (progress: {
       streams: ParsedStream[];
       errors: { title?: string; description?: string }[];
-    }) => Promise<void> | void
+    }) => Promise<void> | void,
+    signal?: AbortSignal
   ): Promise<{
     streams: ParsedStream[];
     errors: {
@@ -165,7 +168,12 @@ class StreamFetcher {
           errors: { title?: string; description?: string }[];
         }) => {
           for (const stream of progress.streams) {
-            progressiveStreams.set(stream.id, stream);
+            // Keep same-ID streams from distinct addons visible until the
+            // normal final deduplicator applies the configured policy.
+            progressiveStreams.set(
+              `${stream.addon.manifestUrl}\u0000${stream.id}`,
+              stream
+            );
           }
           for (const error of progress.errors) {
             const key = `${error.title ?? ''}\u0000${error.description ?? ''}`;
@@ -175,14 +183,13 @@ class StreamFetcher {
             streams: [...progressiveStreams.values()],
             errors: [...progressiveErrors.values()],
           };
-          progressiveCallback = progressiveCallback
-            .then(() => onProgress(snapshot))
-            .catch((error) => {
-              logger.debug(
-                { error: error instanceof Error ? error.message : String(error) },
-                'progressive stream callback failed'
-              );
-            });
+          if (signal?.aborted) {
+            throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+          }
+          progressiveCallback = progressiveCallback.then(() =>
+            onProgress(snapshot)
+          );
+          return progressiveCallback;
         }
       : undefined;
 
@@ -224,11 +231,25 @@ class StreamFetcher {
     });
 
     // Helper function to fetch streams from an addon and log summary
-    const fetchFromAddon = async (addon: Addon) => {
+    const fetchFromAddon = async (
+      addon: Addon,
+      onPartial?: (streams: ParsedStream[]) => Promise<void> | void
+    ) => {
       const start = Date.now();
+      let partialStreams: ParsedStream[] = [];
 
       try {
-        const streams = await new Wrapper(addon).getStreams(type, id);
+        const streams = await new Wrapper(addon).getStreams(
+          type,
+          id,
+          onPartial
+            ? async (partial) => {
+                partialStreams = partial;
+                await onPartial(partial);
+              }
+            : undefined,
+          signal
+        );
         const errorStreams = streams.filter(
           (s) => s.type === constants.ERROR_STREAM_TYPE
         );
@@ -300,6 +321,9 @@ class StreamFetcher {
           timeTaken: latencyMs,
         };
       } catch (error) {
+        if (signal?.aborted) {
+          throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+        }
         const errMsg = error instanceof Error ? error.message : String(error);
         const addonErrors = {
           title: `[❌] ${getAddonName(addon)}`,
@@ -307,10 +331,15 @@ class StreamFetcher {
         };
         const { error_kind } = classifyAddonError('stream', error);
         const took = Date.now() - start;
+        const recoverableInterruption =
+          error instanceof ProgressiveResponseInterruptedError;
+        const recoverableStreams = recoverableInterruption
+          ? partialStreams
+          : [];
         dispositions.set(addon.manifestUrl, {
           addon,
           disposition: 'error',
-          rawCount: 0,
+          rawCount: recoverableStreams.length,
           latencyMs: took,
           status: 'error',
           errorKind: error_kind,
@@ -323,7 +352,10 @@ class StreamFetcher {
           success: false as const,
           errors: [addonErrors],
           timeTaken: 0,
-          streams: [],
+          // Keep complete, validated batches if the progressive transport
+          // fails after delivering useful results. The ordinary final event
+          // remains authoritative for downstream clients.
+          streams: recoverableStreams,
         };
       }
     };
@@ -337,13 +369,27 @@ class StreamFetcher {
         // while reporting each completed addon immediately.
         const slots = new Array<Awaited<ReturnType<typeof fetchFromAddon>>>(addons.length);
         const arrivals: Array<Awaited<ReturnType<typeof fetchFromAddon>>> = [];
+        const partialByAddon = new Map<string, ParsedStream[]>();
         await Promise.all(
           addons.map(async (addon, index) => {
-            const result = await fetchFromAddon(addon);
+            const result = await fetchFromAddon(addon, async (streams) => {
+              partialByAddon.set(addon.manifestUrl, streams);
+              await reportProgress({
+                streams: [
+                  ...arrivals.flatMap((item) => item.streams),
+                  ...[...partialByAddon.values()].flat(),
+                ],
+                errors: arrivals.flatMap((item) => item.errors),
+              });
+            });
+            partialByAddon.delete(addon.manifestUrl);
             slots[index] = result;
             arrivals.push(result);
-            reportProgress({
-              streams: arrivals.flatMap((item) => item.streams),
+            await reportProgress({
+              streams: [
+                ...arrivals.flatMap((item) => item.streams),
+                ...[...partialByAddon.values()].flat(),
+              ],
               errors: arrivals.flatMap((item) => item.errors),
             });
           })
@@ -351,7 +397,9 @@ class StreamFetcher {
         await progressiveCallback;
         results = slots;
       } else {
-        results = await Promise.all(addons.map(fetchFromAddon));
+        results = await Promise.all(
+          addons.map((addon) => fetchFromAddon(addon))
+        );
       }
 
       const groupStreams = results.flatMap((r) => r.streams);
@@ -371,10 +419,26 @@ class StreamFetcher {
 
       // Blocklist runs before dedup so a flagged candidate never survives
       // as a failover variant harvested from discarded duplicates.
+      const normallyFilteredStreams = await this.filter.filter(
+        groupStreams,
+        context
+      );
+      const blocklistFilteredStreams = await this.filter.filterBlocklisted(
+        normallyFilteredStreams
+      );
       const filteredStreams = await this.deduplicate.deduplicate(
-        await this.filter.filterBlocklisted(
-          await this.filter.filter(groupStreams, context)
-        )
+        blocklistFilteredStreams
+      );
+      logger.info(
+        {
+          type,
+          id,
+          raw: countDeepbridFinderStreams(groupStreams),
+          afterFilter: countDeepbridFinderStreams(normallyFilteredStreams),
+          afterBlocklist: countDeepbridFinderStreams(blocklistFilteredStreams),
+          afterDeduplication: countDeepbridFinderStreams(filteredStreams),
+        },
+        'Deepbrid Finder native streams after fetch stages'
       );
 
       const survivorCounts = new Map<string, number>();

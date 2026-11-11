@@ -10,6 +10,7 @@ const WHIELIST = [
   '/torznab/test',
   '/unarr-indexer/auth',
   '/deepbrid-usenet/play',
+  '/deepbrid-usenet/subtitle/convert',
   '/deepbrid-subtitles/download',
 ];
 

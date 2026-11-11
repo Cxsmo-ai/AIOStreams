@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { randomUUID } from 'node:crypto';
 import {
   AIOStreams,
   AIOStreamResponse,
@@ -7,6 +8,11 @@ import {
   StremioTransformer,
 } from '@aiostreams/core';
 import { trackResource } from '../../middlewares/analytics.js';
+import {
+  observeProgressiveResponse,
+  startProgressiveHeartbeat,
+  waitForProgressiveDrain,
+} from './progressiveStreamLifecycle.js';
 
 const router: Router = Router();
 const logger = createLogger('server');
@@ -45,9 +51,13 @@ router.get(
     }
 
     let closed = false;
-    req.on('close', () => {
-      closed = true;
-    });
+    let stopHeartbeat = (): void => undefined;
+    const controller = new AbortController();
+    const requestTraceId = randomUUID();
+    const requestStartedAt = Date.now();
+    let terminalFrameBytes: number | undefined;
+    let terminalFrameQueuedAt: number | undefined;
+    let resolutionCompleted = false;
 
     res.status(200);
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -55,26 +65,55 @@ router.get(
     res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
+    res.once('finish', () => {
+      if (terminalFrameQueuedAt === undefined) return;
+      logger.info(
+        {
+          requestTraceId,
+          terminalFrameBytes,
+          terminalWriteElapsedMs: terminalFrameQueuedAt - requestStartedAt,
+          responseFinishElapsedMs: Date.now() - requestStartedAt,
+        },
+        'progressive terminal response finished'
+      );
+    });
+    res.once('close', () => {
+      if (res.writableFinished || !resolutionCompleted) return;
+      logger.warn(
+        {
+          requestTraceId,
+          terminalFrameQueued: terminalFrameQueuedAt !== undefined,
+          terminalFrameBytes,
+          terminalWriteElapsedMs:
+            terminalFrameQueuedAt === undefined
+              ? undefined
+              : terminalFrameQueuedAt - requestStartedAt,
+          responseCloseElapsedMs: Date.now() - requestStartedAt,
+        },
+        'progressive terminal response closed before finish'
+      );
+    });
+    const responseLifecycle = observeProgressiveResponse(res, () => {
+      closed = true;
+      stopHeartbeat();
+      controller.abort();
+    });
 
     const writeEvent = async (event: ProgressiveEvent): Promise<void> => {
-      if (closed || res.writableEnded) return;
+      if (closed || res.destroyed || res.writableEnded) return;
       const line = `${JSON.stringify(event)}\n`;
-      if (res.write(line)) return;
-      await new Promise<void>((resolve) => {
-        const onDrain = () => {
-          res.off('drain', onDrain);
-          resolve();
-        };
-        res.once('drain', onDrain);
-        if (closed || res.writableEnded) {
-          res.off('drain', onDrain);
-          resolve();
-        }
-      });
+      const terminal = event.event === 'complete';
+      if (terminal) terminalFrameBytes = Buffer.byteLength(line);
+      const accepted = res.write(line);
+      if (terminal) terminalFrameQueuedAt = Date.now();
+      if (accepted) return;
+      await waitForProgressiveDrain(res);
+      if (responseLifecycle.isDisconnected()) return;
     };
 
     try {
       await writeEvent({ event: 'hello', version: 1 });
+      if (!closed) stopHeartbeat = startProgressiveHeartbeat(res);
 
       const { type, id } = req.params;
       const transformer = new StremioTransformer(req.userData);
@@ -124,8 +163,10 @@ router.get(
             complete: false,
             streams: transformed.streams,
           });
-        }
+        },
+        controller.signal
       );
+      resolutionCompleted = true;
 
       if (!closed) {
         const context = aiostreams.getStreamContext();
@@ -146,6 +187,7 @@ router.get(
       if (closed || res.writableEnded) return;
       logger.warn(
         {
+          requestTraceId,
           error: error instanceof Error ? error.message : String(error),
         },
         'progressive stream request failed'
@@ -155,6 +197,9 @@ router.get(
       // empty result is authoritative.
       res.end();
       if (!res.headersSent) next(error);
+    } finally {
+      stopHeartbeat();
+      responseLifecycle.dispose();
     }
   }
 );

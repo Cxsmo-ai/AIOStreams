@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { afterEach, it } from 'node:test';
 import express from 'express';
 import { WeTrakrApiError, WeTrakrRateLimitError } from '@aiostreams/core';
@@ -21,6 +22,7 @@ async function testServer(dependencies: WeTrakrRouterDependencies) {
   app.use(errorMiddleware);
   const server = app.listen(0);
   servers.push(server);
+  await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string')
     throw new Error('No test listener');

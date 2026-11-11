@@ -1,11 +1,743 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
+import pLimit, { type LimitFunction } from 'p-limit';
+import { Response as UndiciResponse } from 'undici';
 import { z } from 'zod';
-import { makeRequest } from '../../utils/index.js';
+import { createLogger, makeRequest } from '../../utils/index.js';
+import {
+  DeepbridFinderResponseCache,
+  isDeepbridRateLimitError,
+} from './finder-response-cache.js';
+
+const logger = createLogger('deepbrid-finder-client');
+
+const finderSearchResponseCache = new DeepbridFinderResponseCache<
+  Record<string, unknown>
+>({
+  freshMs: 15_000,
+  staleMs: 120_000,
+  maxEntries: 512,
+});
 
 export const DEEPBRID_API_BASE = 'https://www.deepbrid.com/api/v1';
 export const DEEPBRID_FINDER_USER_AGENT =
   'Deepbrid/1.0 (ios) DBX/AxkHbkTtYiXSijpzcRE5vGe73HK7qqrinpEz';
 export const DEEPBRID_AIOSTREAMS_USER_AGENT = 'AIOStreams Deepbrid integration';
+
+// A single process-wide API gate is shared by Finder searches, Finder content
+// lookups, and external-indexer Deepbrid service calls. Per-addon limits alone
+// can multiply into bursts when several progressive scrapes overlap.
+
+export type DeepbridFinderRequestKind = 'search' | 'content' | 'other';
+type DeepbridTransportFailureClass =
+  'aborted' | 'timeout' | 'connection' | 'other';
+
+type TimingSummary = {
+  samples: number;
+  p50Ms: number;
+  p95Ms: number;
+  maxMs: number;
+};
+
+export interface DeepbridFinderRequestMetricsSnapshot {
+  attempts: number;
+  attemptsByKind: Record<DeepbridFinderRequestKind, number>;
+  responses: {
+    success: number;
+    rateLimited: number;
+    clientError: number;
+    serverError: number;
+    other: number;
+    transportFailure: number;
+  };
+  transportFailuresByKind: Record<DeepbridFinderRequestKind, number>;
+  transportFailureClasses: Record<DeepbridTransportFailureClass, number>;
+  transportRetryAttemptsByKind: Record<DeepbridFinderRequestKind, number>;
+  transportRetryRecoveriesByKind: Record<DeepbridFinderRequestKind, number>;
+  queueWait: TimingSummary;
+  responseHeaders: TimingSummary;
+  currentFinderRequestsInRollingMinute: number;
+  currentFinderCountIsLowerBound: boolean;
+  maxFinderRequestsInRollingMinute: number;
+  maxFinderCountIsLowerBound: boolean;
+  rateLimit: {
+    observations: number;
+    latestLimit?: number;
+    minimumRemaining?: number;
+  };
+  advertisedRetryAfter: {
+    observations: number;
+    totalMs: number;
+    maxMs: number;
+  };
+  actualRetryWait: {
+    observations: number;
+    totalMs: number;
+    maxMs: number;
+  };
+}
+
+interface RollingMinuteSnapshot {
+  currentRequests: number;
+  currentIsLowerBound: boolean;
+  maxRequests: number;
+  maxIsLowerBound: boolean;
+}
+
+/** Exact up to the fixed cap. Saturation is reported as a lower bound, never
+ * silently presented as an exact rolling-window count. */
+export class BoundedRollingMinuteCounter {
+  private readonly starts: number[] = [];
+  private maxRequests = 0;
+  private maxIsLowerBound = false;
+  private latestDroppedAt: number | undefined;
+
+  constructor(private readonly cap = METRICS_SAMPLE_CAP) {}
+
+  record(startedAtMs: number): void {
+    this.prune(startedAtMs);
+    if (this.starts.length >= this.cap) {
+      this.latestDroppedAt = this.starts.shift();
+      this.maxRequests = Math.max(this.maxRequests, this.cap + 1);
+      this.maxIsLowerBound = true;
+    }
+    this.starts.push(startedAtMs);
+    this.maxRequests = Math.max(this.maxRequests, this.starts.length);
+  }
+
+  snapshot(nowMs: number): RollingMinuteSnapshot {
+    this.prune(nowMs);
+    const currentIsLowerBound =
+      this.latestDroppedAt !== undefined &&
+      nowMs - this.latestDroppedAt < 60_000;
+    return {
+      currentRequests: this.starts.length + Number(currentIsLowerBound),
+      currentIsLowerBound,
+      maxRequests: this.maxRequests,
+      maxIsLowerBound: this.maxIsLowerBound,
+    };
+  }
+
+  private prune(nowMs: number): void {
+    while (this.starts.length && this.starts[0] <= nowMs - 60_000) {
+      this.starts.shift();
+    }
+  }
+}
+
+export interface DeepbridFinderRequestReport extends DeepbridFinderRequestMetricsSnapshot {
+  /** Process-local requests through the shared gate for this account key. */
+  sharedAccountGate: {
+    currentRequestsInRollingMinute: number;
+    currentCountIsLowerBound: boolean;
+    maxRequestsInRollingMinute: number;
+    maxCountIsLowerBound: boolean;
+    requestStartLimitPerMinute: number;
+    observedProviderLimit?: number;
+    cooldownRemainingMs: number;
+    queueWait: TimingSummary;
+  };
+}
+
+const METRICS_SAMPLE_CAP = 4_096;
+const API_GATE_MAX_ENTRIES = 512;
+const API_GATE_IDLE_TTL_MS = 30 * 60_000;
+// Deepbrid currently documents 100 req/min for free and 250 req/min for
+// premium accounts. Keep a 25% reserve even before the first response reveals
+// the account's X-RateLimit-Limit header, so the safe unknown-tier default is
+// 75 req/min rather than the old unauthenticated-IP allowance of 60.
+const UNKNOWN_DEEPBRID_REQUESTS_PER_MINUTE = 75;
+// Keep a 25% reserve for other clients sharing the account-level quota.
+const MAX_DEEPBRID_REQUESTS_PER_MINUTE = 187;
+
+function summarizeTimings(values: readonly number[]): TimingSummary {
+  if (!values.length) return { samples: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 };
+  const sorted = [...values].sort((a, b) => a - b);
+  const percentile = (fraction: number): number =>
+    sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
+  return {
+    samples: sorted.length,
+    p50Ms: Math.round(percentile(0.5)),
+    p95Ms: Math.round(percentile(0.95)),
+    maxMs: Math.round(sorted[sorted.length - 1]),
+  };
+}
+
+function finiteHeaderNumber(
+  headers: Headers,
+  name: string
+): number | undefined {
+  const raw = headers.get(name);
+  if (raw === null || !raw.trim()) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** Numeric-only, bounded telemetry for diagnosing Finder completeness and API
+ * rate-limit headroom. No request path, query, body, key, or response text is
+ * retained or included in snapshots. */
+export class DeepbridFinderRequestMetrics {
+  private attempts = 0;
+  private readonly attemptsByKind: Record<DeepbridFinderRequestKind, number> = {
+    search: 0,
+    content: 0,
+    other: 0,
+  };
+  private readonly responses = {
+    success: 0,
+    rateLimited: 0,
+    clientError: 0,
+    serverError: 0,
+    other: 0,
+    transportFailure: 0,
+  };
+  private readonly transportFailuresByKind: Record<
+    DeepbridFinderRequestKind,
+    number
+  > = {
+    search: 0,
+    content: 0,
+    other: 0,
+  };
+  private readonly transportFailureClasses: Record<
+    DeepbridTransportFailureClass,
+    number
+  > = {
+    aborted: 0,
+    timeout: 0,
+    connection: 0,
+    other: 0,
+  };
+  private readonly transportRetryAttemptsByKind: Record<
+    DeepbridFinderRequestKind,
+    number
+  > = {
+    search: 0,
+    content: 0,
+    other: 0,
+  };
+  private readonly transportRetryRecoveriesByKind: Record<
+    DeepbridFinderRequestKind,
+    number
+  > = {
+    search: 0,
+    content: 0,
+    other: 0,
+  };
+  private readonly queueWaitMs: number[] = [];
+  private readonly responseHeaderMs: number[] = [];
+  private readonly requestRate = new BoundedRollingMinuteCounter();
+  private rateLimitObservations = 0;
+  private latestLimit: number | undefined;
+  private minimumRemaining: number | undefined;
+  private retryAfterObservations = 0;
+  private retryAfterTotalMs = 0;
+  private retryAfterMaxMs = 0;
+  private actualRetryWaitObservations = 0;
+  private actualRetryWaitTotalMs = 0;
+  private actualRetryWaitMaxMs = 0;
+
+  recordStart(
+    kind: DeepbridFinderRequestKind,
+    queuedAtMs: number,
+    startedAtMs: number
+  ): void {
+    this.attempts++;
+    this.attemptsByKind[kind]++;
+    this.pushSample(this.queueWaitMs, Math.max(0, startedAtMs - queuedAtMs));
+    this.requestRate.record(startedAtMs);
+  }
+
+  recordResponse(status: number, headers: Headers, elapsedMs: number): void {
+    this.pushSample(this.responseHeaderMs, Math.max(0, elapsedMs));
+    if (status === 429) this.responses.rateLimited++;
+    else if (status >= 200 && status < 400) this.responses.success++;
+    else if (status >= 400 && status < 500) this.responses.clientError++;
+    else if (status >= 500) this.responses.serverError++;
+    else this.responses.other++;
+
+    const limit = finiteHeaderNumber(headers, 'x-ratelimit-limit');
+    const remaining = finiteHeaderNumber(headers, 'x-ratelimit-remaining');
+    if (limit !== undefined || remaining !== undefined) {
+      this.rateLimitObservations++;
+      if (limit !== undefined) this.latestLimit = limit;
+      if (remaining !== undefined) {
+        this.minimumRemaining =
+          this.minimumRemaining === undefined
+            ? remaining
+            : Math.min(this.minimumRemaining, remaining);
+      }
+    }
+
+    const retryAfter = retryAfterMsFromHeaders(headers);
+    if (retryAfter !== undefined) {
+      this.retryAfterObservations++;
+      this.retryAfterTotalMs += retryAfter;
+      this.retryAfterMaxMs = Math.max(this.retryAfterMaxMs, retryAfter);
+    }
+  }
+
+  recordTransportFailure(
+    kind: DeepbridFinderRequestKind,
+    error: unknown
+  ): void {
+    this.responses.transportFailure++;
+    this.transportFailuresByKind[kind]++;
+    this.transportFailureClasses[classifyTransportFailure(error)]++;
+  }
+
+  recordTransportRetry(
+    kind: DeepbridFinderRequestKind,
+    recovered: boolean
+  ): void {
+    if (recovered) this.transportRetryRecoveriesByKind[kind]++;
+    else this.transportRetryAttemptsByKind[kind]++;
+  }
+
+  recordRetryWait(elapsedMs: number): void {
+    const waitMs = Math.max(0, elapsedMs);
+    this.actualRetryWaitObservations++;
+    this.actualRetryWaitTotalMs += waitMs;
+    this.actualRetryWaitMaxMs = Math.max(this.actualRetryWaitMaxMs, waitMs);
+  }
+
+  snapshot(): DeepbridFinderRequestMetricsSnapshot {
+    const window = this.requestRate.snapshot(Date.now());
+    return {
+      attempts: this.attempts,
+      attemptsByKind: { ...this.attemptsByKind },
+      responses: { ...this.responses },
+      transportFailuresByKind: { ...this.transportFailuresByKind },
+      transportFailureClasses: { ...this.transportFailureClasses },
+      transportRetryAttemptsByKind: { ...this.transportRetryAttemptsByKind },
+      transportRetryRecoveriesByKind: {
+        ...this.transportRetryRecoveriesByKind,
+      },
+      queueWait: summarizeTimings(this.queueWaitMs),
+      responseHeaders: summarizeTimings(this.responseHeaderMs),
+      currentFinderRequestsInRollingMinute: window.currentRequests,
+      currentFinderCountIsLowerBound: window.currentIsLowerBound,
+      maxFinderRequestsInRollingMinute: window.maxRequests,
+      maxFinderCountIsLowerBound: window.maxIsLowerBound,
+      rateLimit: {
+        observations: this.rateLimitObservations,
+        latestLimit: this.latestLimit,
+        minimumRemaining: this.minimumRemaining,
+      },
+      advertisedRetryAfter: {
+        observations: this.retryAfterObservations,
+        totalMs: Math.round(this.retryAfterTotalMs),
+        maxMs: Math.round(this.retryAfterMaxMs),
+      },
+      actualRetryWait: {
+        observations: this.actualRetryWaitObservations,
+        totalMs: Math.round(this.actualRetryWaitTotalMs),
+        maxMs: Math.round(this.actualRetryWaitMaxMs),
+      },
+    };
+  }
+
+  private pushSample(samples: number[], value: number): void {
+    if (samples.length === METRICS_SAMPLE_CAP) samples.shift();
+    samples.push(value);
+  }
+}
+
+function classifyTransportFailure(
+  error: unknown
+): DeepbridTransportFailureClass {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  for (
+    let depth = 0;
+    depth < 4 && current && typeof current === 'object';
+    depth++
+  ) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const candidate = current as {
+      name?: unknown;
+      code?: unknown;
+      cause?: unknown;
+    };
+    const name = typeof candidate.name === 'string' ? candidate.name : '';
+    const code = typeof candidate.code === 'string' ? candidate.code : '';
+    if (name === 'AbortError' || code === 'ABORT_ERR') return 'aborted';
+    if (
+      name === 'TimeoutError' ||
+      [
+        'ETIMEDOUT',
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_BODY_TIMEOUT',
+      ].includes(code)
+    ) {
+      return 'timeout';
+    }
+    if (
+      [
+        'ECONNRESET',
+        'ECONNREFUSED',
+        'EHOSTUNREACH',
+        'ENETUNREACH',
+        'EAI_AGAIN',
+        'EPIPE',
+        'UND_ERR_SOCKET',
+        'UND_ERR_CONNECT',
+      ].includes(code)
+    ) {
+      return 'connection';
+    }
+    current = candidate.cause;
+  }
+  return 'other';
+}
+
+function retryAfterMsFromHeaders(headers: Headers): number | undefined {
+  const value = headers.get('retry-after');
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
+
+function finderRequestKind(path: string): DeepbridFinderRequestKind {
+  if (path.startsWith('/usenet/finder/search?')) return 'search';
+  if (path.startsWith('/usenet/finder/content?')) return 'content';
+  return 'other';
+}
+
+interface DeepbridApiRequestGate {
+  limit: LimitFunction;
+  requests: BoundedRollingMinuteCounter;
+  queueWaitMs: number[];
+  lastUsedAtMs: number;
+  lastStartedAtMs?: number;
+  cooldownUntilMs: number;
+  providerRateLimit?: number;
+}
+
+/** Bounded process-local registry. Keys supplied here must already be hashes,
+ * never raw account credentials. In-flight and queued gates are never evicted. */
+export class DeepbridApiRequestGateRegistry {
+  private readonly gates = new Map<string, DeepbridApiRequestGate>();
+
+  constructor(
+    private readonly options: {
+      maxEntries?: number;
+      idleTtlMs?: number;
+      now?: () => number;
+      createLimiter?: () => LimitFunction;
+      requestsPerMinute?: number;
+      wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+    } = {}
+  ) {}
+
+  run<T>(
+    credentialHash: string,
+    request: (signal?: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+    deadlineAtMs?: number
+  ): Promise<T> {
+    const queuedAtMs = this.now();
+    const gate = this.getOrCreate(credentialHash, queuedAtMs);
+    if (!gate) {
+      return Promise.reject(
+        new DeepbridApiError(
+          'Deepbrid request capacity is temporarily busy.',
+          503,
+          'request-gate-capacity'
+        )
+      );
+    }
+
+    const deadlineController =
+      deadlineAtMs === undefined ? undefined : new AbortController();
+    const gateSignal = deadlineController
+      ? signal
+        ? AbortSignal.any([signal, deadlineController.signal])
+        : deadlineController.signal
+      : signal;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    if (deadlineController) {
+      const remainingMs = Math.max(0, deadlineAtMs! - this.now());
+      if (remainingMs === 0) {
+        deadlineController.abort(
+          new DeepbridApiError(
+            'Deepbrid Finder deadline expired while waiting for API capacity.',
+            undefined,
+            'retry-exhausted',
+            undefined,
+            'request_gate_deadline'
+          )
+        );
+      } else {
+        deadlineTimer = setTimeout(
+          () =>
+            deadlineController.abort(
+              new DeepbridApiError(
+                'Deepbrid Finder deadline expired while waiting for API capacity.',
+                undefined,
+                'retry-exhausted',
+                undefined,
+                'request_gate_deadline'
+              )
+            ),
+          remainingMs
+        );
+      }
+    }
+
+    const limited = gate.limit(async () => {
+      if (gateSignal?.aborted) {
+        throw gateSignal.reason ?? new DOMException('Aborted', 'AbortError');
+      }
+      await this.waitForStartSlot(gate, gateSignal);
+      if (gateSignal?.aborted) {
+        throw gateSignal.reason ?? new DOMException('Aborted', 'AbortError');
+      }
+      const startedAtMs = this.now();
+      gate.lastUsedAtMs = startedAtMs;
+      gate.requests.record(startedAtMs);
+      if (gate.queueWaitMs.length === METRICS_SAMPLE_CAP) {
+        gate.queueWaitMs.shift();
+      }
+      gate.queueWaitMs.push(Math.max(0, startedAtMs - queuedAtMs));
+      const result = await request(gateSignal);
+      // makeRequest uses the installed Undici package. Its Response can differ
+      // from Node's global Response constructor, so check the exact transport
+      // type or otherwise valid rate-limit headers are silently ignored.
+      if (result instanceof UndiciResponse) {
+        this.recordResponseHeaders(gate, result.status, result.headers);
+      }
+      return result;
+    });
+
+    // p-limit cannot remove an already queued task. Race the caller against
+    // cancellation so its resolver deadline is honored immediately; if the
+    // queued task later reaches the front, its preflight sees the aborted
+    // signal and exits without starting network traffic.
+    return raceDeepbridRequestWithAbort(limited, gateSignal).finally(() => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+    });
+  }
+
+  snapshot(
+    credentialHash: string
+  ): DeepbridFinderRequestReport['sharedAccountGate'] {
+    const gate = this.gates.get(credentialHash);
+    if (!gate) return emptySharedGateMetrics();
+
+    const window = gate.requests.snapshot(this.now());
+    return {
+      currentRequestsInRollingMinute: window.currentRequests,
+      currentCountIsLowerBound: window.currentIsLowerBound,
+      maxRequestsInRollingMinute: window.maxRequests,
+      maxCountIsLowerBound: window.maxIsLowerBound,
+      requestStartLimitPerMinute: this.requestStartLimit(gate),
+      observedProviderLimit: gate.providerRateLimit,
+      cooldownRemainingMs: Math.max(0, gate.cooldownUntilMs - this.now()),
+      queueWait: summarizeTimings(gate.queueWaitMs),
+    };
+  }
+
+  /** Exposed for deterministic lifecycle tests; reports no credential keys. */
+  pruneIdle(nowMs = this.now()): number {
+    let removed = 0;
+    const ttl = this.options.idleTtlMs ?? API_GATE_IDLE_TTL_MS;
+    for (const [key, gate] of this.gates) {
+      if (this.isIdle(gate) && nowMs - gate.lastUsedAtMs >= ttl) {
+        this.gates.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /** Current registry size only; credential identifiers are never exposed. */
+  get size(): number {
+    return this.gates.size;
+  }
+
+  private getOrCreate(
+    credentialHash: string,
+    nowMs: number
+  ): DeepbridApiRequestGate | undefined {
+    const existing = this.gates.get(credentialHash);
+    if (existing) {
+      existing.lastUsedAtMs = nowMs;
+      return existing;
+    }
+
+    this.pruneIdle(nowMs);
+    const maxEntries = this.options.maxEntries ?? API_GATE_MAX_ENTRIES;
+    if (this.gates.size >= maxEntries) {
+      const oldestIdle = [...this.gates.entries()]
+        .filter(([, gate]) => this.isIdle(gate))
+        .sort((a, b) => a[1].lastUsedAtMs - b[1].lastUsedAtMs)[0];
+      if (oldestIdle) this.gates.delete(oldestIdle[0]);
+    }
+    if (this.gates.size >= maxEntries) return undefined;
+
+    const gate: DeepbridApiRequestGate = {
+      // A small in-flight window hides provider latency while the start-slot
+      // scheduler below enforces the account-wide request rate.
+      limit: this.options.createLimiter?.() ?? pLimit(3),
+      requests: new BoundedRollingMinuteCounter(),
+      queueWaitMs: [],
+      lastUsedAtMs: nowMs,
+      cooldownUntilMs: 0,
+    };
+    this.gates.set(credentialHash, gate);
+    return gate;
+  }
+
+  private isIdle(gate: DeepbridApiRequestGate): boolean {
+    return gate.limit.activeCount === 0 && gate.limit.pendingCount === 0;
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  private requestStartLimit(gate: DeepbridApiRequestGate): number {
+    const configuredLimit =
+      this.options.requestsPerMinute ?? MAX_DEEPBRID_REQUESTS_PER_MINUTE;
+    const safeProviderShare = gate.providerRateLimit
+      ? Math.floor(gate.providerRateLimit * 0.75)
+      : UNKNOWN_DEEPBRID_REQUESTS_PER_MINUTE;
+    return Math.max(
+      1,
+      Math.min(
+        MAX_DEEPBRID_REQUESTS_PER_MINUTE,
+        configuredLimit,
+        safeProviderShare
+      )
+    );
+  }
+
+  private async waitForStartSlot(
+    gate: DeepbridApiRequestGate,
+    signal?: AbortSignal
+  ): Promise<void> {
+    while (true) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+      }
+      const intervalMs = Math.ceil(60_000 / this.requestStartLimit(gate));
+      const nowMs = this.now();
+      const earliestStartMs = Math.max(
+        gate.cooldownUntilMs,
+        (gate.lastStartedAtMs ?? Number.NEGATIVE_INFINITY) + intervalMs
+      );
+      const delayMs = earliestStartMs - nowMs;
+      if (delayMs > 0) {
+        await (this.options.wait ?? abortableDelay)(delayMs, signal);
+        // Re-check after waking: another in-flight call may have received a
+        // 429 and extended the shared account cooldown while we were asleep.
+        continue;
+      }
+      // No await between this check and reservation: concurrent waiters cannot
+      // claim the same slot, even if several timers wake in one event-loop tick.
+      const startedAtMs = this.now();
+      if (
+        startedAtMs < gate.cooldownUntilMs ||
+        (gate.lastStartedAtMs !== undefined &&
+          startedAtMs - gate.lastStartedAtMs < intervalMs)
+      ) {
+        continue;
+      }
+      gate.lastStartedAtMs = startedAtMs;
+      return;
+    }
+  }
+
+  private recordResponseHeaders(
+    gate: DeepbridApiRequestGate,
+    status: number,
+    headers: Headers
+  ): void {
+    const providerLimit = finiteHeaderNumber(headers, 'x-ratelimit-limit');
+    if (providerLimit !== undefined && providerLimit > 0) {
+      gate.providerRateLimit = providerLimit;
+    }
+
+    if (
+      status === 429 ||
+      finiteHeaderNumber(headers, 'x-ratelimit-remaining') === 0
+    ) {
+      const cooldownMs = retryAfterMsFromHeaders(headers) ?? 60_000;
+      gate.cooldownUntilMs = Math.max(
+        gate.cooldownUntilMs,
+        this.now() + cooldownMs
+      );
+    }
+  }
+}
+
+function raceDeepbridRequestWithAbort<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!signal) return operation;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      }
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+function emptySharedGateMetrics(): DeepbridFinderRequestReport['sharedAccountGate'] {
+  return {
+    currentRequestsInRollingMinute: 0,
+    currentCountIsLowerBound: false,
+    maxRequestsInRollingMinute: 0,
+    maxCountIsLowerBound: false,
+    requestStartLimitPerMinute: UNKNOWN_DEEPBRID_REQUESTS_PER_MINUTE,
+    cooldownRemainingMs: 0,
+    queueWait: summarizeTimings([]),
+  };
+}
+
+const deepbridApiRequestGates = new DeepbridApiRequestGateRegistry();
+
+/** Snapshot traffic passed through this process's shared gate. It cannot see
+ * other applications or processes using the same Deepbrid account. */
+export function getDeepbridApiRequestGateMetrics(
+  apiKey: string
+): DeepbridFinderRequestReport['sharedAccountGate'] {
+  const credentialHash = createHash('sha256').update(apiKey).digest('hex');
+  return deepbridApiRequestGates.snapshot(credentialHash);
+}
+
+export function runDeepbridApiRequest<T>(
+  apiKey: string,
+  request: (signal?: AbortSignal) => Promise<T>,
+  signal?: AbortSignal,
+  deadlineAtMs?: number
+): Promise<T> {
+  const credentialKey = createHash('sha256').update(apiKey).digest('hex');
+  return deepbridApiRequestGates.run(
+    credentialKey,
+    request,
+    signal,
+    deadlineAtMs
+  );
+}
 
 export interface DeepbridSigningDependencies {
   now?: () => number;
@@ -93,6 +825,9 @@ const FileSchema = z.looseObject({
   filesize: z.coerce.number().nonnegative().catch(0),
   size_human: z.coerce.string().optional(),
   sizeHuman: z.coerce.string().optional(),
+  nzb: z.string().optional(),
+  nzb_url: z.string().optional(),
+  nzbUrl: z.string().optional(),
 });
 
 export interface DeepbridFinderResult {
@@ -103,6 +838,7 @@ export interface DeepbridFinderResult {
   kind: string;
   size: number;
   sizeHuman: string;
+  nzbUrl?: string;
   date: string;
   sources: number;
 }
@@ -163,7 +899,33 @@ export interface DeepbridUser {
 
 export interface DeepbridRequestOptions {
   timeoutMs?: number;
+  /** Absolute parent resolver deadline; retries may never cross this time. */
+  deadlineAtMs?: number;
   signal?: AbortSignal;
+}
+
+/** Fixed-cardinality reason for exhausting a Deepbrid request deadline. */
+export type DeepbridRetryExhaustionReason =
+  | 'request_gate_deadline'
+  | 'wrapper_budget_before_attempt'
+  | 'wrapper_completed_after_deadline'
+  | 'request_json_budget_before_attempt'
+  | 'request_json_budget_at_gate'
+  | 'request_json_loop_exhausted'
+  | 'signature_correction_budget'
+  | 'finder_budget_at_gate'
+  | 'unknown';
+
+export function getDeepbridAttemptTimeoutMs(
+  timeoutMs: number,
+  deadlineAtMs?: number,
+  nowMs = Date.now()
+): number | undefined {
+  const requestedTimeoutMs = Math.max(250, timeoutMs);
+  if (deadlineAtMs === undefined) return requestedTimeoutMs;
+  const remainingMs = Math.floor(deadlineAtMs - nowMs);
+  if (remainingMs < 250) return undefined;
+  return Math.min(requestedTimeoutMs, remainingMs);
 }
 
 export class DeepbridApiError extends Error {
@@ -171,10 +933,154 @@ export class DeepbridApiError extends Error {
     message: string,
     readonly status?: number,
     readonly code?: string,
-    readonly retryAfterMs?: number
+    readonly retryAfterMs?: number,
+    readonly retryExhaustionReason?: DeepbridRetryExhaustionReason
   ) {
     super(message);
     this.name = 'DeepbridApiError';
+  }
+}
+
+function deepbridRateLimitDelayMs(error: unknown): number | undefined {
+  if (error instanceof Error && error.name === 'RateLimitedError') {
+    const seconds = (error as Error & { retryAfterSeconds?: unknown })
+      .retryAfterSeconds;
+    if (
+      typeof seconds === 'number' &&
+      Number.isFinite(seconds) &&
+      seconds >= 0 &&
+      seconds <= 300
+    ) {
+      return Math.ceil(seconds * 1_000);
+    }
+  }
+
+  if (error instanceof DeepbridApiError && error.status === 429) {
+    return error.retryAfterMs ?? 5_000;
+  }
+
+  return undefined;
+}
+
+/**
+ * Retry idempotent Finder GETs when AIOStreams' shared HTTP cooldown is
+ * active. Cooldown waits and attempts share the caller's original time budget;
+ * unrelated failures and cancellation are not retried.
+ */
+export async function withDeepbridRateLimitRetry<T>(
+  operation: (timeoutMs: number, deadlineAtMs: number) => Promise<T>,
+  options: {
+    timeoutMs: number;
+    attemptTimeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+    maxRetries?: number;
+    maxTransportRetries?: number;
+    now?: () => number;
+    wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+    onCooldownWait?: (elapsedMs: number) => void;
+    onTransportRetry?: (recovered: boolean) => void;
+  }
+): Promise<T> {
+  const now = options.now ?? Date.now;
+  const wait = options.wait ?? abortableDelay;
+  const localDeadline = now() + Math.max(0, options.timeoutMs);
+  const deadline =
+    options.deadlineAtMs === undefined
+      ? localDeadline
+      : Math.min(localDeadline, Math.max(now(), options.deadlineAtMs));
+  const throwIfAborted = (): void => {
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+  };
+  const maxRetries = Math.max(0, Math.min(2, options.maxRetries ?? 2));
+  let retries = 0;
+  const maxTransportRetries = Math.max(
+    0,
+    Math.min(5, options.maxTransportRetries ?? 2)
+  );
+  let transportRetries = 0;
+
+  while (true) {
+    throwIfAborted();
+
+    const remainingMs = Math.floor(deadline - now());
+    if (remainingMs < 250) {
+      throw new DeepbridApiError(
+        'Deepbrid Finder request budget was exhausted.',
+        undefined,
+        'retry-exhausted',
+        undefined,
+        'wrapper_budget_before_attempt'
+      );
+    }
+
+    try {
+      const result = await operation(
+        Math.min(options.attemptTimeoutMs ?? remainingMs, remainingMs),
+        deadline
+      );
+      throwIfAborted();
+      if (now() >= deadline) {
+        throw new DeepbridApiError(
+          'Deepbrid API request completed after its deadline.',
+          undefined,
+          'retry-exhausted',
+          undefined,
+          'wrapper_completed_after_deadline'
+        );
+      }
+      if (transportRetries > 0) {
+        try {
+          options.onTransportRetry?.(true);
+        } catch {
+          // Telemetry must not change retry behavior.
+        }
+      }
+      return result;
+    } catch (error) {
+      throwIfAborted();
+      const cooldownDelayMs = deepbridRateLimitDelayMs(error);
+      const transportDelayMs =
+        cooldownDelayMs === undefined &&
+        classifyTransportFailure(error) === 'timeout' &&
+        transportRetries < maxTransportRetries
+          ? 250 * 2 ** transportRetries
+          : undefined;
+      const delayMs = cooldownDelayMs ?? transportDelayMs;
+      if (
+        delayMs === undefined ||
+        (cooldownDelayMs !== undefined && retries >= maxRetries) ||
+        delayMs + 250 > deadline - now()
+      ) {
+        throw error;
+      }
+
+      if (transportDelayMs !== undefined) {
+        transportRetries++;
+        try {
+          options.onTransportRetry?.(false);
+        } catch {
+          // Telemetry must not change retry behavior.
+        }
+      }
+
+      const waitStartedAt = now();
+      try {
+        await wait(Math.max(250, delayMs), options.signal);
+      } finally {
+        if (cooldownDelayMs !== undefined) {
+          try {
+            options.onCooldownWait?.(Math.max(0, now() - waitStartedAt));
+          } catch {
+            // Telemetry must not change retry behavior.
+          }
+        }
+      }
+      throwIfAborted();
+      if (cooldownDelayMs !== undefined) retries++;
+    }
   }
 }
 
@@ -192,12 +1098,18 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
     return Promise.reject(signal.reason ?? new Error('aborted'));
   }
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
+    const finish = () => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    };
     const onAbort = () => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       reject(signal?.reason ?? new Error('aborted'));
     };
+    const timer = setTimeout(finish, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -229,6 +1141,50 @@ export function validateDeepbridDownloadUrl(value: string): URL {
   url.password = '';
   url.hash = '';
   return url;
+}
+
+/** Normalize Finder NZB references before forwarding them to another
+ * resolver. Only HTTPS links on Deepbrid's own download hosts are accepted. */
+export function normalizeDeepbridFinderNzbUrl(
+  value: unknown
+): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const url = validateDeepbridDownloadUrl(
+      new URL(value.trim(), DEEPBRID_API_BASE).toString()
+    );
+    return isTrustedDeepbridDownloadHost(url.hostname)
+      ? url.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parse Finder search results while preserving a safe result-level NZB URL. */
+export function parseDeepbridFinderResult(
+  value: unknown
+): DeepbridFinderResult | undefined {
+  const parsed = ResultSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const item = parsed.data;
+  const title = item.title || item.name || '';
+  if (!title) return undefined;
+  const nzbUrl = normalizeDeepbridFinderNzbUrl(
+    item.nzb_url || item.nzbUrl || item.nzb
+  );
+  return {
+    token: item.token,
+    title,
+    category: item.category || '',
+    categoryName: item.category_name || item.categoryName || '',
+    kind: item.kind || '',
+    size: item.size,
+    sizeHuman: item.size_human || item.sizeHuman || '',
+    ...(nzbUrl ? { nzbUrl } : {}),
+    date: item.date || item.created_at || '',
+    sources: item.sources,
+  };
 }
 
 function looksLikeHtml(contentType: string, text: string): boolean {
@@ -354,26 +1310,69 @@ export class DeepbridOfficialClient {
       250,
       Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs)
     );
+    const localDeadlineAtMs = Date.now() + timeoutMs * 3 + 5_500;
+    const deadlineAtMs =
+      options.deadlineAtMs === undefined
+        ? localDeadlineAtMs
+        : Math.min(localDeadlineAtMs, options.deadlineAtMs);
 
     for (let attempt = 0; attempt < 3; attempt++) {
-      const timeoutSignal = AbortSignal.timeout(timeoutMs);
-      const signal = options.signal
-        ? AbortSignal.any([options.signal, timeoutSignal])
-        : timeoutSignal;
-      const response = await makeRequest(`${DEEPBRID_API_BASE}${path}`, {
-        method: options.method || 'GET',
-        timeout: timeoutMs,
-        signal,
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-          'User-Agent': DEEPBRID_AIOSTREAMS_USER_AGENT,
-          ...(options.body
-            ? { 'Content-Type': 'application/x-www-form-urlencoded' }
-            : {}),
+      const attemptTimeoutMs = getDeepbridAttemptTimeoutMs(
+        timeoutMs,
+        deadlineAtMs
+      );
+      if (attemptTimeoutMs === undefined) {
+        throw new DeepbridApiError(
+          'Deepbrid request retry budget was exhausted.',
+          undefined,
+          'retry-exhausted',
+          undefined,
+          'request_json_budget_before_attempt'
+        );
+      }
+      const response = await runDeepbridApiRequest(
+        this.apiKey,
+        (gateSignal) => {
+          // The endpoint timeout measures network time, not time waiting for
+          // this account's shared quota slot. The absolute deadline bounds the
+          // whole operation, including quota pacing and retry waits.
+          const admittedTimeoutMs = getDeepbridAttemptTimeoutMs(
+            timeoutMs,
+            deadlineAtMs
+          );
+          if (admittedTimeoutMs === undefined) {
+            throw new DeepbridApiError(
+              'Deepbrid request retry budget was exhausted.',
+              undefined,
+              'retry-exhausted',
+              undefined,
+              'request_json_budget_at_gate'
+            );
+          }
+          const timeoutSignal = AbortSignal.timeout(admittedTimeoutMs);
+          const signals = [gateSignal, options.signal, timeoutSignal].filter(
+            (signal): signal is AbortSignal => signal !== undefined
+          );
+          const signal =
+            signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+          return makeRequest(`${DEEPBRID_API_BASE}${path}`, {
+            method: options.method || 'GET',
+            timeout: admittedTimeoutMs,
+            signal,
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${this.apiKey}`,
+              'User-Agent': DEEPBRID_AIOSTREAMS_USER_AGENT,
+              ...(options.body
+                ? { 'Content-Type': 'application/x-www-form-urlencoded' }
+                : {}),
+            },
+            body: options.body,
+          });
         },
-        body: options.body,
-      });
+        options.signal,
+        deadlineAtMs
+      );
       const text = await response.text();
       const contentType = response.headers.get('content-type') || '';
       if (looksLikeHtml(contentType, text)) {
@@ -402,16 +1401,19 @@ export class DeepbridOfficialClient {
         response.status === 429 &&
         attempt === 0 &&
         retryAfter !== undefined &&
-        retryAfter <= 5_000
+        retryAfter <= 5_000 &&
+        retryAfter + 250 <= deadlineAtMs - Date.now()
       ) {
         await abortableDelay(retryAfter, options.signal);
         continue;
       }
-      if ((response.status === 502 || response.status === 503) && attempt < 2) {
-        await abortableDelay(
-          Math.min(5_000, 500 * 2 ** attempt),
-          options.signal
-        );
+      const retryDelayMs = Math.min(5_000, 500 * 2 ** attempt);
+      if (
+        (response.status === 502 || response.status === 503) &&
+        attempt < 2 &&
+        retryDelayMs + 250 <= deadlineAtMs - Date.now()
+      ) {
+        await abortableDelay(retryDelayMs, options.signal);
         continue;
       }
       if (!response.ok) {
@@ -439,7 +1441,9 @@ export class DeepbridOfficialClient {
     throw new DeepbridApiError(
       'Deepbrid request retry budget was exhausted.',
       503,
-      'retry-exhausted'
+      'retry-exhausted',
+      undefined,
+      'request_json_loop_exhausted'
     );
   }
 
@@ -621,6 +1625,7 @@ export class DeepbridOfficialClient {
 
 export class DeepbridFinderClient {
   private readonly signer = new DeepbridRequestSigner();
+  private readonly requestMetrics = new DeepbridFinderRequestMetrics();
 
   constructor(
     private readonly apiKey: string,
@@ -630,18 +1635,127 @@ export class DeepbridFinderClient {
       throw new DeepbridApiError('Deepbrid API key is required.');
   }
 
+  getRequestMetrics(): DeepbridFinderRequestReport {
+    return {
+      ...this.requestMetrics.snapshot(),
+      sharedAccountGate: getDeepbridApiRequestGateMetrics(this.apiKey),
+    };
+  }
+
   private async getJson(
     path: string,
     options: DeepbridRequestOptions = {}
   ): Promise<Record<string, unknown>> {
+    const timeoutMs = Math.max(
+      250,
+      Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs)
+    );
+    const isSearchPage = path.startsWith('/usenet/finder/search?');
+    const maxTransportRetries = isSearchPage ? 2 : 5;
+    const transportRetryBackoffBudgetMs = 250 * (2 ** maxTransportRetries - 1);
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+    if (isSearchPage) {
+      const cached = finderSearchResponseCache.get(this.apiKey, path);
+      if (cached) return cached.value;
+    }
+
     try {
-      return await this.getJsonOnce(path, options);
+      const value = await withDeepbridRateLimitRetry(
+        async (remainingMs, retryDeadlineAtMs) => {
+          const attemptStartedAt = Date.now();
+          // The shared account gate may wait for quota pacing or a provider
+          // cooldown. Carry the retry helper's local deadline into that gate
+          // so queued work cannot start after its own budget has expired.
+          const requestDeadlineAtMs = retryDeadlineAtMs;
+          try {
+            return await this.getJsonOnce(path, {
+              ...options,
+              timeoutMs: Math.min(timeoutMs, remainingMs),
+              deadlineAtMs: requestDeadlineAtMs,
+            });
+          } catch (error) {
+            // A stale local clock is indistinguishable from a forbidden
+            // signature. The first response's Date header corrected the signer;
+            // retry once with a fresh nonce before surfacing the real error.
+            if (error instanceof DeepbridApiError && error.code === 'api_15') {
+              if (options.signal?.aborted) {
+                throw (
+                  options.signal.reason ??
+                  new DOMException('Aborted', 'AbortError')
+                );
+              }
+              const signatureRetryTimeoutMs =
+                remainingMs - (Date.now() - attemptStartedAt);
+              const parentRemainingMs =
+                requestDeadlineAtMs === undefined
+                  ? Number.POSITIVE_INFINITY
+                  : requestDeadlineAtMs - Date.now();
+              if (signatureRetryTimeoutMs < 250 || parentRemainingMs < 250) {
+                throw new DeepbridApiError(
+                  'Deepbrid Finder deadline expired before signature correction.',
+                  undefined,
+                  'retry-exhausted',
+                  undefined,
+                  'signature_correction_budget'
+                );
+              }
+              return this.getJsonOnce(path, {
+                ...options,
+                deadlineAtMs: requestDeadlineAtMs,
+                timeoutMs: Math.min(
+                  timeoutMs,
+                  signatureRetryTimeoutMs,
+                  parentRemainingMs
+                ),
+              });
+            }
+            throw error;
+          }
+        },
+        {
+          // Content lookups get two extra narrowly classified timeout retries
+          // because live telemetry showed occasional unrecovered timeouts.
+          // Search-page retry behavior remains unchanged. The shared account
+          // gate still paces every attempt under the provider cap.
+          timeoutMs:
+            timeoutMs * (maxTransportRetries + 1) +
+            transportRetryBackoffBudgetMs,
+          attemptTimeoutMs: timeoutMs,
+          maxTransportRetries,
+          deadlineAtMs: options.deadlineAtMs,
+          signal: options.signal,
+          onCooldownWait: (elapsedMs) =>
+            this.requestMetrics.recordRetryWait(elapsedMs),
+          onTransportRetry: (recovered) =>
+            this.requestMetrics.recordTransportRetry(
+              finderRequestKind(path),
+              recovered
+            ),
+        }
+      );
+      if (isSearchPage) {
+        finderSearchResponseCache.set(this.apiKey, path, value);
+      }
+      return value;
     } catch (error) {
-      // A stale local clock is indistinguishable from a forbidden signature.
-      // The first response's Date header has already corrected the signer, so
-      // retry once with a new nonce before surfacing the real error.
-      if (error instanceof DeepbridApiError && error.code === 'api_15') {
-        return this.getJsonOnce(path, options);
+      // Search pages are stable enough to bridge a short provider cooldown.
+      // Only rate-limit failures use stale data; auth, safety, parsing, and
+      // configuration errors remain visible to the normal caller.
+      if (
+        isSearchPage &&
+        !options.signal?.aborted &&
+        isDeepbridRateLimitError(error)
+      ) {
+        const cached = finderSearchResponseCache.get(this.apiKey, path, true);
+        if (cached?.freshness === 'stale') {
+          logger.warn(
+            { cache: 'recent-success', fallback: 'rate-limit' },
+            'Deepbrid Finder rate limited; reused a recent successful search page'
+          );
+          return cached.value;
+        }
       }
       throw error;
     }
@@ -655,22 +1769,78 @@ export class DeepbridFinderClient {
       250,
       Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs)
     );
-    const timeoutSignal = AbortSignal.timeout(timeoutMs);
-    const signal = options.signal
-      ? AbortSignal.any([options.signal, timeoutSignal])
-      : timeoutSignal;
-    const response = await makeRequest(`${DEEPBRID_API_BASE}${path}`, {
-      timeout: timeoutMs,
-      signal,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-        'User-Agent': DEEPBRID_FINDER_USER_AGENT,
-        ...this.signer.sign('GET', path),
-      },
-    });
+    const queuedAtMs = Date.now();
+    let startedAtMs: number | undefined;
+    let response: Response;
+    try {
+      response = await runDeepbridApiRequest(
+        this.apiKey,
+        (gateSignal) => {
+          // Start the endpoint timeout only after the shared account gate
+          // admits this request. Recheck the parent deadline here because
+          // quota pacing can consume the remaining resolver budget in queue.
+          const attemptTimeoutMs = getDeepbridAttemptTimeoutMs(
+            timeoutMs,
+            options.deadlineAtMs
+          );
+          if (attemptTimeoutMs === undefined) {
+            throw new DeepbridApiError(
+              'Deepbrid Finder deadline expired before request start.',
+              undefined,
+              'retry-exhausted',
+              undefined,
+              'finder_budget_at_gate'
+            );
+          }
+          const timeoutSignal = AbortSignal.timeout(attemptTimeoutMs);
+          const signal = gateSignal
+            ? AbortSignal.any([gateSignal, timeoutSignal])
+            : timeoutSignal;
+          startedAtMs = Date.now();
+          this.requestMetrics.recordStart(
+            finderRequestKind(path),
+            queuedAtMs,
+            startedAtMs
+          );
+          return makeRequest(`${DEEPBRID_API_BASE}${path}`, {
+            timeout: attemptTimeoutMs,
+            signal,
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${this.apiKey}`,
+              'User-Agent': DEEPBRID_FINDER_USER_AGENT,
+              ...this.signer.sign('GET', path),
+            },
+          });
+        },
+        options.signal,
+        options.deadlineAtMs
+      );
+      this.requestMetrics.recordResponse(
+        response.status,
+        response.headers,
+        Date.now() - (startedAtMs ?? queuedAtMs)
+      );
+    } catch (error) {
+      if (startedAtMs !== undefined) {
+        this.requestMetrics.recordTransportFailure(
+          finderRequestKind(path),
+          error
+        );
+      }
+      throw error;
+    }
     this.signer.noteServerDate(response.headers.get('date'));
-    const text = await response.text();
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      this.requestMetrics.recordTransportFailure(
+        finderRequestKind(path),
+        error
+      );
+      throw error;
+    }
     const contentType = response.headers.get('content-type') || '';
     if (looksLikeHtml(contentType, text)) {
       throw new DeepbridApiError(
@@ -693,7 +1863,8 @@ export class DeepbridFinderClient {
       throw new DeepbridApiError(
         apiMessage(parsed, `Deepbrid request failed (${response.status}).`),
         response.status,
-        'http-error'
+        'http-error',
+        retryAfterMs(response)
       );
     }
     if (parsed && typeof parsed === 'object') {
@@ -711,18 +1882,25 @@ export class DeepbridFinderClient {
     return {};
   }
 
-  async search(
+  async searchPage(
     query: string,
     options: {
       category?: string;
       offset?: number;
       limit?: number;
       timeoutMs?: number;
+      deadlineAtMs?: number;
       signal?: AbortSignal;
     } = {}
-  ): Promise<DeepbridFinderResult[]> {
+  ): Promise<{
+    results: DeepbridFinderResult[];
+    rawCount: number;
+    invalidCount: number;
+  }> {
     const trimmed = query.trim();
-    if (trimmed.length < 3) return [];
+    if (trimmed.length < 3) {
+      return { results: [], rawCount: 0, invalidCount: 0 };
+    }
     const offset = Math.max(0, Math.floor(options.offset || 0));
     const limit = Math.min(100, Math.max(1, Math.floor(options.limit || 50)));
     const params = new URLSearchParams({
@@ -732,27 +1910,37 @@ export class DeepbridFinderClient {
     });
     if (options.category) params.set('category', options.category);
     const json = await this.getJson(`/usenet/finder/search?${params}`, options);
-    const items = Array.isArray(json.items) ? json.items : [];
-    return items.flatMap((value) => {
-      const parsed = ResultSchema.safeParse(value);
-      if (!parsed.success) return [];
-      const item = parsed.data;
-      const title = item.title || item.name || '';
-      if (!title) return [];
-      return [
-        {
-          token: item.token,
-          title,
-          category: item.category || '',
-          categoryName: item.category_name || item.categoryName || '',
-          kind: item.kind || '',
-          size: item.size,
-          sizeHuman: item.size_human || item.sizeHuman || '',
-          date: item.date || item.created_at || '',
-          sources: item.sources,
-        },
-      ];
+    if (!Array.isArray(json.items)) {
+      throw new DeepbridApiError(
+        'Deepbrid Finder returned an invalid search page.',
+        undefined,
+        'invalid-search-shape'
+      );
+    }
+    const items = json.items;
+    const results = items.flatMap((value) => {
+      const parsed = parseDeepbridFinderResult(value);
+      return parsed ? [parsed] : [];
     });
+    return {
+      results,
+      rawCount: items.length,
+      invalidCount: items.length - results.length,
+    };
+  }
+
+  async search(
+    query: string,
+    options: {
+      category?: string;
+      offset?: number;
+      limit?: number;
+      timeoutMs?: number;
+      deadlineAtMs?: number;
+      signal?: AbortSignal;
+    } = {}
+  ): Promise<DeepbridFinderResult[]> {
+    return (await this.searchPage(query, options)).results;
   }
 
   async getContent(
@@ -778,18 +1966,17 @@ export class DeepbridFinderClient {
       const name = file.name || file.filename || '';
       const link = file.link || file.url || '';
       if (!name || !link) return [];
+      const nzbUrl = normalizeDeepbridFinderNzbUrl(
+        file.nzb_url || file.nzbUrl || file.nzb
+      );
       try {
-        const nzbUrl = [file.nzb_url, file.nzbUrl, file.nzb].find(
-          (value): value is string =>
-            typeof value === 'string' && value.length > 0
-        );
         return [
           {
             name,
             link: validateDeepbridDownloadUrl(link).toString(),
             size: file.size,
             sizeHuman: file.size_human || file.sizeHuman || '',
-            nzbUrl,
+            ...(nzbUrl ? { nzbUrl } : {}),
           },
         ];
       } catch {

@@ -47,7 +47,7 @@ export class PossibleRecursiveRequestError extends Error {
 }
 
 export class RateLimitedError extends Error {
-  constructor(retryAfterSeconds: number) {
+  constructor(readonly retryAfterSeconds: number) {
     super(
       `Too Many Requests (retry after ${formatDurationAsText(retryAfterSeconds)})`
     );

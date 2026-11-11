@@ -11,6 +11,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import type { JellyfinClient, Purpose } from './client';
+import { playbackInfoQueryKey } from './playbackInfoQueryKey';
 import { useSession } from './session';
 import { useFeature } from './server-info';
 import { settings, useSetting } from './settings';
@@ -608,6 +609,8 @@ export async function requestPlaybackInfo(
     /** What the versions may need; the chosen player's by default. */
     support?: { headers: boolean; youtube: boolean };
     purpose?: Purpose;
+    /** Avoid resolving external subtitle addons while building a version list. */
+    skipSubtitles?: boolean;
   } = {}
 ): Promise<PlaybackInfoResponse> {
   const support = opts.support ?? playerSupport();
@@ -619,6 +622,7 @@ export async function requestPlaybackInfo(
       ...(opts.sourceId
         ? { MediaSourceId: opts.sourceId }
         : !opts.kept && { Fresh: true }),
+      ...(opts.skipSubtitles && { SkipSubtitles: true }),
       ...(opts.refresh && { Refresh: true }),
       ...(support.headers && { EnableRequiredHttpHeaders: true }),
       ...(support.youtube && { EnableYouTube: true }),
@@ -638,6 +642,7 @@ function usePlaybackInfoRequest() {
       sourceId?: string;
       kept?: boolean;
       purpose?: Purpose;
+      skipSubtitles?: boolean;
     } = {}
   ) => requestPlaybackInfo(client, user.Id!, itemId, opts);
 }
@@ -645,17 +650,22 @@ function usePlaybackInfoRequest() {
 export function usePlaybackInfoOptions() {
   const request = usePlaybackInfoRequest();
   const key = useKey();
-  return (itemId: string, sourceId?: string, purpose?: Purpose) =>
+  return (
+    itemId: string,
+    sourceId?: string,
+    purpose?: Purpose,
+    kept = false
+  ) =>
     queryOptions({
-      queryKey: [
-        ...key,
-        'playback-info',
-        itemId,
-        sourceId ?? null,
-        ...(purpose ? [purpose] : []),
-      ],
-      queryFn: () => request(itemId, { sourceId, purpose }),
-      staleTime: 10 * 60_000,
+      queryKey: playbackInfoQueryKey(key, itemId, sourceId, purpose, kept),
+      queryFn: () =>
+        request(itemId, {
+          sourceId,
+          purpose,
+          kept,
+          skipSubtitles: !sourceId && !kept,
+        }),
+      staleTime: kept ? Infinity : 10 * 60_000,
     });
 }
 
@@ -675,13 +685,8 @@ export function usePlaybackInfo(
   } = {}
 ) {
   const options = usePlaybackInfoOptions();
-  const request = usePlaybackInfoRequest();
   return useQuery({
-    ...options(itemId, opts.sourceId, opts.purpose),
-    ...(opts.kept && {
-      queryFn: () => request(itemId, { kept: true }),
-      staleTime: Infinity,
-    }),
+    ...options(itemId, opts.sourceId, opts.purpose, opts.kept),
     refetchOnMount: opts.listing ? 'always' : true,
     enabled: opts.enabled ?? true,
   });

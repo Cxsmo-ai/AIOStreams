@@ -45,6 +45,7 @@ import { mediaInfoProbes } from './0044_media_info_probes.js';
 import { mediaInfoSources } from './0045_media_info_sources.js';
 import { jellyfinUserAddresses } from './0046_jellyfin_user_addresses.js';
 import { appReports } from './0047_app_reports.js';
+import { watchSessionTracks } from './0048_watch_session_tracks.js';
 import { legacyHouseholdActivity } from './900001_legacy_household_activity.js';
 import { legacyVpnManagement } from './900002_legacy_vpn_management.js';
 import { torrentclawNzbQuota } from './900003_torrentclaw_nzb_quota.js';
@@ -56,10 +57,9 @@ import { trackerProviderOutbox } from './900008_tracker_provider_outbox.js';
 import { trackerProviderFacets } from './900009_tracker_provider_facets.js';
 import { trackerProviderFacetRetry } from './900010_tracker_provider_facet_retry.js';
 import { wetrakrRequestQuota } from './900011_wetrakr_request_quota.js';
-import { jellyfinTrackerBridgeChanges } from './901001_jellyfin_tracker_bridge_changes.js';
 import { trackerProviderLinkState } from './900041_tracker_provider_link_state.js';
 import { trackerOutboxGeneration } from './900042_tracker_outbox_generation.js';
-import { watchSessionTracks } from './0048_watch_session_tracks.js';
+import { jellyfinTrackerBridgeChanges } from './901001_jellyfin_tracker_bridge_changes.js';
 import type { Migration } from './types.js';
 
 export const MIGRATIONS: readonly Migration[] = [

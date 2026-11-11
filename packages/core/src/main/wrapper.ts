@@ -51,6 +51,11 @@ import {
   type AnalyticsErrorStage,
 } from '../analytics/index.js';
 import { z } from 'zod';
+import {
+  readProgressiveArray,
+  reportFinalIfNoProgress,
+} from './progressiveResponse.js';
+import { deepbridProgressiveOuterTimeout } from '../utils/deepbrid-progressive-timeout.js';
 
 const logger = createLogger('wrappers');
 
@@ -333,7 +338,12 @@ export class Wrapper {
     return manifestCache.getOrRevalidate(cacheKey, fetchNow, refresh, ttl);
   }
 
-  async getStreams(type: string, id: string): Promise<ParsedStream[]> {
+  async getStreams(
+    type: string,
+    id: string,
+    onProgress?: (streams: ParsedStream[]) => Promise<void> | void,
+    signal?: AbortSignal
+  ): Promise<ParsedStream[]> {
     const validator = (data: any): Stream[] => {
       return this.validateArray(data.streams, StreamSchema, 'streams');
     };
@@ -351,10 +361,17 @@ export class Wrapper {
       this.addon.preset.type,
       this.manifestUrl
     );
+    const progressiveDeepbrid =
+      Boolean(onProgress) &&
+      this.addon.identifier === 'deepbrid-usenet' &&
+      !this.isUrlOverridden();
+    const streamRequestTimeout = progressiveDeepbrid
+      ? deepbridProgressiveOuterTimeout(this.addon.timeout)
+      : this.addon.timeout;
     const upstreamStreams = await this.makeResourceRequest(
       'stream',
       { type, id },
-      this.addon.timeout,
+      streamRequestTimeout,
       validator,
       streamTtl != -1 ? streamsCache : undefined,
       streamTtl,
@@ -364,7 +381,20 @@ export class Wrapper {
         id,
         headers: this.addon.headers,
         options: this.addon.preset.options,
-      })
+      }),
+      undefined,
+      onProgress && this.addon.identifier === 'deepbrid-usenet'
+        ? async (rawStreams) => {
+            const parser = new (this.preset.getParser())(this.addon);
+            const parsedStreams = rawStreams
+              .flatMap((stream) => parser.parse(stream))
+              .filter(
+                (stream): stream is ParsedStream => !('skip' in stream)
+              );
+            await onProgress(parsedStreams);
+          }
+        : undefined,
+      signal
     );
     let streams: Stream[];
     try {
@@ -660,6 +690,9 @@ export class Wrapper {
     cacheTtl: number;
     shouldCache?: (data: T) => boolean;
     bypassCache?: boolean;
+    /** Keep streaming progress requests in the foreground; never detach callbacks. */
+    disableBackground?: boolean;
+    signal?: AbortSignal;
     /** Set to true when the value came from the cache rather than upstream. */
     hit?: { fromCache: boolean };
   }): Promise<T> {
@@ -672,15 +705,20 @@ export class Wrapper {
       cacheTtl,
       shouldCache,
       bypassCache,
+      disableBackground,
+      signal,
       hit,
     } = options;
 
-    let doBackground = appConfig.resources.background.enabled && cacher;
+    const doBackground =
+      appConfig.resources.background.enabled && !!cacher && !disableBackground;
 
     let cached = null;
 
+    signal?.throwIfAborted();
     if (cacher) {
       cached = await cacher.get(cacheKey);
+      signal?.throwIfAborted();
       if (cached && !bypassCache) {
         logger.debug(
           { addon: this.getAddonName(this.addon), resource: resourceName },
@@ -692,8 +730,11 @@ export class Wrapper {
     }
 
     const controller = new AbortController();
+    const requestSignal = signal
+      ? AbortSignal.any([controller.signal, signal])
+      : controller.signal;
     const processRequest = async () => {
-      const result = await requestFn(controller.signal);
+      const result = await requestFn(requestSignal);
       const doCache = shouldCache ? shouldCache(result) : true;
       // bypass cache only skips retrieving from cache, it still caches the result
       if (cacher && doCache) {
@@ -714,8 +755,24 @@ export class Wrapper {
       })
       .then(({ result }) => result);
 
+    const awaitRequest = async (): Promise<T> => {
+      if (!signal) return requestPromise;
+      signal.throwIfAborted();
+      let abortListener: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        abortListener = () =>
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        signal.addEventListener('abort', abortListener, { once: true });
+      });
+      try {
+        return await Promise.race([requestPromise, aborted]);
+      } finally {
+        if (abortListener) signal.removeEventListener('abort', abortListener);
+      }
+    };
+
     if (!doBackground) {
-      return await requestPromise;
+      return await awaitRequest();
     }
 
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -732,7 +789,7 @@ export class Wrapper {
     });
 
     try {
-      return await Promise.race([requestPromise, timeoutPromise]);
+      return await Promise.race([awaitRequest(), timeoutPromise]);
     } catch (error: any) {
       // Registered before the stale-cache return so a timed-out request is
       // still accounted for (and its rejection owned) on that path too.
@@ -764,12 +821,16 @@ export class Wrapper {
     cacher: Cache<string, T> | undefined,
     cacheTtl: number,
     cacheKey?: string,
-    hit?: { fromCache: boolean }
+    hit?: { fromCache: boolean },
+    onProgress?: (data: T) => Promise<void> | void,
+    abortSignal?: AbortSignal
   ) {
     const { type, id, extras } = params;
     const url = this.buildResourceUrl(resource, type, id, extras);
     const effectiveCacheKey = cacheKey || url;
-    let doBackground = appConfig.resources.background.enabled && cacher;
+    const doBackground =
+      appConfig.resources.background.enabled && !!cacher && !onProgress;
+    let progressWasReported = false;
 
     logger.debug(
       {
@@ -783,13 +844,26 @@ export class Wrapper {
     );
 
     const requestFn = async (signal: AbortSignal): Promise<T> => {
-      const timeout = doBackground
+      const requestTimeout = doBackground
         ? (appConfig.resources.background.timeout ??
           appConfig.userLimits.timeouts.maxTimeout)
-        : this.addon.timeout;
-      const res = await makeRequest(url, {
-        timeout,
-        signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
+        : timeout;
+      const progressiveDeepbrid =
+        !!onProgress &&
+        resource === 'stream' &&
+        this.addon.identifier === 'deepbrid-usenet' &&
+        !this.isUrlOverridden();
+      const requestUrl = progressiveDeepbrid
+        ? url
+            .replace('/stream/', '/stream-progressive/')
+            .replace(/\.json(?=\?|$)/, '.ndjson')
+        : url;
+      const res = await makeRequest(requestUrl, {
+        timeout: requestTimeout,
+        signal: AbortSignal.any([
+          signal,
+          AbortSignal.timeout(requestTimeout),
+        ]),
         headers: this.addon.headers,
         internalHeaders: this.addon.internalHeaders,
         forwardIp: this.addon.ip,
@@ -797,6 +871,21 @@ export class Wrapper {
 
       if (!res.ok) {
         throw new Error(`${res.status} - ${res.statusText}`);
+      }
+
+      if (progressiveDeepbrid) {
+        if (!res.body) throw new Error('Progressive addon response has no body.');
+        const validate = (streams: unknown[]) =>
+          validator({ streams }) as unknown as Stream[];
+        return (await readProgressiveArray(
+          res.body,
+          validate,
+          async (_candidateIndex, cumulative) => {
+            await onProgress?.(validator({ streams: cumulative }));
+            progressWasReported = true;
+          },
+          abortSignal
+        )) as unknown as T;
       }
 
       const data: unknown = await res.json();
@@ -814,7 +903,12 @@ export class Wrapper {
         cacheTtl,
         shouldCache: (data: T) =>
           resource !== 'stream' || (Array.isArray(data) && data.length > 0),
+        // A progressive scrape must not silently serve a stale add-on result.
+        // The fetched value is still written back to the shared cache.
+        bypassCache: !!onProgress,
         hit,
+        disableBackground: !!onProgress,
+        signal: abortSignal,
       });
       const count = this.resultCountOf(data);
       track({
@@ -827,6 +921,7 @@ export class Wrapper {
         latency_ms: Date.now() - started,
         result_count: count,
       });
+      await reportFinalIfNoProgress(data, progressWasReported, onProgress);
       return data;
     } catch (error) {
       const { error_stage, error_kind } = classifyAddonError(

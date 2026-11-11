@@ -32,10 +32,11 @@ function directUsenet(
 function serviceUsenet(
   id: string,
   serviceId: 'deepbrid' | 'torbox' | 'aiostreams',
-  filename: string
+  filename: string,
+  sourceAddonId = id
 ): ParsedStream {
   return {
-    ...directUsenet(id, id, filename),
+    ...directUsenet(id, sourceAddonId, filename),
     type: 'debrid',
     service: { id: serviceId, cached: true },
     nzbUrl: 'https://example.com/release.nzb',
@@ -64,6 +65,23 @@ test('keeps service-less direct Usenet streams when deduplication is enabled', a
   assert.deepEqual(
     result.map((stream) => stream.id),
     ['one', 'two']
+  );
+});
+
+test('keeps Deepbrid Direct, Remux, and HLS playback variants through deduplication', async () => {
+  const filename = 'Show.S01E01.1080p.mkv';
+  const streams = (['direct', 'remux', 'hls'] as const).map((mode) => ({
+    ...directUsenet(`finder-${mode}`, 'deepbrid-usenet', filename),
+    otherBehaviorHints: { deepbridPlaybackMode: mode },
+  }));
+
+  const result = await deduplicator({ enabled: true }).deduplicate(streams);
+
+  assert.deepEqual(
+    result
+      .map((stream) => stream.otherBehaviorHints?.deepbridPlaybackMode)
+      .sort(),
+    ['direct', 'hls', 'remux']
   );
 });
 
@@ -101,7 +119,7 @@ test('applies the direct Usenet fallback to stremio-usenet streams', async () =>
   assert.equal(result[0]?.id, 'native-nntp');
 });
 
-test('deduplicates Deepbrid against TorBox by Services order but keeps native AIOStreams separate', async () => {
+test('keeps Deepbrid, TorBox, and native AIOStreams as separate Usenet fallbacks', async () => {
   const filename = 'Show.S01E01.1080p.mkv';
   const services: UserData['services'] = [
     { id: 'torbox', enabled: true, credentials: {} },
@@ -118,12 +136,13 @@ test('deduplicates Deepbrid against TorBox by Services order but keeps native AI
   ]);
 
   assert.deepEqual(result.map((stream) => stream.id).sort(), [
+    'deepbrid',
     'native',
     'torbox',
   ]);
 });
 
-test('allows Deepbrid to win equivalent external Usenet results when ordered first', async () => {
+test('keeps external Deepbrid results visible regardless of Services order', async () => {
   const filename = 'Show.S01E01.1080p.mkv';
   const result = await deduplicator(
     { enabled: true, cached: 'single_result' },
@@ -141,10 +160,29 @@ test('allows Deepbrid to win equivalent external Usenet results when ordered fir
   assert.deepEqual(result.map((stream) => stream.id).sort(), [
     'deepbrid',
     'native',
+    'torbox',
   ]);
 });
 
-test('Services order remains authoritative for TB/DB even when the lower service owns the NZB', async () => {
+test('keeps Deepbrid copies from different indexers while deduplicating within each indexer', async () => {
+  const filename = 'Show.S01E01.1080p.mkv';
+  const result = await deduplicator({
+    enabled: true,
+    cached: 'single_result',
+  }).deduplicate([
+    serviceUsenet('althub-a', 'deepbrid', filename, 'althub'),
+    serviceUsenet('althub-b', 'deepbrid', filename, 'althub'),
+    serviceUsenet('newshosting', 'deepbrid', filename, 'newshosting'),
+  ]);
+
+  assert.equal(result.length, 2);
+  assert.deepEqual(
+    new Set(result.map((stream) => stream.addon.preset.id)),
+    new Set(['althub', 'newshosting'])
+  );
+});
+
+test('retains both Deepbrid and TorBox even when only Deepbrid owns the NZB', async () => {
   const filename = 'Show.S01E01.1080p.mkv';
   const deepbrid = serviceUsenet('deepbrid', 'deepbrid', filename);
   deepbrid.service!.library = true;
@@ -156,13 +194,13 @@ test('Services order remains authoritative for TB/DB even when the lower service
     ]
   ).deduplicate([deepbrid, serviceUsenet('torbox', 'torbox', filename)]);
 
-  assert.deepEqual(
-    result.map((stream) => stream.id),
-    ['torbox']
-  );
+  assert.deepEqual(result.map((stream) => stream.id).sort(), [
+    'deepbrid',
+    'torbox',
+  ]);
 });
 
-test('Smart Detect never joins native AIOStreams to the TorBox/Deepbrid domain', async () => {
+test('Smart Detect keeps native AIOStreams, TorBox, and Deepbrid domains independent', async () => {
   const filename = 'Show.S01E01.1080p.mkv';
   const streams = [
     serviceUsenet('torbox', 'torbox', filename),
@@ -193,6 +231,7 @@ test('Smart Detect never joins native AIOStreams to the TorBox/Deepbrid domain',
   ).deduplicate(streams);
 
   assert.deepEqual(result.map((stream) => stream.id).sort(), [
+    'deepbrid',
     'native',
     'torbox',
   ]);

@@ -40,3 +40,26 @@ test('user data still rejects unknown service ids', () => {
 
   assert.equal(parsed.success, false);
 });
+
+test('zero result limits are accepted as unlimited', () => {
+  const parsed = UserDataSchema.safeParse({
+    ...minimalUserData,
+    resultLimits: {
+      global: 0,
+      service: 0,
+      addon: 0,
+      resolution: 0,
+      quality: 0,
+      streamType: 0,
+      indexer: 0,
+      releaseGroup: 0,
+    },
+  });
+
+  assert.equal(parsed.success, true, JSON.stringify(parsed.error?.issues));
+  const negative = UserDataSchema.safeParse({
+    ...minimalUserData,
+    resultLimits: { global: -1 },
+  });
+  assert.equal(negative.success, false);
+});

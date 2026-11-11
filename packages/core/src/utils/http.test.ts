@@ -119,6 +119,7 @@ describe('RateLimitedError', () => {
   test('formats a human-readable retry-after duration', () => {
     const error = new RateLimitedError(90);
     assert.equal(error.name, 'RateLimitedError');
+    assert.equal(error.retryAfterSeconds, 90);
     assert.equal(error.message, 'Too Many Requests (retry after 1m 30s)');
   });
 });

@@ -27,19 +27,49 @@ test('migration registry preserves published IDs and has an ordered unique range
 
   assert.equal(new Set(ids).size, ids.length);
   assert.equal(new Set(names).size, names.length);
-  assert.deepEqual(
-    ids,
-    [...ids].sort((a, b) => a - b)
-  );
-  assert.deepEqual(
-    ids.slice(0, 19),
-    Array.from({ length: 19 }, (_, i) => i + 1)
-  );
+  assert.deepEqual(ids, [...ids].sort((a, b) => a - b));
+  assert.deepEqual(ids.slice(0, 19), Array.from({ length: 19 }, (_, i) => i + 1));
   assert.deepEqual(
     ids.filter((id) => id >= 900012 && id <= 900040),
     Array.from({ length: 29 }, (_, i) => 900012 + i)
   );
-  assert.equal(ids.at(-1), 901001);
+  assert.deepEqual(ids.slice(-3), [900041, 900042, 901001]);
+  assert.equal(
+    MIGRATIONS.find(({ name }) => name === 'watch_session_tracks')?.id,
+    900040
+  );
+});
+
+test('recognizes production tracker and Jellyfin migration identities', async () => {
+  const db = new SqliteDriver(':memory:');
+  try {
+    await db.exec(
+      'CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'
+    );
+
+    for (const migration of MIGRATIONS.filter(
+      ({ id }) => id <= 900040
+    )) {
+      await applyMigration(db, migration);
+    }
+
+    // These migrations have already been applied to production. Their names
+    // must be recognized so startup never replays their DDL/DML.
+    for (const migration of MIGRATIONS.filter(({ id }) =>
+      [900041, 900042, 901001].includes(id)
+    )) {
+      await db.exec('INSERT INTO _migrations (id, name) VALUES (?, ?)', [
+        migration.id,
+        migration.name,
+      ]);
+    }
+
+    await runMigrations(db);
+    const { pending } = await getMigrationStatus(db);
+    assert.deepEqual(pending, []);
+  } finally {
+    await db.close();
+  }
 });
 
 test('upgrades the fork migration history without reusing upstream migration IDs', async () => {

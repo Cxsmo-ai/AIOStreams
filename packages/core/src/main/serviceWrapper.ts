@@ -65,52 +65,23 @@ export function hasTorrentClawAutoWrapAddon(addons: Addon[]): boolean {
   );
 }
 
-function normaliseDeepbridReleaseTitle(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
-  const normalised = value
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\.(mkv|mp4|avi|mov|wmv|m2ts|ts|nzb)$/i, '')
-    .replace(/[^a-z0-9]+/gi, '')
-    .toLowerCase();
-  return normalised.length >= 8 ? normalised : undefined;
-}
-
-function positiveSize(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? Math.round(value)
-    : undefined;
-}
-
 /**
- * Secret-free, deliberately conservative identities for direct Finder and
- * external-indexer streams. Exact NZB hashes are strongest; release title plus
- * exact byte size handles indexers that expose a different signed NZB URL.
+ * Return only identities that identify the same NZB payload or the same
+ * canonical NZB download. Release keys such as wd1, titles, and sizes describe
+ * a release, not its exact files; using them here can suppress a separately
+ * retrievable indexer result when Finder's copy is incomplete or unusable.
  */
 export function getDeepbridFinderIdentities(stream: ParsedStream): Set<string> {
   const identities = new Set<string>();
-  if (stream.releaseKey) identities.add(`release-key:${stream.releaseKey}`);
-  if (stream.nzbUrl) identities.add(`nzb:${hashNzbUrl(stream.nzbUrl)}`);
+  if (stream.releaseKey && /^nh1:[0-9a-f]{40}$/i.test(stream.releaseKey)) {
+    identities.add(`content:${stream.releaseKey.toLowerCase()}`);
+  }
+  if (stream.nzbUrl) identities.add(`url:${hashNzbUrl(stream.nzbUrl)}`);
 
   const hints = stream.otherBehaviorHints;
   const hintedHash = hints?.deepbridNzbHash;
   if (typeof hintedHash === 'string' && hintedHash.length > 0) {
-    identities.add(`nzb:${hintedHash.toLowerCase()}`);
-  }
-
-  const hintedTitle = normaliseDeepbridReleaseTitle(
-    hints?.deepbridReleaseTitle
-  );
-  const hintedSize = positiveSize(hints?.deepbridReleaseSize);
-  const fallbackTitle =
-    hintedTitle ??
-    normaliseDeepbridReleaseTitle(
-      stream.folderName ?? stream.filename ?? stream.originalName
-    );
-  const fallbackSize =
-    hintedSize ?? positiveSize(stream.folderSize) ?? positiveSize(stream.size);
-  if (fallbackTitle && fallbackSize) {
-    identities.add(`release:${fallbackTitle}:${fallbackSize}`);
+    identities.add(`url:${hintedHash.toLowerCase()}`);
   }
   return identities;
 }
@@ -123,6 +94,56 @@ export function isAlreadyResolvedByDeepbridFinder(
     if (finderIdentities.has(identity)) return true;
   }
   return false;
+}
+
+/** Re-label a global Deepbrid copy instead of retaining its source route tag. */
+export function formatGlobalDeepbridName(
+  originalName: string | undefined,
+  cached: boolean
+): string {
+  const name = originalName?.trim() || 'External NZB';
+  const match = name.match(/^([^[]*)\[[^\]]+\]\s*(.*)$/u);
+  const decorators = match?.[1] ?? '';
+  const label = match?.[2]?.trim() || name;
+  const shortName =
+    constants.SERVICE_DETAILS[constants.DEEPBRID_SERVICE]?.shortName ?? 'DB';
+  return `${decorators}[${shortName}${cached ? '⚡' : '⏳'}] ${label}`.trim();
+}
+
+/** Allow the formatter to render the resolver actually used by this copy. */
+export function deepbridPresentationOverrides(
+  stream: ParsedStream
+): Pick<
+  ParsedStream,
+  'addon' | 'extra' | 'originalName' | 'originalDescription'
+> {
+  return {
+    addon: { ...stream.addon, formatPassthrough: false },
+    extra: stream.extra
+      ? { ...stream.extra, formattingPassthrough: false }
+      : undefined,
+    originalName: undefined,
+    originalDescription: undefined,
+  };
+}
+
+/**
+ * `processNZBs` rewrites each NZB hash to the hash Deepbrid sees for the
+ * submitted URL. Keep attribution tied to the original URL hash first, then
+ * fall back to the returned hash for services that preserve it. Otherwise
+ * external indexer results can be resolved successfully but lose their
+ * originating streams when the wrapper tries to map the response back.
+ */
+export function originalsForResolvedNzb(
+  result: Pick<NZBWithSelectedFile, 'hash' | 'nzb'>,
+  originalsBySourceHash: ReadonlyMap<string, ParsedStream[]>
+): ParsedStream[] {
+  const sourceHash = result.nzb ? hashNzbUrl(result.nzb) : undefined;
+  return (
+    (sourceHash ? originalsBySourceHash.get(sourceHash) : undefined) ??
+    originalsBySourceHash.get(result.hash) ??
+    []
+  );
 }
 
 /**
@@ -158,6 +179,31 @@ export async function resolveGlobalDeepbridNzbs(
       stream.indexer !== constants.DEEPBRID_SERVICE &&
       stream.addon.identifier !== 'deepbrid-usenet' &&
       !isAlreadyResolvedByDeepbridFinder(stream, finderIdentities)
+  );
+  const candidatesByPreset = candidates.reduce<Record<string, number>>(
+    (counts, stream) => {
+      const type = stream.addon.preset.type;
+      const category =
+        type === 'newshosting-indexer' ||
+        type === 'easynews-search' ||
+        type === 'prowlarr' ||
+        type === 'newznab' ||
+        type === 'unarr-indexer' ||
+        type === 'torrentclaw'
+          ? type
+          : 'other';
+      counts[category] = (counts[category] ?? 0) + 1;
+      return counts;
+    },
+    {}
+  );
+  logger.info(
+    {
+      finderIdentities: finderIdentities.size,
+      candidateStreams: candidates.length,
+      candidatesByPreset,
+    },
+    'Prepared external NZBs for global Deepbrid resolution'
   );
   if (candidates.length === 0)
     return { streams, errors: [], hasNewStreams: false };
@@ -196,6 +242,14 @@ export async function resolveGlobalDeepbridNzbs(
     userData.ip,
     userData.checkOwned ?? true
   );
+  logger.info(
+    {
+      uniqueCandidates: nzbsByHash.size,
+      resolvedCandidates: processed.results.length,
+      providerErrors: processed.errors.length,
+    },
+    'Completed external NZB resolution through global Deepbrid'
+  );
   const errors: ServiceWrapError[] = processed.errors.map((error) => ({
     title: `[❌] Global Deepbrid Usenet`,
     description: error.error.message,
@@ -219,7 +273,7 @@ export async function resolveGlobalDeepbridNzbs(
 
   const resolvedStreams: ParsedStream[] = [];
   for (const result of processed.results as NZBWithSelectedFile[]) {
-    const originals = byHash.get(result.hash) ?? [];
+    const originals = originalsForResolvedNzb(result, byHash);
     for (const original of originals) {
       const filename = result.file.name ?? result.title ?? 'video';
       const fileInfo: FileInfo = {
@@ -238,6 +292,7 @@ export async function resolveGlobalDeepbridNzbs(
       const url = generatePlaybackUrl(auth, metadataId, fileInfo, filename);
       resolvedStreams.push({
         ...original,
+        ...deepbridPresentationOverrides(original),
         // External indexer results are never account-library media. A
         // matching Deepbrid upload is still cached and reusable, but it must
         // not change the source's ownership presentation to "Your Media".

@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
-import { rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { SqliteDriver } from '../db/driver/sqlite.js';
 import { addonPerformance } from '../db/migrations/900005_addon_performance.js';
 
 test('stores compact addon performance rollups without request identity', async () => {
-  const filename = `.addon-performance-${process.pid}.sqlite`;
+  const tempRoot = resolve(tmpdir());
+  const testDirectory = await mkdtemp(
+    join(tempRoot, 'aiostreams-addon-performance-')
+  );
+  assert.ok(testDirectory.startsWith(`${tempRoot}${sep}`));
+  const filename = join(testDirectory, 'test.sqlite');
   const db = new SqliteDriver(filename);
   try {
     for (const statement of addonPerformance.up.sqlite
@@ -65,10 +72,6 @@ test('stores compact addon performance rollups without request identity', async 
     assert.equal(names.has('url'), false);
   } finally {
     await db.close();
-    await Promise.all(
-      ['', '-wal', '-shm'].map((suffix) =>
-        rm(`${filename}${suffix}`, { force: true })
-      )
-    );
+    await rm(testDirectory, { recursive: true, force: true });
   }
 });

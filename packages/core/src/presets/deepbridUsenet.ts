@@ -1,6 +1,7 @@
 import { Addon, Option, ParsedStream, Stream, UserData } from '../db/index.js';
 import { config as appConfig } from '../config/index.js';
 import { constants, encryptString } from '../utils/index.js';
+import type { ServiceId } from '../utils/constants.js';
 import { DeepbridUsenetConfigSchema } from '../builtins/deepbrid-usenet/index.js';
 import { BuiltinAddonPreset, BuiltinStreamParser } from './builtin.js';
 import { withInternalTimeoutMargin } from './timeout.js';
@@ -55,10 +56,11 @@ export class DeepbridUsenetStreamParser extends BuiltinStreamParser {
     stream: Stream,
     currentParsedStream: ParsedStream
   ): ParsedStream['service'] | undefined {
-    // Direct Finder streams have their own secure playback URL and no service
-    // wrapper. Indexer-mode streams are produced by BaseDebridAddon and must
-    // keep the selected AIOStreams/Deepbrid service for playback and labels.
-    if (this.isDirectFinderStream(stream)) return undefined;
+    // Finder streams already have a secure, playable Deepbrid URL; this marks
+    // their resolved state for sorting/display without invoking another resolver.
+    if (this.isDirectFinderStream(stream)) {
+      return { id: constants.DEEPBRID_SERVICE, cached: true };
+    }
     if (/^\[DB\s+⚡\]/.test(stream.name || '')) {
       return { id: constants.DEEPBRID_SERVICE, cached: true };
     }
@@ -94,19 +96,42 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
         id: 'mode',
         name: 'Deepbrid Mode',
         description:
-          'Direct mode resolves Finder results through Deepbrid. Indexer mode exposes Finder NZBs to your selected Usenet services and disables Deepbrid direct resolution.',
+          'Direct keeps playable Deepbrid Finder results. Indexer passes Finder NZB files through selected Usenet services when the Finder API provides NZB URLs. Both keeps Finder playback and enables that optional handoff; other configured indexer addons continue through their own service routing.',
         type: 'select',
         default: 'direct',
         options: [
           { label: 'Direct Resolve', value: 'direct' },
           { label: 'Indexer Only', value: 'indexer' },
+          { label: 'Both (Finder + External Usenet)', value: 'both' },
         ],
+      },
+      {
+        id: 'playbackMode',
+        name: 'Deepbrid Player Delivery',
+        description:
+          'Choose the player transport independently from Finder routing. Native uses the existing authenticated byte-range proxy; Remux and HLS use Deepbrid player endpoints. All exposes three labeled choices per Finder result.',
+        type: 'select',
+        default: 'direct',
+        options: [
+          { label: 'Native / Direct', value: 'direct' },
+          { label: 'Remux', value: 'remux' },
+          { label: 'HLS', value: 'hls' },
+          { label: 'Show all three', value: 'all' },
+        ],
+      },
+      {
+        id: 'convertSubtitlesToWebVtt',
+        name: 'Convert Deepbrid Player Subtitles to WebVTT',
+        description:
+          'Optional Deepbrid player conversion for ASS/SSA/SUB tracks from other subtitle addons. OpenSubtitles and Deepbrid OpenSubtitles are not changed; SRT and WebVTT remain as-is.',
+        type: 'boolean',
+        default: false,
       },
       {
         id: 'resolveExternalIndexers',
         name: 'Resolve External Indexers with Deepbrid',
         description:
-          'Enable the Deepbrid service for NZBs in this addon pipeline. For other indexer addons, also select Deepbrid under that addon’s Usenet services. Finder NZBs are never submitted back to Deepbrid.',
+          'Enable Deepbrid for NZBs supplied to this addon pipeline. For other indexer addons, select Deepbrid under each addon’s Usenet services. Finder results are direct playable files; the current Finder API does not provide an NZB URL to send to another service.',
         type: 'boolean',
         default: false,
       },
@@ -126,27 +151,38 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
         id: 'maxResults',
         name: 'Maximum Results',
         description:
-          'Maximum resolved Deepbrid video streams returned per title.',
+          'Maximum resolved Deepbrid streams per title; set to 0 for unlimited.',
         type: 'number',
-        default: 20,
-        constraints: { min: 1, max: 50, forceInUi: false },
+        default: 0,
+        constraints: { min: 0, max: 50, forceInUi: false },
       },
       {
         id: 'maxContentResolves',
         name: 'Maximum Content Resolves',
         description:
-          'Maximum matched Finder releases whose file lists AIOStreams resolves. Lower values reduce API traffic.',
+          'Maximum matched Finder releases to resolve; 0 is unlimited. API deadlines and concurrency remain bounded.',
         type: 'number',
-        default: 15,
+        default: 0,
         showInSimpleMode: false,
-        constraints: { min: 1, max: 30, forceInUi: false },
+        constraints: { min: 0, max: 30, forceInUi: false },
       },
       {
         id: 'resolveConcurrency',
         name: 'Resolve Concurrency',
-        description: 'How many Deepbrid content requests may run at once.',
+        description:
+          'How many Deepbrid content requests may run at once for standard requests.',
         type: 'number',
         default: 5,
+        showInSimpleMode: false,
+        constraints: { min: 1, max: 10, forceInUi: false },
+      },
+      {
+        id: 'progressiveResolveConcurrency',
+        name: 'Progressive Resolve Concurrency',
+        description:
+          'How many Finder content requests progressive requests may run at once. Higher values can resolve more candidates before the progressive deadline; the global Deepbrid network limit still caps active requests at 10.',
+        type: 'number',
+        default: 10,
         showInSimpleMode: false,
         constraints: { min: 1, max: 10, forceInUi: false },
       },
@@ -233,24 +269,21 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
         'Configure the Deepbrid API key once under Services > Deepbrid before installing Deepbrid Usenet.'
       );
     }
-    const serviceIds =
-      userData.services
-        ?.filter((s) => s.enabled !== false)
-        .map((s) => s.id)
-        .filter(
-          (id) =>
-            id !== constants.DEEPBRID_SERVICE ||
-            resolveExternalIndexers
-        ) || [];
+    const serviceIds = deepbridUsenetServiceIds(
+      userData.services ?? [],
+      resolveExternalIndexers
+    );
     const formatting = (options.formatting ||
       {}) as DeepbridUsenetFormattingOptions;
     const config = DeepbridUsenetConfigSchema.parse({
       ...this.getBaseConfig(userData, serviceIds),
       apiKey,
       mode,
+      playbackMode: options.playbackMode ?? 'direct',
+      convertSubtitlesToWebVtt: options.convertSubtitlesToWebVtt === true,
       resolveExternalIndexers,
-      maxResults: options.maxResults ?? 20,
-      maxContentResolves: options.maxContentResolves ?? 15,
+      maxResults: options.maxResults ?? 0,
+      maxContentResolves: options.maxContentResolves ?? 0,
       resolveConcurrency: options.resolveConcurrency ?? 5,
       timeout: options.timeout ?? 30_000,
     });
@@ -276,4 +309,18 @@ export class DeepbridUsenetPreset extends BuiltinAddonPreset {
       },
     ];
   }
+}
+
+/** Keep Deepbrid available for unrelated external NZBs only when explicitly
+ * enabled; Finder NZBs are already Deepbrid-owned and must not be resubmitted. */
+export function deepbridUsenetServiceIds(
+  services: Array<{ id: ServiceId; enabled?: boolean }>,
+  resolveExternalIndexers: boolean
+): ServiceId[] {
+  return services
+    .filter((service) => service.enabled !== false)
+    .map((service) => service.id)
+    .filter(
+      (id) => id !== constants.DEEPBRID_SERVICE || resolveExternalIndexers
+    );
 }

@@ -96,9 +96,10 @@ export class AIOStreams {
     id: string,
     type: string,
     preCaching: boolean = false,
-    onProgress?: StreamProgressCallback
+    onProgress?: StreamProgressCallback,
+    signal?: AbortSignal
   ) {
-    return _getStreams(this.ctx, id, type, preCaching, onProgress);
+    return _getStreams(this.ctx, id, type, preCaching, onProgress, signal);
   }
 
   public async getCatalog(type: string, id: string, extras?: string) {

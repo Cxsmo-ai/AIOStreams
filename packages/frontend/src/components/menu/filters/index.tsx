@@ -3415,6 +3415,33 @@ function Content() {
               <HeadingWithPageControls heading="Result Limits" />
               <SettingsCard description="Apply limits to specific kinds of results">
                 <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-sm text-[--muted]">
+                      Set every result cap to 0 to keep all results.
+                    </p>
+                    <Button
+                      intent="primary-outline"
+                      size="sm"
+                      onClick={() => {
+                        setUserData((prev) => ({
+                          ...prev,
+                          resultLimits: {
+                            ...prev.resultLimits,
+                            global: 0,
+                            service: 0,
+                            addon: 0,
+                            resolution: 0,
+                            quality: 0,
+                            streamType: 0,
+                            indexer: 0,
+                            releaseGroup: 0,
+                          },
+                        }));
+                      }}
+                    >
+                      Set all limits to 0 (unlimited)
+                    </Button>
+                  </div>
                   <Select
                     label="Limit Mode"
                     help="Independent: each category limit is checked separately. Conjunctive: category limits are combined into a composite key (e.g. 3 per resolution per addon)."
@@ -3434,9 +3461,9 @@ function Content() {
                     ]}
                   />
                   <NumberInput
-                    help="Global limit for all results"
+                    help="Global limit for all results; 0 or blank means unlimited"
                     label="Global Limit"
-                    value={userData.resultLimits?.global || undefined}
+                    value={userData.resultLimits?.global ?? undefined}
                     min={0}
                     defaultValue={undefined}
                     onValueChange={(value) => {
@@ -3444,16 +3471,16 @@ function Content() {
                         ...prev,
                         resultLimits: {
                           ...prev.resultLimits,
-                          global: value || undefined,
+                          global: value ?? 0,
                         },
                       }));
                     }}
                   />
                   {mode === 'pro' && (
                     <NumberInput
-                      help="Limit for results by service"
+                      help="Limit by service; 0 or blank means unlimited"
                       label="Service Limit"
-                      value={userData.resultLimits?.service || undefined}
+                      value={userData.resultLimits?.service ?? undefined}
                       min={0}
                       defaultValue={undefined}
                       onValueChange={(value) => {
@@ -3461,7 +3488,7 @@ function Content() {
                           ...prev,
                           resultLimits: {
                             ...prev.resultLimits,
-                            service: value || undefined,
+                            service: value ?? 0,
                           },
                         }));
                       }}
@@ -3469,9 +3496,9 @@ function Content() {
                   )}
                   {mode === 'pro' && (
                     <NumberInput
-                      help="Limit for results by addon"
+                      help="Limit by addon; 0 or blank means unlimited"
                       label="Addon Limit"
-                      value={userData.resultLimits?.addon || undefined}
+                      value={userData.resultLimits?.addon ?? undefined}
                       min={0}
                       defaultValue={undefined}
                       onValueChange={(value) => {
@@ -3479,16 +3506,16 @@ function Content() {
                           ...prev,
                           resultLimits: {
                             ...prev.resultLimits,
-                            addon: value || undefined,
+                            addon: value ?? 0,
                           },
                         }));
                       }}
                     />
                   )}
                   <NumberInput
-                    help="Limit for results by resolution"
+                    help="Limit by resolution; 0 or blank means unlimited"
                     label="Resolution Limit"
-                    value={userData.resultLimits?.resolution || undefined}
+                    value={userData.resultLimits?.resolution ?? undefined}
                     min={0}
                     defaultValue={undefined}
                     onValueChange={(value) => {
@@ -3496,16 +3523,16 @@ function Content() {
                         ...prev,
                         resultLimits: {
                           ...prev.resultLimits,
-                          resolution: value || undefined,
+                          resolution: value ?? 0,
                         },
                       }));
                     }}
                   />
                   {mode === 'pro' && (
                     <NumberInput
-                      help="Limit for results by quality"
+                      help="Limit by quality; 0 or blank means unlimited"
                       label="Quality Limit"
-                      value={userData.resultLimits?.quality || undefined}
+                      value={userData.resultLimits?.quality ?? undefined}
                       min={0}
                       defaultValue={undefined}
                       onValueChange={(value) => {
@@ -3513,7 +3540,7 @@ function Content() {
                           ...prev,
                           resultLimits: {
                             ...prev.resultLimits,
-                            quality: value || undefined,
+                            quality: value ?? 0,
                           },
                         }));
                       }}
@@ -3521,9 +3548,9 @@ function Content() {
                   )}
                   {mode === 'pro' && (
                     <NumberInput
-                      help="Limit for results by indexer"
+                      help="Limit by indexer; 0 or blank means unlimited"
                       label="Indexer Limit"
-                      value={userData.resultLimits?.indexer || undefined}
+                      value={userData.resultLimits?.indexer ?? undefined}
                       min={0}
                       defaultValue={undefined}
                       onValueChange={(value) => {
@@ -3531,7 +3558,7 @@ function Content() {
                           ...prev,
                           resultLimits: {
                             ...prev.resultLimits,
-                            indexer: value || undefined,
+                            indexer: value ?? 0,
                           },
                         }));
                       }}
@@ -3539,9 +3566,9 @@ function Content() {
                   )}
                   {mode === 'pro' && (
                     <NumberInput
-                      help="Limit for results by release group"
+                      help="Limit by release group; 0 or blank means unlimited"
                       label="Release Group Limit"
-                      value={userData.resultLimits?.releaseGroup || undefined}
+                      value={userData.resultLimits?.releaseGroup ?? undefined}
                       min={0}
                       defaultValue={undefined}
                       onValueChange={(value) => {
@@ -3549,7 +3576,7 @@ function Content() {
                           ...prev,
                           resultLimits: {
                             ...prev.resultLimits,
-                            releaseGroup: value || undefined,
+                            releaseGroup: value ?? 0,
                           },
                         }));
                       }}

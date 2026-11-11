@@ -5,11 +5,32 @@ import {
   chooseDeepbridVideoFiles,
   createDeepbridPlaybackToken,
   decodeDeepbridPlaybackToken,
+  DeepbridUsenetConfigSchema,
+  classifyDeepbridResolutionFailure,
+  DeepbridResolutionIncompleteError,
+  filterDeepbridProbeResults,
   prioritizeDeepbridSeasonPacks,
   resolveDeepbridFiles,
   requireDeepbridApiKey,
+  runQueuedDeepbridRequest,
+  runWithinDeepbridRequestBudget,
+  searchDeepbridFinderPages,
+  summarizeDeepbridPagination,
 } from './addon.js';
 import {
+  ValidatedFinderResolutionQueue,
+  ValidatedProgressiveStreamCollector,
+} from './merge-progressive.js';
+import {
+  deepbridPlayerEndpoint,
+  deepbridPlaybackModes,
+  createDeepbridSubtitleConversionToken,
+  decodeDeepbridSubtitleConversionToken,
+  type DeepbridPlaybackPayload,
+} from './playback.js';
+import type { DeepbridFinderPaginationOutcome } from './addon.js';
+import {
+  DeepbridApiError,
   DeepbridRequestSigner,
   isDeepbridArchiveName,
   isDeepbridStorageHost,
@@ -20,10 +41,33 @@ import {
 } from './client.js';
 import {
   DEEPBRID_USENET_FORMATTING_OPTION,
+  deepbridUsenetServiceIds,
   DeepbridUsenetStreamParser,
   deepbridUsenetFormatPassthrough,
 } from '../../presets/deepbridUsenet.js';
 import type { Addon, ParsedStream, Stream } from '../../db/index.js';
+import type { DeepbridFinderClient, DeepbridFinderResult } from './client.js';
+import {
+  DEEPBRID_PROGRESSIVE_OUTER_TIMEOUT_MARGIN_MS,
+  DEEPBRID_PROGRESSIVE_RESOLUTION_TIMEOUT_MS,
+  deepbridProgressiveOuterTimeout,
+  deepbridResolutionTimeout,
+} from '../../utils/deepbrid-progressive-timeout.js';
+
+const fixtureCredential = 'unit-test-placeholder-value';
+
+test('extends only progressive Finder resolution and keeps a bounded caller margin', () => {
+  assert.equal(deepbridResolutionTimeout(30_000, false), 30_000);
+  assert.equal(
+    deepbridResolutionTimeout(30_000, true),
+    DEEPBRID_PROGRESSIVE_RESOLUTION_TIMEOUT_MS
+  );
+  assert.equal(deepbridResolutionTimeout(180_000, true), 3_600_000);
+  assert.equal(deepbridResolutionTimeout(700_000, true), 3_600_000);
+  assert.equal(deepbridProgressiveOuterTimeout(50_000), 3_660_000);
+  assert.equal(deepbridProgressiveOuterTimeout(750_000), 3_660_000);
+  assert.equal(deepbridProgressiveOuterTimeout(4_500_000), 4_560_000);
+});
 
 class TestDeepbridParser extends DeepbridUsenetStreamParser {
   indexer() {
@@ -59,6 +103,165 @@ test('Deepbrid addon requires the global service credential', () => {
   assert.equal(
     requireDeepbridApiKey({ services: [], apiKey: 'x'.repeat(32) }),
     'x'.repeat(32)
+  );
+});
+
+test('Deepbrid mode accepts direct, indexer, and combined operation', () => {
+  const base = { services: [], apiKey: 'x'.repeat(32) };
+  assert.equal(DeepbridUsenetConfigSchema.parse(base).mode, 'direct');
+  for (const mode of ['direct', 'indexer', 'both'] as const) {
+    assert.equal(
+      DeepbridUsenetConfigSchema.parse({ ...base, mode }).mode,
+      mode
+    );
+  }
+  assert.throws(() =>
+    DeepbridUsenetConfigSchema.parse({ ...base, mode: 'direct-and-indexer' })
+  );
+});
+
+test('legacy Deepbrid configs get a bounded progressive concurrency default', () => {
+  const base = DeepbridUsenetConfigSchema.parse({
+    services: [],
+    apiKey: 'x'.repeat(32),
+  });
+  assert.equal(base.resolveConcurrency, 5);
+  assert.equal(base.progressiveResolveConcurrency, 10);
+  assert.equal(
+    DeepbridUsenetConfigSchema.parse({
+      services: [],
+      apiKey: 'x'.repeat(32),
+      progressiveResolveConcurrency: 3,
+    }).progressiveResolveConcurrency,
+    3
+  );
+});
+
+test('Deepbrid player delivery stays independent from Finder routing', () => {
+  const base = { services: [], apiKey: 'x'.repeat(32) };
+  assert.equal(DeepbridUsenetConfigSchema.parse(base).mode, 'direct');
+  assert.equal(DeepbridUsenetConfigSchema.parse(base).playbackMode, 'direct');
+  for (const playbackMode of ['direct', 'remux', 'hls', 'all'] as const) {
+    assert.equal(
+      DeepbridUsenetConfigSchema.parse({ ...base, playbackMode }).playbackMode,
+      playbackMode
+    );
+  }
+  assert.throws(() =>
+    DeepbridUsenetConfigSchema.parse({ ...base, playbackMode: 'indexer' })
+  );
+});
+
+test('Deepbrid player delivery modes provide Direct, Remux, and HLS choices', () => {
+  assert.deepEqual(deepbridPlaybackModes(undefined), ['direct']);
+  assert.deepEqual(deepbridPlaybackModes('direct'), ['direct']);
+  assert.deepEqual(deepbridPlaybackModes('remux'), ['remux']);
+  assert.deepEqual(deepbridPlaybackModes('hls'), ['hls']);
+  assert.deepEqual(deepbridPlaybackModes('all'), ['direct', 'remux', 'hls']);
+});
+
+test('Deepbrid player endpoints preserve source URL and mode parameters', () => {
+  const base: DeepbridPlaybackPayload = {
+    apiKey: 'x'.repeat(32),
+    url: 'https://usenet-2.myfast.link/media/example.mkv?sig=opaque',
+    filename: 'example.mkv',
+  };
+  assert.equal(deepbridPlayerEndpoint(base).toString(), base.url);
+  const remux = deepbridPlayerEndpoint({ ...base, mode: 'remux' });
+  assert.equal(remux.pathname, '/cast_remux');
+  assert.equal(remux.searchParams.get('url'), base.url);
+  assert.equal(remux.searchParams.get('audio'), '0');
+  assert.equal(remux.searchParams.get('start'), '0');
+  const hls = deepbridPlayerEndpoint({ ...base, mode: 'hls' });
+  assert.equal(hls.pathname, '/cast_hls');
+  assert.equal(hls.searchParams.get('url'), base.url);
+  assert.equal(hls.searchParams.get('audio'), '0');
+  assert.equal(hls.searchParams.get('t'), '0');
+});
+
+test('Deepbrid player subtitle capability encrypts credentials and round-trips source URL', () => {
+  const payload = {
+    apiKey: fixtureCredential,
+    subtitleUrl: 'https://subtitles.example/captions.ass?download=1',
+  };
+  const token = createDeepbridSubtitleConversionToken(payload);
+  assert.equal(token.includes(payload.apiKey), false);
+  assert.equal(token.includes(payload.subtitleUrl), false);
+  assert.deepEqual(decodeDeepbridSubtitleConversionToken(token), payload);
+});
+
+test('Deepbrid player subtitle capability rejects unsafe source URLs', () => {
+  for (const subtitleUrl of [
+    'http://subtitles.example/captions.ass',
+    'https://user:password@subtitles.example/captions.ass',
+    'https://127.0.0.1/private.ass',
+  ]) {
+    assert.throws(() =>
+      createDeepbridSubtitleConversionToken({
+        apiKey: fixtureCredential,
+        subtitleUrl,
+      })
+    );
+  }
+});
+
+test('a transient Finder playback probe failure does not discard sibling results', async () => {
+  const candidates = [
+    { id: 'rate-limited' },
+    { id: 'verified' },
+    { id: 'invalid-media' },
+  ];
+
+  const result = await filterDeepbridProbeResults(candidates, {
+    concurrency: 3,
+    probe: async (candidate) => {
+      if (candidate.id === 'rate-limited') {
+        throw new Error('temporary probe failure');
+      }
+      return candidate.id === 'verified';
+    },
+  });
+
+  assert.deepEqual(result.playable, [{ id: 'verified' }]);
+  assert.equal(result.errors, 1);
+  assert.equal(result.rejected, 1);
+  assert.equal(result.aborted, 0);
+});
+
+test('aborting Finder playback probes does not report unverified files as playable', async () => {
+  const controller = new AbortController();
+  const result = await filterDeepbridProbeResults(
+    [{ id: 'abort' }, { id: 'not-started' }],
+    {
+      concurrency: 1,
+      signal: controller.signal,
+      probe: async () => {
+        controller.abort();
+        throw new DOMException('request aborted', 'AbortError');
+      },
+    }
+  );
+
+  assert.deepEqual(result.playable, []);
+  assert.equal(result.errors, 0);
+  assert.equal(result.rejected, 0);
+  assert.equal(result.aborted, 2);
+});
+
+test('combined Finder mode excludes Deepbrid itself from its external service fan-out', () => {
+  const selected = deepbridUsenetServiceIds(
+    [
+      { id: 'deepbrid', enabled: true },
+      { id: 'torbox', enabled: true },
+      { id: 'stremio_nntp', enabled: true },
+      { id: 'altmount', enabled: false },
+    ],
+    false
+  );
+  assert.deepEqual(selected, ['torbox', 'stremio_nntp']);
+  assert.deepEqual(
+    deepbridUsenetServiceIds([{ id: 'deepbrid', enabled: true }], true),
+    ['deepbrid']
   );
 });
 
@@ -130,7 +333,7 @@ test('trusts only Deepbrid API and recovered Finder storage hosts', () => {
 
 test('round-trips encrypted, signed playback capabilities', () => {
   const payload = {
-    apiKey: 'test-only-key-1234567890',
+    apiKey: fixtureCredential,
     url: 'https://www.deepbrid.com/download/video.mkv',
     filename: 'video.mkv',
     size: 1234,
@@ -353,7 +556,7 @@ test('reserves resolver capacity for matching season packs', () => {
   );
 });
 
-test('parses Deepbrid direct links as formatted Usenet without a fake service', () => {
+test('marks playable Deepbrid Finder links as resolved/cached Usenet', () => {
   const parser = new TestDeepbridParser(parserAddon);
   const stream: Stream = {
     name: '[DB] Deepbrid Usenet',
@@ -375,7 +578,10 @@ test('parses Deepbrid direct links as formatted Usenet without a fake service', 
     proxied: false,
   } as ParsedStream;
   assert.equal(parser.indexer(), 'Deepbrid Usenet');
-  assert.equal(parser.service(stream, parsed), undefined);
+  assert.deepEqual(parser.service(stream, parsed), {
+    id: 'deepbrid',
+    cached: true,
+  });
   assert.equal(parser.streamType(stream, parsed), 'usenet');
   assert.equal(
     parser.filename(stream, parsed),
@@ -510,6 +716,1777 @@ test('resolves Deepbrid content in bounded batches and stops at max results', as
   assert.equal(
     resolved.every((item) => item.archiveExpanded === false),
     true
+  );
+});
+
+test('zero limits keep every Deepbrid candidate and every resolved file', async () => {
+  const ranked = ['a', 'b', 'c', 'd'].map((token, index) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 4 - index,
+    },
+    score: 100 - index,
+    confirmed: true,
+  }));
+  const candidates = prioritizeDeepbridSeasonPacks(
+    ranked,
+    { type: 'movie' },
+    0
+  );
+  assert.equal(candidates.length, ranked.length);
+
+  const calls: string[] = [];
+  const resolved = await resolveDeepbridFiles(
+    candidates,
+    { type: 'movie' },
+    {
+      concurrency: 2,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      requireCompleteResolution: true,
+      getContent: async (token) => {
+        calls.push(token);
+        return {
+          title: token,
+          files: [
+            {
+              name: `${token}.mkv`,
+              link: `https://storage.example/${token}.mkv`,
+              size: 1,
+              sizeHuman: '',
+            },
+          ],
+          hasPassword: false,
+          password: '',
+        };
+      },
+    }
+  );
+
+  assert.deepEqual(calls, ['a', 'b', 'c', 'd']);
+  assert.deepEqual(
+    resolved.map((item) => item.file.name),
+    ['a.mkv', 'b.mkv', 'c.mkv', 'd.mkv']
+  );
+});
+
+test('uncapped progressive resolution rejects an incomplete candidate tail', async () => {
+  let now = 1_000;
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+  const ranked = ['a', 'b', 'c', 'd'].map((token, index) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 4 - index,
+    },
+    score: 100 - index,
+    confirmed: true,
+  }));
+
+  await assert.rejects(
+    resolveDeepbridFiles(
+      ranked,
+      { type: 'movie' },
+      {
+        concurrency: 1,
+        maxResults: 0,
+        deadline: 2_000,
+        now: () => now,
+        requireCompleteResolution: true,
+        getContent: async () => {
+          now = 2_000;
+          return {
+            title: 'Movie',
+            files: [],
+            hasPassword: false,
+            password: '',
+          };
+        },
+        onSummary: (value) => {
+          summary = value;
+        },
+      }
+    ),
+    (error: unknown) =>
+      error instanceof DeepbridResolutionIncompleteError &&
+      error.summary.attempted === 1 &&
+      error.summary.candidates === 4 &&
+      error.summary.unattempted === 3 &&
+      error.summary.stopReason === 'deadline'
+  );
+
+  assert.equal(summary?.attempted, 1);
+  assert.equal(summary?.unattempted, 3);
+  assert.equal(summary?.deadlineReached, true);
+});
+
+test('reports secret-free content resolution accounting for both-mode traces', async () => {
+  const ranked = ['video', 'no-video', 'password'].map((token) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 1,
+    },
+    score: 100,
+    confirmed: true,
+  }));
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+
+  const resolved = await resolveDeepbridFiles(
+    ranked,
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      getContent: async (token) => ({
+        title: token,
+        files:
+          token === 'video'
+            ? [
+                {
+                  name: 'Movie.2026.1080p.mkv',
+                  link: 'https://storage.example/private.mkv',
+                  size: 100,
+                  sizeHuman: '',
+                },
+              ]
+            : [],
+        hasPassword: token === 'password',
+        password: '',
+      }),
+      onSummary: (value) => {
+        summary = value;
+      },
+    }
+  );
+
+  assert.equal(resolved.length, 1);
+  assert.deepEqual(summary, {
+    candidates: 3,
+    attempted: 3,
+    contentRequests: 3,
+    resolutionFailures: 0,
+    resolutionFailureClasses: {
+      abort: 0,
+      timeout: 0,
+      connection: 0,
+      api: 0,
+      other: 0,
+    },
+    apiFailureKinds: {
+      api_12: 0,
+      api_response: 0,
+      http_error: 0,
+      retry_exhausted: 0,
+      cloudflare_response: 0,
+      invalid_json: 0,
+      unsafe_download_url: 0,
+      request_gate_capacity: 0,
+      other: 0,
+    },
+    retryExhaustionReasons: {
+      request_gate_deadline: 0,
+      wrapper_budget_before_attempt: 0,
+      wrapper_completed_after_deadline: 0,
+      request_json_budget_before_attempt: 0,
+      request_json_budget_at_gate: 0,
+      request_json_loop_exhausted: 0,
+      signature_correction_budget: 0,
+      finder_budget_at_gate: 0,
+      unknown: 0,
+    },
+    api12Skips: 0,
+    otherApiFailures: 0,
+    passwordProtected: 1,
+    episodeMatchedFiles: 1,
+    returnedFiles: 1,
+    unattempted: 0,
+    deadlineSkipped: 0,
+    stopReason: 'complete',
+    deadlineReached: false,
+    aborted: false,
+  });
+});
+
+test('classifies resolver failures without retaining error text', () => {
+  const timeout = new Error('PRIVATE_TIMEOUT_DETAIL');
+  timeout.name = 'TimeoutError';
+  const connection = new Error('PRIVATE_CONNECTION_DETAIL') as Error & {
+    cause: Error & { code: string };
+  };
+  connection.cause = Object.assign(new Error('PRIVATE_NESTED_DETAIL'), {
+    code: 'ECONNRESET',
+  });
+
+  assert.equal(classifyDeepbridResolutionFailure(timeout), 'timeout');
+  assert.equal(
+    classifyDeepbridResolutionFailure(
+      new DOMException('private', 'AbortError')
+    ),
+    'abort'
+  );
+  assert.equal(classifyDeepbridResolutionFailure(connection), 'connection');
+  assert.equal(
+    classifyDeepbridResolutionFailure(
+      new DeepbridApiError('PRIVATE_API_DETAIL', 429, 'http-error')
+    ),
+    'api'
+  );
+  assert.equal(
+    classifyDeepbridResolutionFailure(
+      new DeepbridApiError('PRIVATE_API_DETAIL', 503, 'http-error')
+    ),
+    'api'
+  );
+  assert.equal(
+    classifyDeepbridResolutionFailure(new Error('PRIVATE_OTHER_DETAIL')),
+    'other'
+  );
+  const malformed = Object.assign(new Error('PRIVATE_SENTINEL'), {
+    name: 'PRIVATE_ERROR_NAME',
+    code: {
+      toString() {
+        throw new Error('Must not execute');
+      },
+    },
+  });
+  assert.equal(classifyDeepbridResolutionFailure(malformed), 'other');
+  assert.doesNotMatch(
+    JSON.stringify([
+      classifyDeepbridResolutionFailure(timeout),
+      classifyDeepbridResolutionFailure(connection),
+    ]),
+    /PRIVATE_/i
+  );
+});
+
+test('malformed error codes cannot escape candidate resolution workers', async () => {
+  const malformed = Object.assign(new Error('PRIVATE_SENTINEL'), {
+    name: 'PRIVATE_ERROR_NAME',
+    code: {
+      toString() {
+        throw new Error('Must not execute');
+      },
+    },
+  });
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+
+  const resolved = await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'candidate-test',
+          title: 'Movie 2026',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      getContent: async () => {
+        throw malformed;
+      },
+      onSummary: (value) => {
+        summary = value;
+      },
+    }
+  );
+
+  assert.deepEqual(resolved, []);
+  assert.equal(summary?.resolutionFailures, 1);
+  assert.equal(summary?.resolutionFailureClasses.other, 1);
+  assert.equal(summary?.apiFailureKinds.other, 0);
+  assert.equal(summary?.otherApiFailures, 0);
+  assert.equal(summary?.stopReason, 'complete');
+  assert.doesNotMatch(
+    JSON.stringify(summary),
+    /PRIVATE_SENTINEL|PRIVATE_ERROR_NAME|private-candidate-token/i
+  );
+});
+
+test('summary separates timeout failures from safe API error details', async () => {
+  const timeout = new Error('PRIVATE_TIMEOUT_DETAIL');
+  timeout.name = 'TimeoutError';
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+
+  await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'candidate-test',
+          title: 'Movie 2026',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      getContent: async () => {
+        throw timeout;
+      },
+      onSummary: (value) => {
+        summary = value;
+      },
+    }
+  );
+
+  assert.equal(summary?.resolutionFailures, 1);
+  assert.deepEqual(summary?.resolutionFailureClasses, {
+    abort: 0,
+    timeout: 1,
+    connection: 0,
+    api: 0,
+    other: 0,
+  });
+  assert.deepEqual(summary?.apiFailureKinds, {
+    api_12: 0,
+    api_response: 0,
+    http_error: 0,
+    retry_exhausted: 0,
+    cloudflare_response: 0,
+    invalid_json: 0,
+    unsafe_download_url: 0,
+    request_gate_capacity: 0,
+    other: 0,
+  });
+  assert.deepEqual(summary?.retryExhaustionReasons, {
+    request_gate_deadline: 0,
+    wrapper_budget_before_attempt: 0,
+    wrapper_completed_after_deadline: 0,
+    request_json_budget_before_attempt: 0,
+    request_json_budget_at_gate: 0,
+    request_json_loop_exhausted: 0,
+    signature_correction_budget: 0,
+    finder_budget_at_gate: 0,
+    unknown: 0,
+  });
+  assert.equal(summary?.api12Skips, 0);
+  assert.equal(summary?.otherApiFailures, 0);
+  assert.doesNotMatch(
+    JSON.stringify(summary),
+    /PRIVATE_|private-candidate-token/i
+  );
+});
+
+test('counts expected api_12 skips separately without changing completeness', async () => {
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+  const resolved = await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'candidate-test',
+          title: 'Movie 2026',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      getContent: async () => {
+        throw new DeepbridApiError('PRIVATE_API_DETAIL', 200, 'api_12');
+      },
+      onSummary: (value) => {
+        summary = value;
+      },
+    }
+  );
+
+  assert.deepEqual(resolved, []);
+  assert.equal(summary?.resolutionFailures, 1);
+  assert.equal(summary?.resolutionFailureClasses.api, 1);
+  assert.equal(summary?.apiFailureKinds.api_12, 1);
+  assert.equal(summary?.apiFailureKinds.retry_exhausted, 0);
+  assert.equal(
+    Object.values(summary?.retryExhaustionReasons ?? {}).reduce(
+      (total, count) => total + count,
+      0
+    ),
+    0
+  );
+  assert.equal(summary?.api12Skips, 1);
+  assert.equal(summary?.otherApiFailures, 0);
+  assert.equal(summary?.stopReason, 'complete');
+  assert.doesNotMatch(
+    JSON.stringify(summary),
+    /PRIVATE_|private-candidate-token/i
+  );
+});
+
+test('aggregates fixed retry-exhaustion reasons without exposing error text', async () => {
+  const failures = new Map<string, DeepbridApiError>([
+    [
+      'known',
+      new DeepbridApiError(
+        'PRIVATE_CANDIDATE_ERROR',
+        undefined,
+        'retry-exhausted',
+        undefined,
+        'finder_budget_at_gate'
+      ),
+    ],
+    [
+      'missing-reason',
+      new DeepbridApiError(
+        'PRIVATE_CANDIDATE_ERROR',
+        undefined,
+        'retry-exhausted'
+      ),
+    ],
+  ]);
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+
+  await resolveDeepbridFiles(
+    [...failures.keys()].map((token) => ({
+      result: {
+        token,
+        title: 'Movie 2026',
+        category: '',
+        categoryName: '',
+        kind: '',
+        size: 1,
+        sizeHuman: '',
+        date: '',
+        sources: 1,
+      },
+      score: 100,
+      confirmed: true,
+    })),
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      getContent: async (token) => {
+        throw failures.get(token);
+      },
+      onSummary: (value) => {
+        summary = value;
+      },
+    }
+  );
+
+  assert.equal(summary?.apiFailureKinds.retry_exhausted, 2);
+  assert.equal(summary?.retryExhaustionReasons.finder_budget_at_gate, 1);
+  assert.equal(summary?.retryExhaustionReasons.unknown, 1);
+  assert.equal(
+    Object.values(summary?.retryExhaustionReasons ?? {}).reduce(
+      (total, count) => total + count,
+      0
+    ),
+    summary?.apiFailureKinds.retry_exhausted
+  );
+  assert.doesNotMatch(
+    JSON.stringify(summary),
+    /PRIVATE_CANDIDATE_ERROR|private-candidate-token|missing-reason/i
+  );
+});
+
+test('a failing Deepbrid accounting callback cannot fail content resolution', async () => {
+  const resolved = await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'safe-fixture',
+          title: 'Movie 2026',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      getContent: async () => ({
+        title: 'Movie 2026',
+        files: [
+          {
+            name: 'Movie.2026.mkv',
+            link: 'https://storage.example/fixture.mkv',
+            size: 100,
+            sizeHuman: '',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+      onSummary: () => {
+        throw new Error('diagnostic callback failure');
+      },
+    }
+  );
+
+  assert.equal(resolved.length, 1);
+});
+
+test('an asynchronous accounting callback rejection is observed without delaying results', async () => {
+  const resolved = await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'safe-fixture',
+          title: 'Movie 2026',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 1,
+      deadline: Date.now() + 10_000,
+      getContent: async () => ({
+        title: 'Movie 2026',
+        files: [
+          {
+            name: 'Movie.2026.mkv',
+            link: 'https://storage.example/fixture.mkv',
+            size: 100,
+            sizeHuman: '',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+      onSummary: async () => {
+        throw new Error('async diagnostic failure');
+      },
+    }
+  );
+
+  assert.equal(resolved.length, 1);
+});
+
+test('does not label an exhausted candidate list as stopped by max results', async () => {
+  let stopReason = '';
+  await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'safe-fixture',
+          title: 'Movie 2026',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 1,
+      deadline: Date.now() + 10_000,
+      getContent: async () => ({
+        title: 'Movie 2026',
+        files: [
+          {
+            name: 'Movie.2026.mkv',
+            link: 'https://storage.example/fixture.mkv',
+            size: 100,
+            sizeHuman: '',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+      onSummary: (summary) => {
+        stopReason = summary.stopReason;
+      },
+    }
+  );
+
+  assert.equal(stopReason, 'complete');
+});
+
+test('reports accounting on worker failure without replacing the original error', async () => {
+  const controller = new AbortController();
+  const originalError = new Error('synthetic progress failure');
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+
+  await assert.rejects(
+    resolveDeepbridFiles(
+      [
+        {
+          result: {
+            token: 'safe-fixture',
+            title: 'Movie 2026',
+            category: '',
+            categoryName: '',
+            kind: '',
+            size: 1,
+            sizeHuman: '',
+            date: '',
+            sources: 1,
+          },
+          score: 100,
+          confirmed: true,
+        },
+      ],
+      { type: 'movie' },
+      {
+        concurrency: 1,
+        maxResults: 0,
+        deadline: Date.now() + 10_000,
+        signal: controller.signal,
+        getContent: async () => ({
+          title: 'Movie 2026',
+          files: [
+            {
+              name: 'Movie.2026.mkv',
+              link: 'https://storage.example/fixture.mkv',
+              size: 100,
+              sizeHuman: '',
+            },
+          ],
+          hasPassword: false,
+          password: '',
+        }),
+        onResolved: () => {
+          controller.abort();
+          throw originalError;
+        },
+        onSummary: (value) => {
+          summary = value;
+        },
+      }
+    ),
+    (error: unknown) => error === originalError
+  );
+
+  assert.equal(summary?.stopReason, 'aborted');
+  assert.equal(summary?.attempted, 1);
+  assert.equal(summary?.returnedFiles, 0);
+});
+
+test('waits for other resolution workers before reporting a rejected worker', async () => {
+  const controller = new AbortController();
+  const originalError = new Error('synthetic progress failure');
+  let releaseSlow!: () => void;
+  let markSlowStarted!: () => void;
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  const slowStarted = new Promise<void>((resolve) => {
+    markSlowStarted = resolve;
+  });
+  let summary:
+    | Parameters<
+        NonNullable<Parameters<typeof resolveDeepbridFiles>[2]['onSummary']>
+      >[0]
+    | undefined;
+  const ranked = ['fast', 'slow'].map((token) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 1,
+    },
+    score: 100,
+    confirmed: true,
+  }));
+
+  await assert.rejects(
+    resolveDeepbridFiles(
+      ranked,
+      { type: 'movie' },
+      {
+        concurrency: 2,
+        maxResults: 0,
+        deadline: Date.now() + 10_000,
+        signal: controller.signal,
+        getContent: async (token) => {
+          if (token === 'slow') {
+            markSlowStarted();
+            await slowGate;
+          } else await slowStarted;
+          return {
+            title: token,
+            files: [
+              {
+                name: `Movie.${token}.mkv`,
+                link: `https://storage.example/${token}.mkv`,
+                size: 100,
+                sizeHuman: '',
+              },
+            ],
+            hasPassword: false,
+            password: '',
+          };
+        },
+        onResolved: async (files) => {
+          if (files[0]?.result.token !== 'fast') return;
+          controller.abort();
+          releaseSlow();
+          throw originalError;
+        },
+        onSummary: (value) => {
+          summary = value;
+        },
+      }
+    ),
+    (error: unknown) => error === originalError
+  );
+
+  assert.equal(summary?.attempted, 2);
+  assert.equal(summary?.contentRequests, 2);
+  assert.equal(summary?.episodeMatchedFiles, 2);
+  assert.equal(summary?.returnedFiles, 0);
+  assert.equal(summary?.unattempted, 0);
+  assert.equal(summary?.stopReason, 'aborted');
+});
+
+test('inherits the safe Finder search NZB URL when content files omit it', async () => {
+  const finderNzbUrl = 'https://www.deepbrid.com/finder/release.nzb';
+  const resolved = await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'finder-token',
+          title: 'Verified release',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          nzbUrl: finderNzbUrl,
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 5_000,
+      getContent: async () => ({
+        title: 'Verified release',
+        files: [
+          {
+            name: 'release.mkv',
+            link: 'https://storage.example/release.mkv',
+            size: 1,
+            sizeHuman: '',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+    }
+  );
+
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].file.nzbUrl, finderNzbUrl);
+});
+
+test('emits verified files as candidates resolve without changing final rank order', async () => {
+  const ranked = ['a', 'b', 'c'].map((token, index) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 3 - index,
+    },
+    score: 100 - index,
+    confirmed: true,
+  }));
+  let releaseA!: () => void;
+  const aMayFinish = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const emitted: string[] = [];
+
+  const resolved = await resolveDeepbridFiles(
+    ranked,
+    { type: 'movie' },
+    {
+      concurrency: 2,
+      maxResults: 0,
+      deadline: Date.now() + 5_000,
+      getContent: async (token) => {
+        if (token === 'a') await aMayFinish;
+        return {
+          title: token,
+          files: [
+            {
+              name: `${token}.mkv`,
+              link: `https://storage.example/${token}.mkv`,
+              size: 1,
+              sizeHuman: '',
+            },
+          ],
+          hasPassword: false,
+          password: '',
+        };
+      },
+      onResolved: async (files) => {
+        const token = files[0].result.token;
+        emitted.push(token);
+        if (token === 'b') releaseA();
+      },
+    }
+  );
+
+  assert.equal(emitted[0], 'b');
+  assert.deepEqual(
+    resolved.map((item) => item.result.token),
+    ['a', 'b', 'c']
+  );
+});
+
+test('slow direct probes do not hold Finder resolution or external NZB results', async () => {
+  const collector = new ValidatedProgressiveStreamCollector();
+  let releaseProbe!: () => void;
+  const probeGate = new Promise<void>((resolve) => {
+    releaseProbe = resolve;
+  });
+  const queue = new ValidatedFinderResolutionQueue(collector, async (files) => {
+    await probeGate;
+    return files.map((item) => ({
+      name: '[DB⚡] Deepbrid Usenet · Direct',
+      title: item.result.title,
+      description: item.file.name,
+      url: `https://playback.example/${item.file.name}`,
+      type: 'usenet' as const,
+    }));
+  });
+
+  const ranked = ['first', 'second'].map((token, index) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 100 - index,
+      sizeHuman: '',
+      date: '',
+      sources: 2,
+      nzbUrl: `https://finder.example/${token}.nzb`,
+    },
+    score: 100 - index,
+    confirmed: true,
+  }));
+
+  const resolved = await resolveDeepbridFiles(
+    ranked,
+    { type: 'movie' },
+    {
+      concurrency: 2,
+      maxResults: 0,
+      deadline: Date.now() + 5_000,
+      getContent: async (token) => ({
+        title: `Movie ${token}`,
+        files: [
+          {
+            name: `${token}.mkv`,
+            link: `https://storage.example/${token}.mkv`,
+            size: 1,
+            sizeHuman: '',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+      // The production both-mode path uses this always-true predicate so
+      // external Usenet resolvers retain Finder NZBs independently of media
+      // link preflight.
+      probeFile: () => Promise.resolve(true),
+      onResolved: queue.schedule,
+    }
+  );
+
+  assert.equal(resolved.length, 2);
+  assert.deepEqual(
+    resolved.map(({ result }) => result.nzbUrl),
+    ['https://finder.example/first.nzb', 'https://finder.example/second.nzb']
+  );
+  assert.deepEqual(collector.mergeFinal([]), []);
+
+  const drain = queue.drain();
+  releaseProbe();
+  await drain;
+  assert.deepEqual(
+    collector.mergeFinal([]).map((stream) => stream.title),
+    ['Movie first', 'Movie second']
+  );
+});
+
+test('a failed progress notification does not discard a verified Deepbrid result', async () => {
+  const ranked = [
+    {
+      result: {
+        token: 'verified',
+        title: 'Verified movie',
+        category: '',
+        categoryName: '',
+        kind: '',
+        size: 1,
+        sizeHuman: '',
+        date: '',
+        sources: 1,
+      },
+      score: 100,
+      confirmed: true,
+    },
+  ];
+  const resolved = await resolveDeepbridFiles(
+    ranked,
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 5_000,
+      getContent: async () => ({
+        title: 'Verified movie',
+        files: [
+          {
+            name: 'verified.mkv',
+            link: 'https://storage.example/verified.mkv',
+            size: 1,
+            sizeHuman: '',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+      onResolved: async () => {
+        throw new Error('progress transport closed');
+      },
+    }
+  );
+
+  assert.deepEqual(
+    resolved.map((item) => item.file.name),
+    ['verified.mkv']
+  );
+});
+
+test('finite caps let another worker continue after a reserved candidate fails', async () => {
+  const calls: string[] = [];
+  const ranked = ['fails', 'succeeds'].map((token, index) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 2 - index,
+    },
+    score: 100 - index,
+    confirmed: true,
+  }));
+
+  const resolved = await resolveDeepbridFiles(
+    ranked,
+    { type: 'movie' },
+    {
+      concurrency: 2,
+      maxResults: 1,
+      deadline: Date.now() + 5_000,
+      getContent: async (token) => {
+        calls.push(token);
+        if (token === 'fails') throw new Error('temporary content failure');
+        return {
+          title: token,
+          files: [
+            {
+              name: 'succeeds.mkv',
+              link: 'https://storage.example/succeeds.mkv',
+              size: 1,
+              sizeHuman: '',
+            },
+          ],
+          hasPassword: false,
+          password: '',
+        };
+      },
+    }
+  );
+
+  assert.deepEqual(calls.sort(), ['fails', 'succeeds']);
+  assert.deepEqual(
+    resolved.map((item) => item.result.token),
+    ['succeeds']
+  );
+});
+
+test('zero Deepbrid result cap keeps every resolved video file', async () => {
+  const ranked = ['a', 'b', 'c'].map((token) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 1,
+    },
+    score: 100,
+    confirmed: true,
+  }));
+  const resolved = await resolveDeepbridFiles(
+    ranked,
+    { type: 'movie' },
+    {
+      concurrency: 2,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      getContent: async (token) => ({
+        title: token,
+        files: [
+          {
+            name: `${token}.mkv`,
+            link: `https://storage.example/${token}.mkv`,
+            size: 1,
+            sizeHuman: '',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+    }
+  );
+  assert.deepEqual(
+    resolved.map((item) => item.file.name),
+    ['a.mkv', 'b.mkv', 'c.mkv']
+  );
+});
+
+test('aborting a Finder scrape stops content resolution before the next candidate', async () => {
+  const controller = new AbortController();
+  const calls: string[] = [];
+  const ranked = ['a', 'b'].map((token) => ({
+    result: {
+      token,
+      title: `Movie ${token}`,
+      category: '',
+      categoryName: '',
+      kind: '',
+      size: 1,
+      sizeHuman: '',
+      date: '',
+      sources: 1,
+    },
+    score: 100,
+    confirmed: true,
+  }));
+
+  const resolved = await resolveDeepbridFiles(
+    ranked,
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 10_000,
+      signal: controller.signal,
+      getContent: async (token, _archives, options) => {
+        calls.push(token);
+        assert.equal(options.signal, controller.signal);
+        controller.abort();
+        throw new DOMException('request aborted', 'AbortError');
+      },
+    }
+  );
+
+  assert.deepEqual(calls, ['a']);
+  assert.deepEqual(resolved, []);
+});
+
+test('Deepbrid Finder search paginates and retains already fetched pages', async () => {
+  const calls: number[] = [];
+  const makeResult = (token: string): DeepbridFinderResult => ({
+    token,
+    title: token,
+    category: '',
+    categoryName: '',
+    kind: '',
+    size: 1,
+    sizeHuman: '',
+    date: '',
+    sources: 1,
+  });
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      calls.push(offset);
+      if (offset === 0) {
+        return {
+          results: Array.from({ length: 50 }, (_, index) =>
+            makeResult(`result-${index}`)
+          ),
+          rawCount: 50,
+          invalidCount: 0,
+        };
+      }
+      if (offset === 50) {
+        return {
+          results: [makeResult('result-50')],
+          rawCount: 1,
+          invalidCount: 0,
+        };
+      }
+      throw new Error('unexpected extra page');
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+    onOutcome: (value) => (outcome = value),
+  });
+  assert.deepEqual(calls, [0, 50]);
+  assert.equal(results.length, 51);
+  assert.deepEqual(outcome, {
+    pagesFetched: 2,
+    pageRetries: 0,
+    resultCount: 51,
+    invalidResultCount: 0,
+    termination: 'no-more-results',
+  });
+
+  const partialClient = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      if ((options.offset ?? 0) === 0) {
+        return {
+          results: Array.from({ length: 50 }, (_, index) =>
+            makeResult(`partial-${index}`)
+          ),
+          rawCount: 50,
+          invalidCount: 0,
+        };
+      }
+      throw new Error('later page unavailable');
+    },
+  } as unknown as DeepbridFinderClient;
+  let partialOutcome: DeepbridFinderPaginationOutcome | undefined;
+  const partial = await searchDeepbridFinderPages(
+    partialClient,
+    'sample title',
+    {
+      deadline: Date.now() + 10_000,
+      onOutcome: (value) => (partialOutcome = value),
+    }
+  );
+  assert.equal(partial.length, 50);
+  assert.deepEqual(partialOutcome, {
+    pagesFetched: 1,
+    pageRetries: 0,
+    resultCount: 50,
+    invalidResultCount: 0,
+    termination: 'page-error',
+  });
+});
+
+test('Deepbrid Finder retries a transient page failure without skipping that page', async () => {
+  const calls: number[] = [];
+  const makeResult = (token: string): DeepbridFinderResult => ({
+    token,
+    title: token,
+    category: '',
+    categoryName: '',
+    kind: '',
+    size: 1,
+    sizeHuman: '',
+    date: '',
+    sources: 1,
+  });
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      calls.push(offset);
+      if (offset === 0) {
+        return {
+          results: Array.from({ length: 50 }, (_, index) =>
+            makeResult(`retry-${index}`)
+          ),
+          rawCount: 50,
+          invalidCount: 0,
+        };
+      }
+      if (calls.filter((value) => value === offset).length === 1) {
+        throw new TypeError('fetch failed');
+      }
+      return {
+        results: [makeResult('retry-50')],
+        rawCount: 1,
+        invalidCount: 0,
+      };
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+    onOutcome: (value) => (outcome = value),
+  });
+
+  assert.deepEqual(calls, [0, 50, 50]);
+  assert.equal(results.length, 51);
+  assert.deepEqual(outcome, {
+    pagesFetched: 2,
+    pageRetries: 1,
+    resultCount: 51,
+    invalidResultCount: 0,
+    termination: 'no-more-results',
+  });
+});
+
+test('Deepbrid Finder treats an empty page after a successful retry as complete', async () => {
+  let attempts = 0;
+  const client = {
+    searchPage: async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('fetch failed');
+      return { results: [], rawCount: 0, invalidCount: 0 };
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+    onOutcome: (value) => (outcome = value),
+  });
+
+  assert.deepEqual(results, []);
+  assert.equal(attempts, 2);
+  assert.deepEqual(outcome, {
+    pagesFetched: 1,
+    pageRetries: 1,
+    resultCount: 0,
+    invalidResultCount: 0,
+    termination: 'no-more-results',
+  });
+});
+
+test('Deepbrid Finder does not retry non-network TypeErrors', async () => {
+  let attempts = 0;
+  const client = {
+    searchPage: async () => {
+      attempts++;
+      throw new TypeError('invalid response adapter state');
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+  await assert.rejects(
+    searchDeepbridFinderPages(client, 'sample title', {
+      deadline: Date.now() + 10_000,
+      onOutcome: (value) => (outcome = value),
+    }),
+    /invalid response adapter state/
+  );
+
+  assert.equal(attempts, 1);
+  assert.deepEqual(outcome, {
+    pagesFetched: 0,
+    pageRetries: 0,
+    resultCount: 0,
+    invalidResultCount: 0,
+    termination: 'page-error',
+  });
+});
+
+test('Deepbrid Finder honors a 429 retry-after delay within the request budget', async () => {
+  let attempts = 0;
+  const client = {
+    searchPage: async () => {
+      attempts++;
+      if (attempts === 1) {
+        throw new DeepbridApiError('rate limited', 429, 'http-error', 1);
+      }
+      return { results: [], rawCount: 0, invalidCount: 0 };
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+    onOutcome: (value) => (outcome = value),
+  });
+
+  assert.deepEqual(results, []);
+  assert.equal(attempts, 2);
+  assert.equal(outcome?.pageRetries, 1);
+  assert.equal(outcome?.termination, 'no-more-results');
+});
+
+test('Deepbrid Finder caps repeated zero-cooldown 429 responses at two retries', async () => {
+  let attempts = 0;
+  const client = {
+    searchPage: async () => {
+      attempts++;
+      throw new DeepbridApiError('rate limited', 429, 'http-error', 0);
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+  await assert.rejects(
+    searchDeepbridFinderPages(client, 'sample title', {
+      deadline: Date.now() + 10_000,
+      onOutcome: (value) => (outcome = value),
+    }),
+    /rate limited/
+  );
+
+  assert.equal(attempts, 3);
+  assert.equal(outcome?.pageRetries, 2);
+  assert.equal(outcome?.termination, 'page-error');
+});
+
+test('Deepbrid Finder aborts during retry backoff without starting another page request', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+  const abortTimer = setTimeout(() => controller.abort(), 20);
+  const client = {
+    searchPage: async () => {
+      attempts++;
+      throw new TypeError('fetch failed');
+    },
+  } as unknown as DeepbridFinderClient;
+
+  try {
+    await assert.rejects(
+      searchDeepbridFinderPages(client, 'sample title', {
+        deadline: Date.now() + 10_000,
+        signal: controller.signal,
+        onOutcome: (value) => (outcome = value),
+      }),
+      /fetch failed/
+    );
+  } finally {
+    clearTimeout(abortTimer);
+  }
+
+  assert.equal(attempts, 1);
+  assert.equal(outcome?.pageRetries, 0);
+  assert.equal(outcome?.termination, 'aborted');
+});
+
+test('Deepbrid Finder does not retry authentication failures', async () => {
+  for (const status of [401, 403]) {
+    let attempts = 0;
+    const error = new DeepbridApiError('unauthorized', status, 'http-error');
+    const client = {
+      searchPage: async () => {
+        attempts++;
+        throw error;
+      },
+    } as unknown as DeepbridFinderClient;
+    let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+    await assert.rejects(
+      searchDeepbridFinderPages(client, 'sample title', {
+        deadline: Date.now() + 10_000,
+        onOutcome: (value) => (outcome = value),
+      }),
+      (caught) => caught === error
+    );
+
+    assert.equal(attempts, 1);
+    assert.equal(outcome?.pageRetries, 0);
+    assert.equal(outcome?.termination, 'page-error');
+  }
+});
+
+test('Deepbrid Finder bounds transient page retries and marks partial results incomplete', async () => {
+  const calls: number[] = [];
+  const makeResult = (token: string): DeepbridFinderResult => ({
+    token,
+    title: token,
+    category: '',
+    categoryName: '',
+    kind: '',
+    size: 1,
+    sizeHuman: '',
+    date: '',
+    sources: 1,
+  });
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      calls.push(offset);
+      if (offset === 0) {
+        return {
+          results: Array.from({ length: 50 }, (_, index) =>
+            makeResult(`partial-retry-${index}`)
+          ),
+          rawCount: 50,
+          invalidCount: 0,
+        };
+      }
+      throw new TypeError('fetch failed');
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+    onOutcome: (value) => (outcome = value),
+  });
+
+  assert.deepEqual(calls, [0, 50, 50, 50]);
+  assert.equal(results.length, 50);
+  assert.deepEqual(outcome, {
+    pagesFetched: 1,
+    pageRetries: 2,
+    resultCount: 50,
+    invalidResultCount: 0,
+    termination: 'page-error',
+  });
+  assert.equal(summarizeDeepbridPagination([outcome!]).incompleteQueries, 1);
+});
+
+test('Deepbrid Finder continues after malformed rows in a full provider page', async () => {
+  const offsets: number[] = [];
+  const makeResult = (token: string): DeepbridFinderResult => ({
+    token,
+    title: token,
+    category: '',
+    categoryName: '',
+    kind: '',
+    size: 1,
+    sizeHuman: '',
+    date: '',
+    sources: 1,
+  });
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      offsets.push(offset);
+      if (offset === 0) {
+        return {
+          results: Array.from({ length: 49 }, (_, index) =>
+            makeResult(`valid-${index}`)
+          ),
+          rawCount: 50,
+          invalidCount: 1,
+        };
+      }
+      return {
+        results: [makeResult('later-valid')],
+        rawCount: 1,
+        invalidCount: 0,
+      };
+    },
+  } as unknown as DeepbridFinderClient;
+
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+  });
+  assert.deepEqual(offsets, [0, 50]);
+  assert.equal(results.length, 50);
+  assert.equal(
+    results.some((result) => result.token === 'later-valid'),
+    true
+  );
+});
+
+test('Deepbrid Finder continues through bounded all-invalid full pages', async () => {
+  const offsets: number[] = [];
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      offsets.push(offset);
+      return { results: [], rawCount: 50, invalidCount: 50 };
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+    onOutcome: (value) => (outcome = value),
+  });
+
+  assert.deepEqual(offsets, [0, 50, 100]);
+  assert.deepEqual(results, []);
+  assert.deepEqual(outcome, {
+    pagesFetched: 3,
+    pageRetries: 0,
+    resultCount: 0,
+    invalidResultCount: 150,
+    termination: 'invalid-page-limit',
+  });
+});
+
+test('Deepbrid Finder reports deadline pagination while retaining prior pages', async () => {
+  let now = 0;
+  const client = {
+    searchPage: async () => {
+      now = 1_000;
+      return {
+        results: Array.from({ length: 50 }, (_, index) => ({
+          token: `deadline-${index}`,
+          title: `deadline-${index}`,
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1,
+          sizeHuman: '',
+          date: '',
+          sources: 1,
+        })),
+        rawCount: 50,
+        invalidCount: 0,
+      };
+    },
+  } as unknown as DeepbridFinderClient;
+  let outcome: DeepbridFinderPaginationOutcome | undefined;
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: 1_500,
+    now: () => now,
+    onOutcome: (value) => (outcome = value),
+  });
+
+  assert.equal(results.length, 50);
+  assert.deepEqual(outcome, {
+    pagesFetched: 1,
+    pageRetries: 0,
+    resultCount: 50,
+    invalidResultCount: 0,
+    termination: 'deadline',
+  });
+});
+
+test('Deepbrid queued requests use the remaining deadline budget at execution time', async () => {
+  let receivedTimeout = 0;
+  const result = await runWithinDeepbridRequestBudget(
+    20_000,
+    () => 15_000,
+    undefined,
+    async (timeoutMs) => {
+      receivedTimeout = timeoutMs;
+      return 'ok';
+    }
+  );
+
+  assert.equal(result, 'ok');
+  assert.equal(receivedTimeout, 5_000);
+});
+
+test('Deepbrid queued requests do not start after the request budget expires', async () => {
+  let called = false;
+  await assert.rejects(
+    runWithinDeepbridRequestBudget(
+      1_000,
+      () => 500,
+      undefined,
+      async () => {
+        called = true;
+        return 'unexpected';
+      }
+    ),
+    { name: 'AbortError' }
+  );
+  assert.equal(called, false);
+});
+
+test('Deepbrid queued requests recalculate their timeout after waiting in the queue', async () => {
+  let now = 1_000;
+  let receivedTimeout = 0;
+  const queued = async <T>(task: () => Promise<T>): Promise<T> => {
+    now = 8_500;
+    return task();
+  };
+
+  const result = await runQueuedDeepbridRequest(
+    10_000,
+    () => now,
+    undefined,
+    queued,
+    async (remainingMs) => {
+      receivedTimeout = remainingMs;
+      return 'ok';
+    }
+  );
+
+  assert.equal(result, 'ok');
+  assert.equal(receivedTimeout, 1_500);
+});
+
+test('Deepbrid queued requests never start after expiring in the queue', async () => {
+  let now = 1_000;
+  let called = false;
+  const queued = async <T>(task: () => Promise<T>): Promise<T> => {
+    now = 9_300;
+    return task();
+  };
+
+  await assert.rejects(
+    runQueuedDeepbridRequest(
+      10_000,
+      () => now,
+      undefined,
+      queued,
+      async () => {
+        called = true;
+        return 'unexpected';
+      }
+    ),
+    { name: 'AbortError' }
+  );
+  assert.equal(called, false);
+});
+
+test('Deepbrid pagination summary distinguishes complete and incomplete terminations', () => {
+  assert.deepEqual(
+    summarizeDeepbridPagination([
+      {
+        pagesFetched: 2,
+        pageRetries: 0,
+        resultCount: 51,
+        invalidResultCount: 0,
+        termination: 'no-more-results',
+      },
+      {
+        pagesFetched: 1,
+        pageRetries: 0,
+        resultCount: 50,
+        invalidResultCount: 0,
+        termination: 'page-error',
+      },
+      {
+        pagesFetched: 1,
+        pageRetries: 0,
+        resultCount: 50,
+        invalidResultCount: 0,
+        termination: 'deadline',
+      },
+    ]),
+    {
+      pagesFetched: 4,
+      pageRetries: 0,
+      invalidResultCount: 0,
+      incompleteQueries: 2,
+      terminationCounts: {
+        'no-more-results': 1,
+        deadline: 1,
+        aborted: 0,
+        'page-error': 1,
+        'repeated-page': 0,
+        'invalid-page-limit': 0,
+      },
+    }
   );
 });
 

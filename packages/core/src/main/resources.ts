@@ -48,6 +48,9 @@ import type {
   AIOStreamsResponse,
 } from './types.js';
 import { buildStatistics } from './statistics.js';
+import { countDeepbridFinderStreams } from '../streams/deepbrid-observability.js';
+import { applyDeepbridSubtitleConversion } from '../builtins/deepbrid-usenet/subtitles.js';
+import { createDeepbridSubtitleConversionUrl } from '../builtins/deepbrid-usenet/playback.js';
 import { precacheCache } from './caches.js';
 import {
   applyPosterModifications,
@@ -67,6 +70,26 @@ import type { AddonDispositionMap } from '../streams/fetcher.js';
 const logger = createLogger('core');
 
 const PING_TIMEOUT_MS = 10_000;
+
+/** Whether late-created streams need the instance-wide release-blocklist pass. */
+export function shouldFilterLateStreamsForBlocklist(
+  isMeta: boolean,
+  hasGlobalDeepbridCopies: boolean,
+  hasServiceWrappedStreams: boolean
+): boolean {
+  return isMeta || hasGlobalDeepbridCopies || hasServiceWrappedStreams;
+}
+
+/**
+ * Progressive snapshots are provisional cumulative views. External NZB
+ * resolution is provider work and must run only once against the authoritative
+ * final addon result, not again for every Finder progress update.
+ */
+export function shouldResolveGlobalDeepbrid(
+  progressiveSnapshot: boolean
+): boolean {
+  return !progressiveSnapshot;
+}
 
 /** Shape returned by getStreams */
 export type StreamsResponse = AIOStreamsResponse<{
@@ -283,7 +306,8 @@ export async function processStreams(
     sameReleaseLimit: number;
     duplicateStaggerMs: number;
     onlySameReleaseFailover: boolean;
-  }
+  },
+  progressiveSnapshot: boolean = false
 ): Promise<{
   streams: ParsedStream[];
   errors: AIOStreamsError[];
@@ -304,6 +328,12 @@ export async function processStreams(
   const { type, id } = context;
   let processedStreams = streams;
   let errors: AIOStreamsError[] = [];
+  const finderStageCounts: Record<string, number> = {
+    afterFetcher: countDeepbridFinderStreams(streams),
+  };
+  const recordFinderStage = (stage: string, current: ParsedStream[]) => {
+    finderStageCounts[stage] = countDeepbridFinderStreams(current);
+  };
 
   let metaFilterMs = 0;
   let serviceWrapMs = 0;
@@ -329,17 +359,20 @@ export async function processStreams(
     await withMediaInfo(processedStreams);
     const metaFilterStart = Date.now();
     processedStreams = await ctx.filterer.filter(processedStreams, context);
+    recordFinderStage('afterMetaFilter', processedStreams);
     metaFilterMs = Date.now() - metaFilterStart;
   }
 
   const preServiceWrapIds = new Set(processedStreams.map((s) => s.id));
   const globalDeepbridStart = Date.now();
-  const globalDeepbrid = await resolveGlobalDeepbridNzbs(
-    processedStreams,
-    context,
-    ctx.userData,
-    ctx.addons
-  );
+  const globalDeepbrid = shouldResolveGlobalDeepbrid(progressiveSnapshot)
+    ? await resolveGlobalDeepbridNzbs(
+        processedStreams,
+        context,
+        ctx.userData,
+        ctx.addons
+      )
+    : { streams: processedStreams, errors: [], hasNewStreams: false };
   if (globalDeepbrid.hasNewStreams) {
     processedStreams = await ctx.filterer.filter(
       globalDeepbrid.streams,
@@ -348,6 +381,30 @@ export async function processStreams(
   } else {
     processedStreams = globalDeepbrid.streams;
   }
+  recordFinderStage('afterGlobalDeepbridFilter', processedStreams);
+  const globalDeepbridIds = new Set(
+    globalDeepbrid.streams
+      .filter((stream) => stream.id.endsWith('-deepbrid'))
+      .map((stream) => stream.id)
+  );
+  const countGlobalDeepbridByPreset = (streams: ParsedStream[]) =>
+    streams
+      .filter((stream) => globalDeepbridIds.has(stream.id))
+      .reduce<Record<string, number>>((counts, stream) => {
+        const preset = stream.addon.preset.type;
+        counts[preset] = (counts[preset] ?? 0) + 1;
+        return counts;
+      }, {});
+  logger.info(
+    {
+      generated: globalDeepbridIds.size,
+      afterFilter: processedStreams.filter((stream) =>
+        globalDeepbridIds.has(stream.id)
+      ).length,
+      byPresetAfterFilter: countGlobalDeepbridByPreset(processedStreams),
+    },
+    'Global Deepbrid copies after stream filtering'
+  );
   errors.push(...globalDeepbrid.errors);
   serviceWrapMs += Date.now() - globalDeepbridStart;
 
@@ -373,17 +430,35 @@ export async function processStreams(
     processedStreams = await ctx.filterer.filter(processedStreams, context);
     filterMs = Date.now() - filterStart;
   }
+  recordFinderStage('afterServiceWrap', processedStreams);
 
   // The fetcher path already blocklist-filtered its streams; this pass only
   // covers streams that appeared after it (meta requests and service
   // wrapping), and runs before dedup for the same failover-variant reason.
-  if (isMeta || resolvedResults.hasNewStreams) {
+  if (
+    shouldFilterLateStreamsForBlocklist(
+      isMeta,
+      globalDeepbrid.hasNewStreams,
+      resolvedResults.hasNewStreams
+    )
+  ) {
     processedStreams = await ctx.filterer.filterBlocklisted(processedStreams);
   }
+  recordFinderStage('afterLateBlocklist', processedStreams);
 
   const dedupStart = Date.now();
   processedStreams = await ctx.deduplicator.deduplicate(processedStreams);
+  recordFinderStage('afterDeduplication', processedStreams);
   deduplicationMs = Date.now() - dedupStart;
+  logger.info(
+    {
+      afterDeduplication: processedStreams.filter((stream) =>
+        globalDeepbridIds.has(stream.id)
+      ).length,
+      byPresetAfterDeduplication: countGlobalDeepbridByPreset(processedStreams),
+    },
+    'Global Deepbrid copies after deduplication'
+  );
 
   if (isMeta || resolvedResults.hasNewStreams) {
     const skipPerStreamIds =
@@ -399,6 +474,7 @@ export async function processStreams(
 
   const sortStart = Date.now();
   let finalStreams = await ctx.sorter.sort(processedStreams, context);
+  recordFinderStage('afterSort', finalStreams);
   sortMs = Date.now() - sortStart;
 
   if (failoverOpts?.position === 'beforeSEL') {
@@ -435,6 +511,7 @@ export async function processStreams(
     finalStreams,
     context
   );
+  recordFinderStage('afterStreamExpressionFilters', finalStreams);
   selMs = Date.now() - selStart;
 
   if (failoverOpts?.position === 'beforeLimiting') {
@@ -468,7 +545,17 @@ export async function processStreams(
 
   const limitStart = Date.now();
   finalStreams = await ctx.limiter.limit(finalStreams);
+  recordFinderStage('afterResultLimits', finalStreams);
   limitMs = Date.now() - limitStart;
+  logger.info(
+    {
+      afterLimit: finalStreams.filter((stream) =>
+        globalDeepbridIds.has(stream.id)
+      ).length,
+      byPresetAfterLimit: countGlobalDeepbridByPreset(finalStreams),
+    },
+    'Global Deepbrid copies after result limits'
+  );
 
   if (!failoverOpts?.position || failoverOpts.position === 'last') {
     if (failoverOpts) {
@@ -520,6 +607,7 @@ export async function processStreams(
     }
     return stream;
   });
+  recordFinderStage('afterProxy', finalStreams);
 
   finalStreams = decorateTorboxStreams(finalStreams, ctx.userData);
 
@@ -539,6 +627,12 @@ export async function processStreams(
     );
     finalStreams = streamsWithExternalDownloads;
   }
+
+  recordFinderStage('terminal', finalStreams);
+  logger.info(
+    { type, id, progressiveSnapshot, ...finderStageCounts },
+    'Deepbrid Finder native stream survival'
+  );
 
   return {
     streams: finalStreams,
@@ -770,7 +864,8 @@ export async function getStreams(
   id: string,
   type: string,
   preCaching: boolean = false,
-  onProgress?: StreamProgressCallback
+  onProgress?: StreamProgressCallback,
+  signal?: AbortSignal
 ): Promise<StreamsResponse> {
   logger.debug({ type, id }, 'handling stream request');
   const statistics: { title: string; description: string; forced?: boolean }[] =
@@ -792,8 +887,7 @@ export async function getStreams(
   const pipelineTtl = appConfig.resources.cache.pipeline.ttl;
   // A progressive request must execute the fetcher so that snapshots can be
   // delivered. It is intentionally never served from the final-result cache.
-  const usePipelineCache =
-    !preCaching && !onProgress && pipelineTtl > 0;
+  const usePipelineCache = !preCaching && !onProgress && pipelineTtl > 0;
   // Hash the full userData: it captures everything the pipeline output depends
   // on
   let pipelineCacheKey = '';
@@ -832,35 +926,42 @@ export async function getStreams(
     onProgress
       ? async (progress) => {
           if (progress.streams.length === 0) return;
+          let partial: Awaited<ReturnType<typeof processStreams>>;
           try {
             // Reuse the canonical AIOStreams processor for every snapshot, so
             // Nuvio sees the same filtering, deduplication, sorting, SEL,
             // service routing, and URL proxying as the final response. The
             // expensive final-only side effects (statistics and subtitle
             // expansion) remain exclusive to the terminal response.
-            const partial = await processStreams(
+            partial = await processStreams(
               ctx,
               progress.streams,
               context,
-              false
+              false,
+              undefined,
+              true
             );
-            await onProgress({
-              success: true,
-              data: { streams: partial.streams, statistics: [] },
-              errors: [...progress.errors, ...partial.errors],
-            });
           } catch (error) {
             logger.debug(
               {
                 type,
                 id,
-                error: error instanceof Error ? error.message : String(error),
+                error: error instanceof Error ? error.name : 'Error',
               },
               'progressive snapshot processing failed'
             );
+            return;
           }
+          // Keep delivery failures visible to the fetcher so the request-level
+          // abort can stop further provider work.
+          await onProgress({
+            success: true,
+            data: { streams: partial.streams, statistics: [] },
+            errors: [...progress.errors, ...partial.errors],
+          });
         }
-      : undefined
+      : undefined,
+    signal
   );
   const fetchMs = Date.now() - fetchStart;
 
@@ -1274,7 +1375,16 @@ export async function getSubtitles(
           id,
           parsedExtras.toString()
         );
-        if (subtitles) allSubtitles.push(...subtitles);
+        if (subtitles) {
+          allSubtitles.push(
+            ...applyDeepbridSubtitleConversion(
+              ctx,
+              subtitles,
+              addon.identifier,
+              createDeepbridSubtitleConversionUrl
+            )
+          );
+        }
       } catch (error) {
         errors.push({
           title: `[❌] ${getAddonName(addon)}`,
@@ -1284,7 +1394,11 @@ export async function getSubtitles(
     })
   );
 
-  return { success: true, data: allSubtitles, errors };
+  return {
+    success: true,
+    data: allSubtitles,
+    errors,
+  };
 }
 
 export async function getAddonCatalog(

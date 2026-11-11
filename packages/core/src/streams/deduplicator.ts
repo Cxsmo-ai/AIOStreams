@@ -32,9 +32,10 @@ type TiebreakerCmp = (
 const logger = createLogger('deduplicator');
 
 /**
- * Usenet deduplication domains. Deepbrid and TorBox intentionally compete for
- * the same release, while native AIOStreams/NNTP results remain independent
- * fallbacks and only deduplicate with their own service family.
+ * Keep resolver and source-addon domains distinct. Deepbrid copies from
+ * different indexers must remain visible as separate NZB choices; otherwise
+ * per-service dedup lets one indexer hide all the others. Duplicate results
+ * from the same indexer still share a domain and can be collapsed normally.
  */
 function usenetDeduplicationDomain(stream: ParsedStream): string {
   const isUsenet =
@@ -52,12 +53,19 @@ function usenetDeduplicationDomain(stream: ParsedStream): string {
     return 'native-stremio-nntp';
   }
   if (
-    stream.service?.id === constants.DEEPBRID_SERVICE ||
-    stream.service?.id === constants.TORBOX_SERVICE ||
-    stream.addon.identifier === 'deepbrid-usenet'
+    stream.addon.identifier === 'deepbrid-usenet' ||
+    stream.addon.preset.id === 'deepbrid-usenet'
   ) {
-    return 'deepbrid-torbox';
+    const playbackMode = stream.otherBehaviorHints?.deepbridPlaybackMode;
+    if (playbackMode === 'remux' || playbackMode === 'hls') {
+      return `deepbrid-finder:${playbackMode}`;
+    }
+    return 'deepbrid-finder';
   }
+  if (stream.service?.id === constants.DEEPBRID_SERVICE) {
+    return `deepbrid:${stream.addon.instanceId ?? stream.addon.preset.id ?? stream.addon.identifier}`;
+  }
+  if (stream.service?.id === constants.TORBOX_SERVICE) return 'torbox';
   return 'default';
 }
 
@@ -503,24 +511,6 @@ class StreamDeduplicator {
     };
     const aServiceIndex = serviceIndex(a.service?.id);
     const bServiceIndex = serviceIndex(b.service?.id);
-    const externalUsenetServices = new Set<string>([
-      constants.TORBOX_SERVICE,
-      constants.DEEPBRID_SERVICE,
-    ]);
-    const isExternalUsenetResolverPair =
-      usenetDeduplicationDomain(a) === 'deepbrid-torbox' &&
-      usenetDeduplicationDomain(b) === 'deepbrid-torbox' &&
-      externalUsenetServices.has(a.service?.id ?? '') &&
-      externalUsenetServices.has(b.service?.id ?? '') &&
-      a.service?.id !== b.service?.id;
-
-    // For equivalent external Usenet copies, the drag order under Services is
-    // authoritative—even when one copy is already owned. This is the explicit
-    // TB/DB resolver preference the user configured.
-    if (isExternalUsenetResolverPair && aServiceIndex !== bServiceIndex) {
-      return aServiceIndex - bServiceIndex;
-    }
-
     const lc = libraryCmp(a, b);
     if (lc !== 0) return lc;
 

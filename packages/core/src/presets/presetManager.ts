@@ -64,6 +64,7 @@ import { AStreamPreset } from './aStream.js';
 import { ZileanPreset } from './zilean.js';
 import { AnimeToshoPreset } from './animetosho.js';
 import { AnimeToshoNewPreset } from './animeToshoNew.js';
+import { CinemetaPreset } from './cinemeta.js';
 import { NewznabPreset } from './newznab.js';
 import { UnarrIndexerPreset } from './unarrIndexer.js';
 import { NewshostingIndexerPreset } from './newshostingIndexer.js';
@@ -149,6 +150,7 @@ let PRESET_LIST: string[] = [
   'penguplay',
   'nuvio-streams',
   'webstreamr',
+  'cinemeta',
   'hdhub',
   'flix-streams',
   'astream',
@@ -271,6 +273,8 @@ export class PresetManager {
         return PenguPlayPreset;
       case 'anime-kitsu':
         return AnimeKitsuPreset;
+      case 'cinemeta':
+        return CinemetaPreset;
       case 'nuvio-streams':
         return NuvioStreamsPreset;
       case 'webstreamr':

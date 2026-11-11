@@ -95,6 +95,9 @@ The upstream [Watch State protocol](https://docs.aiostreams.viren070.me/referenc
 - **TorrentClaw**: built-in source integration with TorrentClaw-specific result handling, metadata/catalog support where configured, and optional resolution through compatible services.
 - **TorrentClaw Unarr (index-only)**: uses Unarr for NZB discovery while playback is handled by the selected AIOStreams Usenet service. Optional quota controls are available.
 - **Newshosting indexer**: native account-backed search and NZB handoff to supported AIOStreams Usenet playback paths.
+- **Deepbrid Usenet Finder**: supports Direct Resolve, Indexer Only, and combined Finder-plus-external-Usenet routing. Finder pagination, bounded request deadlines, shared concurrency limits, cached probes, and progressive-result merging are designed to retain valid results without letting a slow page stall the whole response. A zero result cap is supported; request time and concurrency remain bounded.
+- **Deepbrid player delivery**: choose the native/direct byte-range path, Remux, HLS, or expose all three as separate stream choices. This transport setting is independent of Finder routing.
+- **Optional Deepbrid subtitle conversion**: eligible ASS/SSA/SUB tracks from other subtitle addons can be converted to WebVTT through the Deepbrid player converter. OpenSubtitles sources are excluded, and SRT/WebVTT remain unchanged.
 - **Harbrr**: an additional built-in source integration.
 - **Ordered NNTP fallback tiers**: a primary provider can be followed by explicitly ordered emergency tiers; older `isBackup` settings are mapped for compatibility.
 - **Addon performance aggregates**: daily source-level metrics help compare latency and result outcomes without storing request titles, media IDs, stream URLs, IP addresses, or credentials in the aggregate rows.
@@ -102,6 +105,18 @@ The upstream [Watch State protocol](https://docs.aiostreams.viren070.me/referenc
 ### Request and sync hardening
 
 The fork also adds URL/request validation and redirect controls, stronger authentication/CORS handling, and generation-aware tracker queues. These changes reduce specific request and stale-sync risks; they are not a security guarantee. Operators should still protect the configuration and manifest endpoints, keep instance secrets private, and use network-level controls appropriate to their deployment.
+
+### Selected upstream compatibility updates
+
+This integration branch also carries focused fixes from the newer official AIOStreams source where they fit the fork without replacing its tracker, Jellyfin, or Usenet work:
+
+- **Newznab SearchNZB discovery** recognizes the optional SearchNZB endpoint.
+- **Cinemeta catalog and metadata preset** provides configurable endpoint and request-timeout settings.
+- **Meteor result cleanup** filters provider placeholder entries such as no-results and support links.
+- **Jellyfin version-list efficiency** can defer external subtitle-addon lookup until a playback source is selected.
+- **Metadata accuracy** avoids assigning indexer-quality metadata when no language data exists, and recognizes additional Chinese language aliases.
+
+These are selective compatibility backports, not a claim that this fork has wholesale-merged every upstream architectural or client change. See the [official AIOStreams repository](https://github.com/Viren070/AIOStreams) and [release history](https://github.com/Viren070/AIOStreams/releases) for upstream changes outside this fork's compatibility set.
 
 ## AIOStreams application
 

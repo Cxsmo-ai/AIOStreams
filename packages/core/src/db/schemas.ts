@@ -297,14 +297,16 @@ const StreamProxyConfig = z.object({
 export type StreamProxyConfig = z.infer<typeof StreamProxyConfig>;
 
 const ResultLimitOptions = z.object({
-  global: z.number().min(1).optional(),
-  service: z.number().min(1).optional(),
-  addon: z.number().min(1).optional(),
-  resolution: z.number().min(1).optional(),
-  quality: z.number().min(1).optional(),
-  streamType: z.number().min(1).optional(),
-  indexer: z.number().min(1).optional(),
-  releaseGroup: z.number().min(1).optional(),
+  // Zero is the explicit "unlimited" value. StreamLimiter treats zero as
+  // disabled, while positive values remain hard caps.
+  global: z.number().min(0).optional(),
+  service: z.number().min(0).optional(),
+  addon: z.number().min(0).optional(),
+  resolution: z.number().min(0).optional(),
+  quality: z.number().min(0).optional(),
+  streamType: z.number().min(0).optional(),
+  indexer: z.number().min(0).optional(),
+  releaseGroup: z.number().min(0).optional(),
   mode: z.enum(['independent', 'conjunctive']).optional(),
 });
 

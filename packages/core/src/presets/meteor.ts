@@ -11,6 +11,7 @@ import { baseOptions, Preset } from './preset.js';
 import { constants, ServiceId } from '../utils/index.js';
 import { config as appConfig } from '../config/index.js';
 import { StreamParser, getLanguagesAfterMarker } from '../parser/index.js';
+import { isMeteorPlaceholder } from './meteor-placeholder.js';
 
 class MeteorStreamParser extends StreamParser {
   protected get indexerEmojis(): string[] {
@@ -22,6 +23,11 @@ class MeteorStreamParser extends StreamParser {
     currentParsedStream: ParsedStream
   ): boolean {
     return stream.name?.includes('📫') ?? false;
+  }
+
+  // These are UI placeholders from Meteor, not playable stream results.
+  protected override shouldSkip(stream: Stream): boolean {
+    return isMeteorPlaceholder(stream);
   }
 
   protected getStreamType(
