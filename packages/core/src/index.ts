@@ -116,6 +116,24 @@ export {
   testNabEndpoint,
   type NabNamespaceId,
 } from './builtins/index.js';
+export {
+  DeepbridFinderClient,
+  DeepbridOfficialClient,
+  DeepbridApiError,
+  getDeepbridFinderRequestReport,
+  assessDeepbridArchiveVolumes,
+  classifyDeepbridUploadFile,
+  isDeepbridArchiveName,
+  withDeepbridRateLimitRetry,
+  type DeepbridFinderRequestReport,
+  type DeepbridDownloadHistoryEntry,
+  type DeepbridUploadFileAssessment,
+  type DeepbridArchiveVolumeAssessment,
+  type DeepbridHistoryDeletionResult,
+  type DeepbridUploadInfo,
+  type DeepbridFolderFile,
+} from './builtins/deepbrid-usenet/client.js';
+export { parseNewshostingRelease } from './builtins/newshosting-indexer/release.js';
 export { PresetManager } from './presets/index.js';
 export {
   getTorrentClawSeasonMetadata,

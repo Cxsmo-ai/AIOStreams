@@ -35,6 +35,10 @@ const PlaybackPayloadSchema = z.object({
   url: z.url(),
   filename: z.string().min(1).max(512),
   size: z.number().nonnegative().optional(),
+  // Optional Finder identity enables a single on-demand refresh only after an
+  // expired direct link is rejected. Existing capabilities remain compatible.
+  finderToken: z.string().min(1).max(512).optional(),
+  finderArchives: z.boolean().optional(),
   // Independent of Finder routing (`direct` / `indexer` / `both`). Missing
   // values in existing v1 capabilities remain the original direct path.
   mode: z.enum(['direct', 'remux', 'hls', 'hls-asset']).optional(),

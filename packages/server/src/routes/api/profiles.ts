@@ -8,6 +8,7 @@ import {
   encryptString,
   isConfigUuid,
   MAX_PROFILES_PER_OWNER,
+  DeepbridOfficialClient,
   normaliseAlias,
   resolveConfigAlias,
   UserRepository,
@@ -18,6 +19,12 @@ import { z } from 'zod';
 import { userApiRateLimiter } from '../../middlewares/ratelimit.js';
 import { attachSession, requireSession } from '../../middlewares/auth.js';
 import { createResponse } from '../../utils/responses.js';
+import {
+  projectDeepbridFolderFiles,
+  projectDeepbridUploadDetails,
+} from '../../utils/deepbrid-upload.js';
+import { projectDeepbridFinderMetrics } from '../../utils/deepbrid-metrics.js';
+import { runDeepbridLocalSelfTests } from '../../utils/deepbrid-self-test.js';
 
 const router: Router = Router();
 const logger = createLogger('server');
@@ -69,6 +76,113 @@ const updateBody = z.object({
   label: z.string().trim().min(1).max(64).optional(),
   alias: z.string().nullable().optional(),
 });
+
+const historyQuery = z.object({
+  kind: z.enum(['downloads', 'uploads']).default('downloads'),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const historyDeleteBody = z.object({
+  kind: z.enum(['downloads', 'uploads']),
+  ids: z
+    .array(
+      z.union([
+        z.number().int().positive().safe(),
+        z.string().regex(/^[1-9]\d{0,15}$/),
+      ])
+    )
+    .min(1)
+    .max(100),
+  confirm: z.literal(true),
+});
+const folderResolveBody = z.object({
+  link: z.string().trim().min(1).max(2_048),
+});
+
+/** Resolve this owner's saved config and its own Deepbrid key; never accept a
+ * credential from the browser or fall back to another profile's service. */
+async function deepbridClientForProfile(
+  owner: string,
+  profileId: string
+): Promise<DeepbridOfficialClient> {
+  const secret = await ConfigProfileRepository.openSecret(owner, profileId);
+  if (!secret) throw notFound();
+
+  const { success, data: password } = decryptString(secret.encryptedPassword);
+  if (!success) {
+    await ConfigProfileRepository.markBroken(owner, profileId);
+    throw new APIError(
+      constants.ErrorCode.ENCRYPTION_ERROR,
+      undefined,
+      'This saved configuration must be relinked before account history can be opened.'
+    );
+  }
+
+  let userData;
+  try {
+    userData = await UserRepository.getUser(secret.uuid, password);
+  } catch (error) {
+    if (
+      error instanceof APIError &&
+      error.code === constants.ErrorCode.USER_INVALID_DETAILS
+    ) {
+      await ConfigProfileRepository.markBroken(owner, profileId);
+      throw new APIError(
+        constants.ErrorCode.USER_INVALID_DETAILS,
+        undefined,
+        'This saved configuration must be relinked before account history can be opened.'
+      );
+    }
+    throw error;
+  }
+  if (!userData) {
+    await ConfigProfileRepository.markBroken(owner, profileId);
+    throw new APIError(
+      constants.ErrorCode.USER_INVALID_DETAILS,
+      undefined,
+      'This saved configuration must be relinked before account history can be opened.'
+    );
+  }
+
+  const service = userData.services?.find(
+    (entry) => entry.id === constants.DEEPBRID_SERVICE
+  );
+  const apiKey = service?.credentials.apiKey;
+  if (!apiKey) {
+    throw new APIError(
+      constants.ErrorCode.BAD_REQUEST,
+      undefined,
+      'Deepbrid is not configured in this saved profile.'
+    );
+  }
+
+  await ConfigProfileRepository.markOpened(owner, profileId);
+  return new DeepbridOfficialClient(apiKey);
+}
+
+function logDeepbridHistoryFailure(error: unknown, operation: string): void {
+  const value =
+    error && typeof error === 'object'
+      ? (error as Record<string, unknown>)
+      : undefined;
+  const status = value?.status;
+  const code = value?.code;
+  logger.warn(
+    {
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      status:
+        typeof status === 'number' && Number.isInteger(status)
+          ? status
+          : undefined,
+      code:
+        typeof code === 'string' && /^[a-z0-9_-]{1,64}$/i.test(code)
+          ? code
+          : undefined,
+    },
+    operation
+  );
+}
 
 router.get('/', async (req, res, next) => {
   try {
@@ -298,6 +412,319 @@ router.post('/:id/open', async (req, res, next) => {
       error instanceof APIError
         ? error
         : new APIError(constants.ErrorCode.INTERNAL_SERVER_ERROR)
+    );
+  }
+});
+
+router.get('/:id/deepbrid/history', async (req, res, next) => {
+  const parsed = historyQuery.safeParse(req.query);
+  if (!parsed.success) {
+    next(
+      new APIError(
+        constants.ErrorCode.BAD_REQUEST,
+        undefined,
+        'Invalid Deepbrid history page.'
+      )
+    );
+    return;
+  }
+
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const { kind, limit, offset } = parsed.data;
+    let entries;
+    let hasNext: boolean;
+    if (kind === 'downloads') {
+      const page = await client.listDownloadsPage({ limit, offset });
+      entries = page.entries;
+      hasNext = page.hasNext;
+    } else {
+      // The upload endpoint currently exposes one list response, so page the
+      // returned snapshot locally and do not imply provider-side completeness.
+      const uploads = await client.listUploads();
+      const safeUploads = uploads.map((item) => ({
+        id: item.id,
+        filename: item.title.slice(0, 500),
+        date: item.addedAt?.slice(0, 80),
+      }));
+      entries = safeUploads.slice(offset, offset + limit);
+      hasNext = offset + entries.length < safeUploads.length;
+    }
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(
+      createResponse({
+        success: true,
+        data: { kind, limit, offset, entries, hasNext },
+      })
+    );
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid profile history request failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not load Deepbrid account history.'
+      )
+    );
+  }
+});
+
+router.get('/:id/deepbrid/uploads/:uploadId', async (req, res, next) => {
+  const uploadId = z
+    .string()
+    .regex(/^[1-9]\d{0,15}$/)
+    .safeParse(req.params.uploadId);
+  if (!uploadId.success) {
+    next(
+      new APIError(
+        constants.ErrorCode.BAD_REQUEST,
+        undefined,
+        'Invalid Deepbrid upload identifier.'
+      )
+    );
+    return;
+  }
+
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const upload = await client.getUploadInfo(uploadId.data);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(
+      createResponse({
+        success: true,
+        data: projectDeepbridUploadDetails(upload),
+      })
+    );
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid upload inspection failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not inspect this Deepbrid NZB upload.'
+      )
+    );
+  }
+});
+
+router.post('/:id/deepbrid/folder', async (req, res, next) => {
+  const parsed = folderResolveBody.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    next(
+      new APIError(
+        constants.ErrorCode.BAD_REQUEST,
+        undefined,
+        'Enter a supported Deepbrid folder link.'
+      )
+    );
+    return;
+  }
+
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const files = await client.resolveFolder(parsed.data.link, {
+      timeoutMs: 15_000,
+    });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(
+      createResponse({
+        success: true,
+        data: { files: projectDeepbridFolderFiles(files) },
+      })
+    );
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    const code =
+      error && typeof error === 'object'
+        ? (error as Record<string, unknown>).code
+        : undefined;
+    if (code === 'invalid-folder-url') {
+      next(
+        new APIError(
+          constants.ErrorCode.BAD_REQUEST,
+          undefined,
+          error instanceof Error
+            ? error.message
+            : 'Enter a supported Deepbrid folder link.'
+        )
+      );
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid folder resolution failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not resolve this Deepbrid folder.'
+      )
+    );
+  }
+});
+
+router.get('/:id/deepbrid/metrics', async (req, res, next) => {
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const report = client.getFinderRequestReport();
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(
+      createResponse({
+        success: true,
+        data: projectDeepbridFinderMetrics(report),
+      })
+    );
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid profile metrics request failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not load Deepbrid Finder performance metrics.'
+      )
+    );
+  }
+});
+
+router.post('/:id/deepbrid/self-test', async (req, res, next) => {
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const startedAt = Date.now();
+    let accountStatus: 'connected' | 'failed' = 'connected';
+    let failureKind:
+      | 'authentication'
+      | 'rate-limited'
+      | 'provider-error'
+      | 'network-error'
+      | undefined;
+    try {
+      // One bounded, read-only authenticated request verifies the saved key.
+      await client.getUser({ timeoutMs: 8_000 });
+    } catch (error) {
+      accountStatus = 'failed';
+      const status =
+        error && typeof error === 'object'
+          ? (error as Record<string, unknown>).status
+          : undefined;
+      failureKind =
+        status === 401 || status === 403
+          ? 'authentication'
+          : status === 429
+            ? 'rate-limited'
+            : typeof status === 'number' && status >= 500
+              ? 'provider-error'
+              : 'network-error';
+      logDeepbridHistoryFailure(
+        error,
+        'Deepbrid profile self-test auth failed'
+      );
+    }
+    const checks = await runDeepbridLocalSelfTests();
+    const allChecksPassed = checks.every((check) => check.status === 'passed');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(
+      createResponse({
+        success: true,
+        data: {
+          overall:
+            accountStatus === 'connected' && allChecksPassed
+              ? 'passed'
+              : 'failed',
+          account: {
+            status: accountStatus,
+            failureKind,
+            durationMs: Math.max(0, Date.now() - startedAt),
+          },
+          checks,
+        },
+      })
+    );
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid profile self-test failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not run the Deepbrid self-test.'
+      )
+    );
+  }
+});
+
+router.delete('/:id/deepbrid/history', async (req, res, next) => {
+  const parsed = historyDeleteBody.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    next(
+      new APIError(
+        constants.ErrorCode.BAD_REQUEST,
+        undefined,
+        'Select specific history entries and confirm the deletion.'
+      )
+    );
+    return;
+  }
+
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const { kind, ids } = parsed.data;
+    const result =
+      kind === 'downloads'
+        ? await client.deleteDownloads(ids, { confirm: true })
+        : await client.deleteUploads(ids, { confirm: true });
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(createResponse({ success: true, data: result }));
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(
+      error,
+      'Deepbrid profile history deletion failed'
+    );
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not delete the selected Deepbrid account history.'
+      )
     );
   }
 });

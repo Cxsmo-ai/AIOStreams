@@ -18,6 +18,111 @@ const finderSearchResponseCache = new DeepbridFinderResponseCache<
   maxEntries: 512,
 });
 
+interface InflightFinderSearch {
+  controller: AbortController;
+  promise: Promise<Record<string, unknown>>;
+  subscribers: number;
+  settled: boolean;
+}
+
+const inflightFinderSearches = new Map<string, InflightFinderSearch>();
+const MAX_INFLIGHT_FINDER_SEARCHES = 256;
+
+function inflightFinderSearchKey(
+  apiKey: string,
+  path: string,
+  clientTimeoutMs: number
+): string {
+  // Keep credentials and signed query paths out of the in-memory map keys.
+  return createHash('sha256')
+    .update(apiKey)
+    .update('\0')
+    .update(path)
+    .update('\0')
+    .update(String(clientTimeoutMs))
+    .digest('hex');
+}
+
+function subscribeToInflightFinderSearch(
+  key: string,
+  entry: InflightFinderSearch,
+  signal?: AbortSignal,
+  deadlineAtMs?: number
+): Promise<Record<string, unknown>> {
+  if (signal?.aborted) {
+    return Promise.reject(
+      signal.reason ?? new DOMException('Aborted', 'AbortError')
+    );
+  }
+
+  entry.subscribers++;
+  return new Promise((resolve, reject) => {
+    let released = false;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const release = (cancelled: boolean): boolean => {
+      if (released) return false;
+      released = true;
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      signal?.removeEventListener('abort', onAbort);
+      entry.subscribers = Math.max(0, entry.subscribers - 1);
+      if (cancelled && !entry.settled && entry.subscribers === 0) {
+        if (inflightFinderSearches.get(key) === entry) {
+          inflightFinderSearches.delete(key);
+        }
+        entry.controller.abort(new DOMException('Aborted', 'AbortError'));
+      }
+      return true;
+    };
+    const onAbort = () => {
+      if (!release(true)) return;
+      reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs)) {
+      const remainingMs = deadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        if (release(true)) {
+          reject(
+            new DeepbridApiError(
+              'Deepbrid Finder deadline expired before the shared result arrived.',
+              undefined,
+              'retry-exhausted',
+              undefined,
+              'wrapper_budget_before_attempt'
+            )
+          );
+        }
+        return;
+      }
+      deadlineTimer = setTimeout(
+        () => {
+          if (release(true)) {
+            reject(
+              new DeepbridApiError(
+                'Deepbrid Finder deadline expired before the shared result arrived.',
+                undefined,
+                'retry-exhausted',
+                undefined,
+                'wrapper_budget_before_attempt'
+              )
+            );
+          }
+        },
+        Math.min(remainingMs, 2_147_483_647)
+      );
+    }
+    entry.promise.then(
+      (value) => {
+        if (release(false)) resolve(structuredClone(value));
+      },
+      (error: unknown) => {
+        if (release(false)) reject(error);
+      }
+    );
+  });
+}
+
 export const DEEPBRID_API_BASE = 'https://www.deepbrid.com/api/v1';
 export const DEEPBRID_FINDER_USER_AGENT =
   'Deepbrid/1.0 (ios) DBX/AxkHbkTtYiXSijpzcRE5vGe73HK7qqrinpEz';
@@ -55,6 +160,15 @@ export interface DeepbridFinderRequestMetricsSnapshot {
   transportRetryRecoveriesByKind: Record<DeepbridFinderRequestKind, number>;
   queueWait: TimingSummary;
   responseHeaders: TimingSummary;
+  searchCache: {
+    freshHits: number;
+    coalescedRequests: number;
+    staleRateLimitFallbacks: number;
+    coldFetches: number;
+    coldFetchFailures: number;
+    freshLookup: TimingSummary;
+    coldFetch: TimingSummary;
+  };
   currentFinderRequestsInRollingMinute: number;
   currentFinderCountIsLowerBound: boolean;
   maxFinderRequestsInRollingMinute: number;
@@ -225,6 +339,13 @@ export class DeepbridFinderRequestMetrics {
   };
   private readonly queueWaitMs: number[] = [];
   private readonly responseHeaderMs: number[] = [];
+  private freshSearchCacheHits = 0;
+  private coalescedSearchRequests = 0;
+  private staleSearchCacheFallbacks = 0;
+  private coldSearchFetches = 0;
+  private coldSearchFetchFailures = 0;
+  private readonly freshSearchCacheLookupMs: number[] = [];
+  private readonly coldSearchFetchMs: number[] = [];
   private readonly requestRate = new BoundedRollingMinuteCounter();
   private rateLimitObservations = 0;
   private latestLimit: number | undefined;
@@ -300,6 +421,28 @@ export class DeepbridFinderRequestMetrics {
     this.actualRetryWaitMaxMs = Math.max(this.actualRetryWaitMaxMs, waitMs);
   }
 
+  recordFreshSearchCacheHit(elapsedMs: number): void {
+    this.freshSearchCacheHits++;
+    this.pushSample(this.freshSearchCacheLookupMs, Math.max(0, elapsedMs));
+  }
+
+  recordCoalescedSearchRequest(): void {
+    this.coalescedSearchRequests++;
+  }
+
+  recordColdSearchFetch(elapsedMs: number): void {
+    this.coldSearchFetches++;
+    this.pushSample(this.coldSearchFetchMs, Math.max(0, elapsedMs));
+  }
+
+  recordColdSearchFetchFailure(): void {
+    this.coldSearchFetchFailures++;
+  }
+
+  recordStaleSearchCacheFallback(): void {
+    this.staleSearchCacheFallbacks++;
+  }
+
   snapshot(): DeepbridFinderRequestMetricsSnapshot {
     const window = this.requestRate.snapshot(Date.now());
     return {
@@ -314,6 +457,15 @@ export class DeepbridFinderRequestMetrics {
       },
       queueWait: summarizeTimings(this.queueWaitMs),
       responseHeaders: summarizeTimings(this.responseHeaderMs),
+      searchCache: {
+        freshHits: this.freshSearchCacheHits,
+        coalescedRequests: this.coalescedSearchRequests,
+        staleRateLimitFallbacks: this.staleSearchCacheFallbacks,
+        coldFetches: this.coldSearchFetches,
+        coldFetchFailures: this.coldSearchFetchFailures,
+        freshLookup: summarizeTimings(this.freshSearchCacheLookupMs),
+        coldFetch: summarizeTimings(this.coldSearchFetchMs),
+      },
       currentFinderRequestsInRollingMinute: window.currentRequests,
       currentFinderCountIsLowerBound: window.currentIsLowerBound,
       maxFinderRequestsInRollingMinute: window.maxRequests,
@@ -339,6 +491,122 @@ export class DeepbridFinderRequestMetrics {
   private pushSample(samples: number[], value: number): void {
     if (samples.length === METRICS_SAMPLE_CAP) samples.shift();
     samples.push(value);
+  }
+}
+
+const DEEPBRID_METRICS_REGISTRY_LIMIT = 256;
+const DEEPBRID_METRICS_IDLE_TTL_MS = 30 * 60_000;
+const deepbridFinderMetricsByAccount = new Map<
+  string,
+  { metrics: DeepbridFinderRequestMetrics; touchedAt: number }
+>();
+
+function getAccountFinderMetrics(apiKey: string): DeepbridFinderRequestMetrics {
+  const now = Date.now();
+  for (const [key, entry] of deepbridFinderMetricsByAccount) {
+    if (now - entry.touchedAt >= DEEPBRID_METRICS_IDLE_TTL_MS) {
+      deepbridFinderMetricsByAccount.delete(key);
+    }
+  }
+
+  const key = createHash('sha256').update(apiKey).digest('hex');
+  const existing = deepbridFinderMetricsByAccount.get(key);
+  if (existing) {
+    existing.touchedAt = now;
+    deepbridFinderMetricsByAccount.delete(key);
+    deepbridFinderMetricsByAccount.set(key, existing);
+    return existing.metrics;
+  }
+
+  while (
+    deepbridFinderMetricsByAccount.size >= DEEPBRID_METRICS_REGISTRY_LIMIT
+  ) {
+    const oldestKey = deepbridFinderMetricsByAccount.keys().next().value;
+    if (oldestKey === undefined) break;
+    deepbridFinderMetricsByAccount.delete(oldestKey);
+  }
+  const metrics = new DeepbridFinderRequestMetrics();
+  deepbridFinderMetricsByAccount.set(key, { metrics, touchedAt: now });
+  return metrics;
+}
+
+/** Account-scoped, bounded, in-process Finder telemetry for the profile UI. */
+export function getDeepbridFinderRequestReport(
+  apiKey: string
+): DeepbridFinderRequestReport {
+  return {
+    ...getAccountFinderMetrics(apiKey).snapshot(),
+    sharedAccountGate: getDeepbridApiRequestGateMetrics(apiKey),
+  };
+}
+
+class AccountAwareDeepbridFinderRequestMetrics extends DeepbridFinderRequestMetrics {
+  constructor(private readonly accountMetrics: DeepbridFinderRequestMetrics) {
+    super();
+  }
+
+  override recordStart(
+    kind: DeepbridFinderRequestKind,
+    queuedAtMs: number,
+    startedAtMs: number
+  ): void {
+    super.recordStart(kind, queuedAtMs, startedAtMs);
+    this.accountMetrics.recordStart(kind, queuedAtMs, startedAtMs);
+  }
+
+  override recordResponse(
+    status: number,
+    headers: Headers,
+    elapsedMs: number
+  ): void {
+    super.recordResponse(status, headers, elapsedMs);
+    this.accountMetrics.recordResponse(status, headers, elapsedMs);
+  }
+
+  override recordTransportFailure(
+    kind: DeepbridFinderRequestKind,
+    error: unknown
+  ): void {
+    super.recordTransportFailure(kind, error);
+    this.accountMetrics.recordTransportFailure(kind, error);
+  }
+
+  override recordTransportRetry(
+    kind: DeepbridFinderRequestKind,
+    recovered: boolean
+  ): void {
+    super.recordTransportRetry(kind, recovered);
+    this.accountMetrics.recordTransportRetry(kind, recovered);
+  }
+
+  override recordRetryWait(elapsedMs: number): void {
+    super.recordRetryWait(elapsedMs);
+    this.accountMetrics.recordRetryWait(elapsedMs);
+  }
+
+  override recordFreshSearchCacheHit(elapsedMs: number): void {
+    super.recordFreshSearchCacheHit(elapsedMs);
+    this.accountMetrics.recordFreshSearchCacheHit(elapsedMs);
+  }
+
+  override recordCoalescedSearchRequest(): void {
+    super.recordCoalescedSearchRequest();
+    this.accountMetrics.recordCoalescedSearchRequest();
+  }
+
+  override recordColdSearchFetch(elapsedMs: number): void {
+    super.recordColdSearchFetch(elapsedMs);
+    this.accountMetrics.recordColdSearchFetch(elapsedMs);
+  }
+
+  override recordColdSearchFetchFailure(): void {
+    super.recordColdSearchFetchFailure();
+    this.accountMetrics.recordColdSearchFetchFailure();
+  }
+
+  override recordStaleSearchCacheFallback(): void {
+    super.recordStaleSearchCacheFallback();
+    this.accountMetrics.recordStaleSearchCacheFallback();
   }
 }
 
@@ -825,6 +1093,8 @@ const FileSchema = z.looseObject({
   filesize: z.coerce.number().nonnegative().catch(0),
   size_human: z.coerce.string().optional(),
   sizeHuman: z.coerce.string().optional(),
+  unreachable: z.string().optional(),
+  video: z.boolean().optional(),
   nzb: z.string().optional(),
   nzb_url: z.string().optional(),
   nzbUrl: z.string().optional(),
@@ -849,6 +1119,123 @@ export interface DeepbridFinderFile {
   size: number;
   sizeHuman: string;
   nzbUrl?: string;
+  /** Provider-declared reason this file cannot currently be served. */
+  unreachable?: string;
+  /** Provider hint only; local stream eligibility still checks filename and URL. */
+  providerVideo?: boolean;
+}
+
+export interface DeepbridArchiveVolumeAssessment {
+  hasArchives: boolean;
+  incomplete: boolean;
+  unreachableArchiveCount: number;
+  missingVolumeNumbers: number[];
+}
+
+/**
+ * Detects only missing indices visible inside a listed split-archive sequence.
+ * It does not infer a missing final volume when the provider exposes no total.
+ */
+export function assessDeepbridArchiveVolumes(
+  files: readonly Pick<DeepbridFinderFile, 'name' | 'unreachable'>[]
+): DeepbridArchiveVolumeAssessment {
+  const sequences = new Map<
+    string,
+    { expectedFirst: number; values: Set<number> }
+  >();
+  let hasArchives = false;
+  let unreachableArchiveCount = 0;
+  const add = (key: string, value: number, expectedFirst: number) => {
+    let sequence = sequences.get(key);
+    if (!sequence) {
+      sequence = { expectedFirst, values: new Set() };
+      sequences.set(key, sequence);
+    }
+    sequence.values.add(value);
+  };
+
+  for (const file of files) {
+    const name = file.name.trim();
+    if (!isDeepbridArchiveName(name)) continue;
+    hasArchives = true;
+    if (file.unreachable) unreachableArchiveCount++;
+
+    let match = /^(.*)\.part(\d+)\.rar$/i.exec(name);
+    if (match) {
+      add(`rar-part:${match[1].toLowerCase()}`, Number(match[2]), 1);
+      continue;
+    }
+    match = /^(.*)\.(?:7z|zip)\.(\d{3,})$/i.exec(name);
+    if (match) {
+      add(`split-archive:${match[1].toLowerCase()}`, Number(match[2]), 1);
+      continue;
+    }
+    match = /^(.*)\.r(\d{2,})$/i.exec(name);
+    if (match) {
+      add(`rar-volume:${match[1].toLowerCase()}`, Number(match[2]), 0);
+      continue;
+    }
+    match = /^(.*)\.z(\d{2,})$/i.exec(name);
+    if (match) add(`zip-volume:${match[1].toLowerCase()}`, Number(match[2]), 1);
+  }
+
+  const missingVolumeNumbers: number[] = [];
+  let missingVolumeCount = 0;
+  for (const sequence of sequences.values()) {
+    const ordered = [...sequence.values].sort((a, b) => a - b);
+    if (!ordered.length) continue;
+    const last = ordered[ordered.length - 1];
+    // Guard against implausibly huge names causing a CPU/memory spike.
+    if (last - sequence.expectedFirst > 100_000) continue;
+    const present = sequence.values;
+    for (let index = sequence.expectedFirst; index <= last; index++) {
+      if (present.has(index)) continue;
+      missingVolumeCount++;
+      if (missingVolumeNumbers.length < 100) missingVolumeNumbers.push(index);
+    }
+  }
+
+  return {
+    hasArchives,
+    incomplete: unreachableArchiveCount > 0 || missingVolumeCount > 0,
+    unreachableArchiveCount,
+    missingVolumeNumbers,
+  };
+}
+
+export type DeepbridUploadFileAssessment = {
+  playableCandidate: boolean;
+  status: 'candidate' | 'unreachable' | 'non-video';
+  reason?:
+    'provider-unreachable' | 'missing-link' | 'not-video' | 'untrusted-link';
+};
+
+/** Classify provider upload entries without equating a link with verified playback. */
+export function classifyDeepbridUploadFile(
+  file: Pick<DeepbridFinderFile, 'name' | 'link' | 'unreachable'>
+): DeepbridUploadFileAssessment {
+  if (file.unreachable) {
+    return {
+      playableCandidate: false,
+      status: 'unreachable',
+      reason: 'provider-unreachable',
+    };
+  }
+  if (!file.link) {
+    return {
+      playableCandidate: false,
+      status: 'unreachable',
+      reason: 'missing-link',
+    };
+  }
+  if (!isDeepbridVideoName(file.name)) {
+    return {
+      playableCandidate: false,
+      status: 'non-video',
+      reason: 'not-video',
+    };
+  }
+  return { playableCandidate: true, status: 'candidate' };
 }
 
 export interface DeepbridFinderContent {
@@ -864,6 +1251,12 @@ export interface DeepbridUploadInfo {
   files: DeepbridFinderFile[];
 }
 
+export interface DeepbridFolderFile extends DeepbridFinderFile {
+  playableCandidate: boolean;
+  status: DeepbridUploadFileAssessment['status'];
+  reason?: DeepbridUploadFileAssessment['reason'];
+}
+
 export interface DeepbridAddResult {
   id?: string;
   title: string;
@@ -877,6 +1270,62 @@ export interface DeepbridUpload {
   sourceUrl?: string;
   hash?: string;
   addedAt?: string;
+}
+
+/** Secret-free view of one Deepbrid download-history record. */
+export interface DeepbridDownloadHistoryEntry {
+  id: string;
+  filename: string;
+  size?: string;
+  date?: string;
+}
+
+export interface DeepbridHistoryDeletionResult {
+  deleted: number;
+  ids: string[];
+  notFound: string[];
+}
+
+export interface DeepbridDownloadHistoryPage {
+  entries: DeepbridDownloadHistoryEntry[];
+  /** Number of records returned by the provider before local ID validation. */
+  providerCount: number;
+  /** Whether a full provider page was returned and another offset may exist. */
+  hasNext: boolean;
+}
+
+function normalizeDeepbridHistoryId(value: string | number): string {
+  const id = String(value).trim();
+  if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) {
+    throw new DeepbridApiError(
+      'Deepbrid history IDs must be positive integers.',
+      undefined,
+      'invalid-history-ids'
+    );
+  }
+  return String(Number(id));
+}
+
+function validDeepbridHistoryId(value: unknown): value is string | number {
+  if (typeof value !== 'string' && typeof value !== 'number') return false;
+  try {
+    normalizeDeepbridHistoryId(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeDeepbridHistoryIdList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!validDeepbridHistoryId(item)) return [];
+    try {
+      return [normalizeDeepbridHistoryId(item)];
+    } catch {
+      return [];
+    }
+  });
 }
 
 export interface DeepbridTorrent {
@@ -1143,6 +1592,38 @@ export function validateDeepbridDownloadUrl(value: string): URL {
   return url;
 }
 
+/** Only send links for folder hosts supported by Deepbrid's public API. */
+export function validateDeepbridFolderUrl(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new DeepbridApiError(
+      'Enter a valid supported folder link.',
+      undefined,
+      'invalid-folder-url'
+    );
+  }
+  const host = url.hostname.toLowerCase().replace(/\.$/, '');
+  const allowed = ['terabox.com', 'mega.nz', 'gofile.io'].some(
+    (domain) => host === domain || host.endsWith(`.${domain}`)
+  );
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    !allowed ||
+    url.port
+  ) {
+    throw new DeepbridApiError(
+      'Folder links must use HTTPS on a Deepbrid-supported host.',
+      undefined,
+      'invalid-folder-url'
+    );
+  }
+  return url;
+}
+
 /** Normalize Finder NZB references before forwarding them to another
  * resolver. Only HTTPS links on Deepbrid's own download hosts are accepted. */
 export function normalizeDeepbridFinderNzbUrl(
@@ -1236,7 +1717,23 @@ function parseDeepbridFiles(value: Record<string, unknown>) {
       file.link ||
       file.download ||
       '';
-    if (!name || !link) return [];
+    if (!name) return [];
+    if (!link) {
+      return file.unreachable
+        ? [
+            {
+              name,
+              link: '',
+              size: file.filesize || file.size,
+              sizeHuman: file.size_human || file.sizeHuman || '',
+              unreachable: file.unreachable.slice(0, 128),
+              ...(typeof file.video === 'boolean'
+                ? { providerVideo: file.video }
+                : {}),
+            },
+          ]
+        : [];
+    }
     try {
       const absoluteLink = link.startsWith('/')
         ? new URL(link, 'https://www.deepbrid.com').toString()
@@ -1247,6 +1744,12 @@ function parseDeepbridFiles(value: Record<string, unknown>) {
           link: validateDeepbridDownloadUrl(absoluteLink).toString(),
           size: file.filesize || file.size,
           sizeHuman: file.size_human || file.sizeHuman || '',
+          ...(file.unreachable
+            ? { unreachable: file.unreachable.slice(0, 128) }
+            : {}),
+          ...(typeof file.video === 'boolean'
+            ? { providerVideo: file.video }
+            : {}),
         },
       ];
     } catch {
@@ -1299,10 +1802,14 @@ export class DeepbridOfficialClient {
     }
   }
 
+  getFinderRequestReport(): DeepbridFinderRequestReport {
+    return getDeepbridFinderRequestReport(this.apiKey);
+  }
+
   private async requestJson(
     path: string,
     options: DeepbridRequestOptions & {
-      method?: 'GET' | 'POST';
+      method?: 'GET' | 'POST' | 'DELETE';
       body?: URLSearchParams;
     } = {}
   ): Promise<Record<string, unknown>> {
@@ -1398,6 +1905,7 @@ export class DeepbridOfficialClient {
 
       const retryAfter = retryAfterMs(response);
       if (
+        (options.method ?? 'GET') === 'GET' &&
         response.status === 429 &&
         attempt === 0 &&
         retryAfter !== undefined &&
@@ -1409,6 +1917,7 @@ export class DeepbridOfficialClient {
       }
       const retryDelayMs = Math.min(5_000, 500 * 2 ** attempt);
       if (
+        (options.method ?? 'GET') === 'GET' &&
         (response.status === 502 || response.status === 503) &&
         attempt < 2 &&
         retryDelayMs + 250 <= deadlineAtMs - Date.now()
@@ -1475,15 +1984,27 @@ export class DeepbridOfficialClient {
     options: DeepbridRequestOptions = {}
   ): Promise<DeepbridUpload[]> {
     const json = await this.requestJson('/usenet/uploads', options);
-    const items = Array.isArray(json.items) ? json.items : [];
+    const nested =
+      json.data && typeof json.data === 'object' && !Array.isArray(json.data)
+        ? (json.data as Record<string, unknown>)
+        : undefined;
+    const items = Array.isArray(json.items)
+      ? json.items
+      : Array.isArray(json.uploads)
+        ? json.uploads
+        : Array.isArray(json.data)
+          ? json.data
+          : Array.isArray(nested?.items)
+            ? nested.items
+            : [];
     return items.flatMap((value) => {
       if (!value || typeof value !== 'object') return [];
       const item = value as Record<string, unknown>;
       const id = item.id;
-      if (typeof id !== 'string' && typeof id !== 'number') return [];
+      if (!validDeepbridHistoryId(id)) return [];
       return [
         {
-          id: String(id),
+          id: normalizeDeepbridHistoryId(id),
           title:
             typeof item.title === 'string'
               ? item.title
@@ -1499,6 +2020,131 @@ export class DeepbridOfficialClient {
         },
       ];
     });
+  }
+
+  async listDownloads(
+    options: DeepbridRequestOptions & { limit?: number; offset?: number } = {}
+  ): Promise<DeepbridDownloadHistoryEntry[]> {
+    return (await this.listDownloadsPage(options)).entries;
+  }
+
+  async listDownloadsPage(
+    options: DeepbridRequestOptions & { limit?: number; offset?: number } = {}
+  ): Promise<DeepbridDownloadHistoryPage> {
+    const limit = options.limit ?? 200;
+    const offset = options.offset ?? 0;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new DeepbridApiError(
+        'Deepbrid download history limit must be between 1 and 500.',
+        undefined,
+        'invalid-history-pagination'
+      );
+    }
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new DeepbridApiError(
+        'Deepbrid download history offset must be a non-negative integer.',
+        undefined,
+        'invalid-history-pagination'
+      );
+    }
+    const query = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    });
+    const json = await this.requestJson(`/downloads?${query}`, options);
+    const nested =
+      json.data && typeof json.data === 'object' && !Array.isArray(json.data)
+        ? (json.data as Record<string, unknown>)
+        : undefined;
+    const values = Array.isArray(json.data)
+      ? json.data
+      : Array.isArray(json.items)
+        ? json.items
+        : Array.isArray(json.downloads)
+          ? json.downloads
+          : Array.isArray(nested?.items)
+            ? nested.items
+            : [];
+    const entries = values.flatMap((value) => {
+      if (!value || typeof value !== 'object') return [];
+      const item = value as Record<string, unknown>;
+      const id = item.id;
+      if (!validDeepbridHistoryId(id)) return [];
+      return [
+        {
+          id: String(id),
+          filename:
+            typeof item.filename === 'string'
+              ? item.filename.slice(0, 500)
+              : '',
+          size:
+            typeof item.size === 'string' ? item.size.slice(0, 80) : undefined,
+          date:
+            typeof item.date === 'string' ? item.date.slice(0, 80) : undefined,
+        },
+      ];
+    });
+    return {
+      entries,
+      providerCount: values.length,
+      hasNext: values.length === limit,
+    };
+  }
+
+  /** Deletes selected account entries only; whole-history deletion is intentionally unsupported. */
+  async deleteUploads(
+    ids: readonly (string | number)[],
+    options: DeepbridRequestOptions & { confirm?: boolean } = {}
+  ): Promise<DeepbridHistoryDeletionResult> {
+    return this.deleteSelectedHistory('/usenet/uploads/delete', ids, options);
+  }
+
+  async deleteDownloads(
+    ids: readonly (string | number)[],
+    options: DeepbridRequestOptions & { confirm?: boolean } = {}
+  ): Promise<DeepbridHistoryDeletionResult> {
+    return this.deleteSelectedHistory('/downloads/delete', ids, options);
+  }
+
+  private async deleteSelectedHistory(
+    endpoint: '/usenet/uploads/delete' | '/downloads/delete',
+    rawIds: readonly (string | number)[],
+    options: DeepbridRequestOptions & { confirm?: boolean }
+  ): Promise<DeepbridHistoryDeletionResult> {
+    if (options.confirm !== true) {
+      throw new DeepbridApiError(
+        'Deleting Deepbrid history requires explicit confirmation.',
+        undefined,
+        'history-delete-confirmation-required'
+      );
+    }
+    if (!Array.isArray(rawIds) || rawIds.length < 1 || rawIds.length > 100) {
+      throw new DeepbridApiError(
+        'Select between 1 and 100 Deepbrid history entries.',
+        undefined,
+        'invalid-history-ids'
+      );
+    }
+    const ids = [...new Set(rawIds.map(normalizeDeepbridHistoryId))];
+    if (ids.length !== rawIds.length) {
+      throw new DeepbridApiError(
+        'Deepbrid history IDs must be unique positive integers.',
+        undefined,
+        'invalid-history-ids'
+      );
+    }
+    const query = new URLSearchParams({ ids: ids.join(',') });
+    const json = await this.requestJson(`${endpoint}?${query}`, {
+      ...options,
+      method: 'DELETE',
+    });
+    return {
+      deleted: Number.isInteger(Number(json.deleted))
+        ? Math.max(0, Number(json.deleted))
+        : 0,
+      ids: normalizeDeepbridHistoryIdList(json.ids),
+      notFound: normalizeDeepbridHistoryIdList(json.not_found),
+    };
   }
 
   async addNzbUrl(
@@ -1535,6 +2181,39 @@ export class DeepbridOfficialClient {
       title: typeof json.title === 'string' ? json.title : '',
       files,
     };
+  }
+
+  /** Resolve a supported folder via Deepbrid; callers must keep returned links
+   * server-side and expose only safe file metadata. */
+  async resolveFolder(
+    folderLink: string,
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridFolderFile[]> {
+    const url = validateDeepbridFolderUrl(folderLink);
+    const json = await this.requestJson('/generate/folder', {
+      ...options,
+      method: 'POST',
+      body: new URLSearchParams({ link: url.toString() }),
+    });
+    return parseDeepbridFiles(json).map((file) => {
+      let trusted = false;
+      try {
+        trusted = isTrustedDeepbridDownloadHost(
+          validateDeepbridDownloadUrl(file.link).hostname
+        );
+      } catch {
+        // The UI receives metadata only; an untrusted link is never a
+        // playable candidate and is never returned to the caller.
+      }
+      const assessment = trusted
+        ? classifyDeepbridUploadFile(file)
+        : {
+            playableCandidate: false,
+            status: 'unreachable' as const,
+            reason: 'untrusted-link' as const,
+          };
+      return { ...file, ...assessment };
+    });
   }
 
   /** Read-only account torrent library. It never adds or scrapes torrents. */
@@ -1625,7 +2304,7 @@ export class DeepbridOfficialClient {
 
 export class DeepbridFinderClient {
   private readonly signer = new DeepbridRequestSigner();
-  private readonly requestMetrics = new DeepbridFinderRequestMetrics();
+  private readonly requestMetrics: AccountAwareDeepbridFinderRequestMetrics;
 
   constructor(
     private readonly apiKey: string,
@@ -1633,6 +2312,9 @@ export class DeepbridFinderClient {
   ) {
     if (!apiKey.trim())
       throw new DeepbridApiError('Deepbrid API key is required.');
+    this.requestMetrics = new AccountAwareDeepbridFinderRequestMetrics(
+      getAccountFinderMetrics(apiKey)
+    );
   }
 
   getRequestMetrics(): DeepbridFinderRequestReport {
@@ -1646,6 +2328,88 @@ export class DeepbridFinderClient {
     path: string,
     options: DeepbridRequestOptions = {}
   ): Promise<Record<string, unknown>> {
+    const isSearchPage = path.startsWith('/usenet/finder/search?');
+    if (!isSearchPage) return this.getJsonUncoalesced(path, options);
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+    if (
+      options.deadlineAtMs !== undefined &&
+      Number.isFinite(options.deadlineAtMs) &&
+      Date.now() >= options.deadlineAtMs
+    ) {
+      throw new DeepbridApiError(
+        'Deepbrid Finder deadline expired.',
+        undefined,
+        'retry-exhausted',
+        undefined,
+        'wrapper_budget_before_attempt'
+      );
+    }
+
+    const cacheLookupStartedAt = Date.now();
+    const cached = finderSearchResponseCache.get(this.apiKey, path);
+    if (cached) {
+      if (cached.freshness === 'fresh') {
+        this.requestMetrics.recordFreshSearchCacheHit(
+          Date.now() - cacheLookupStartedAt
+        );
+      }
+      return structuredClone(cached.value);
+    }
+
+    const timeoutMs = Math.max(
+      250,
+      Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs)
+    );
+    const key = inflightFinderSearchKey(this.apiKey, path, this.timeoutMs);
+    let entry = inflightFinderSearches.get(key);
+    if (!entry && inflightFinderSearches.size < MAX_INFLIGHT_FINDER_SEARCHES) {
+      const controller = new AbortController();
+      entry = {
+        controller,
+        promise: Promise.resolve({}),
+        subscribers: 0,
+        settled: false,
+      };
+      const requestEntry = entry;
+      inflightFinderSearches.set(key, requestEntry);
+      requestEntry.promise = Promise.resolve()
+        .then(() =>
+          this.getJsonUncoalesced(path, {
+            timeoutMs: this.timeoutMs,
+            signal: controller.signal,
+          })
+        )
+        .finally(() => {
+          requestEntry.settled = true;
+          if (inflightFinderSearches.get(key) === requestEntry) {
+            inflightFinderSearches.delete(key);
+          }
+        });
+      // The last subscriber may cancel while the provider request is winding
+      // down. Keep that deliberate abort from becoming an unhandled rejection.
+      void requestEntry.promise.catch(() => {});
+    } else if (!entry) {
+      // Under an unusual burst, preserve correctness and bounded memory by
+      // making this caller independent instead of growing the single-flight map.
+      return this.getJsonUncoalesced(path, options);
+    } else {
+      this.requestMetrics.recordCoalescedSearchRequest();
+    }
+
+    return subscribeToInflightFinderSearch(
+      key,
+      entry,
+      options.signal,
+      options.deadlineAtMs ?? Date.now() + timeoutMs * 3 + 250 * (2 ** 2 - 1)
+    );
+  }
+
+  private async getJsonUncoalesced(
+    path: string,
+    options: DeepbridRequestOptions = {}
+  ): Promise<Record<string, unknown>> {
     const timeoutMs = Math.max(
       250,
       Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs)
@@ -1656,11 +2420,20 @@ export class DeepbridFinderClient {
     if (options.signal?.aborted) {
       throw options.signal.reason ?? new DOMException('Aborted', 'AbortError');
     }
-    if (isSearchPage) {
-      const cached = finderSearchResponseCache.get(this.apiKey, path);
-      if (cached) return cached.value;
+    if (
+      options.deadlineAtMs !== undefined &&
+      Number.isFinite(options.deadlineAtMs) &&
+      Date.now() >= options.deadlineAtMs
+    ) {
+      throw new DeepbridApiError(
+        'Deepbrid Finder deadline expired.',
+        undefined,
+        'retry-exhausted',
+        undefined,
+        'wrapper_budget_before_attempt'
+      );
     }
-
+    const coldSearchStartedAt = isSearchPage ? Date.now() : undefined;
     try {
       const value = await withDeepbridRateLimitRetry(
         async (remainingMs, retryDeadlineAtMs) => {
@@ -1737,9 +2510,26 @@ export class DeepbridFinderClient {
       );
       if (isSearchPage) {
         finderSearchResponseCache.set(this.apiKey, path, value);
+        this.requestMetrics.recordColdSearchFetch(
+          Date.now() - (coldSearchStartedAt ?? Date.now())
+        );
       }
       return value;
     } catch (error) {
+      if (
+        options.deadlineAtMs !== undefined &&
+        Number.isFinite(options.deadlineAtMs) &&
+        Date.now() >= options.deadlineAtMs
+      ) {
+        if (isSearchPage) this.requestMetrics.recordColdSearchFetchFailure();
+        throw new DeepbridApiError(
+          'Deepbrid Finder deadline expired.',
+          undefined,
+          'retry-exhausted',
+          undefined,
+          'wrapper_completed_after_deadline'
+        );
+      }
       // Search pages are stable enough to bridge a short provider cooldown.
       // Only rate-limit failures use stale data; auth, safety, parsing, and
       // configuration errors remain visible to the normal caller.
@@ -1750,6 +2540,7 @@ export class DeepbridFinderClient {
       ) {
         const cached = finderSearchResponseCache.get(this.apiKey, path, true);
         if (cached?.freshness === 'stale') {
+          this.requestMetrics.recordStaleSearchCacheFallback();
           logger.warn(
             { cache: 'recent-success', fallback: 'rate-limit' },
             'Deepbrid Finder rate limited; reused a recent successful search page'
@@ -1757,6 +2548,7 @@ export class DeepbridFinderClient {
           return cached.value;
         }
       }
+      if (isSearchPage) this.requestMetrics.recordColdSearchFetchFailure();
       throw error;
     }
   }
@@ -1997,7 +2789,7 @@ export class DeepbridFinderClient {
 }
 
 export function isDeepbridArchiveName(name: string): boolean {
-  return /\.(?:rar|r\d{2}|7z(?:\.\d{3})?|zip|s\d{2}|part\d+\.rar|tar|gz|bz2)$/i.test(
+  return /\.(?:rar|r\d{2,}|7z(?:\.\d{3})?|zip(?:\.\d{3})?|z\d{2,}|s\d{2}|part\d+\.rar|tar|gz|bz2)$/i.test(
     name
   );
 }

@@ -18,6 +18,7 @@ import { Modal } from '@aiostreams/ui/modal';
 import { Button } from '@aiostreams/ui/button';
 import { IoExtensionPuzzle } from 'react-icons/io5';
 import { PlusIcon } from 'lucide-react';
+import { buildSourcePriorityPreview } from './source-priority-preview';
 
 interface ReorderItem {
   instanceId: string;
@@ -177,6 +178,7 @@ export function ReorderModal({
       enabled: preset.enabled ?? true,
     };
   });
+  const priorityPreview = buildSourcePriorityPreview(items);
 
   return (
     <Modal
@@ -190,6 +192,55 @@ export function ReorderModal({
           higher priority during deduplication and also controls sorting{' '}
           <b>when sorting by the addon criterion</b>.
         </p>
+        <section
+          aria-label="Sample add-on priority preview"
+          className="rounded-lg border border-[--border] bg-[--subtle]/30 p-3"
+        >
+          <div className="text-xs font-semibold uppercase tracking-wide text-[--muted]">
+            Sample priority preview
+          </div>
+          <p className="mt-1 text-xs text-[--muted]">
+            For equivalent sample results, enabled add-ons follow this order.
+            The first source wins deduplication; this is only a tiebreaker when
+            sorting by add-on priority.
+          </p>
+          {priorityPreview.ranked.length ? (
+            <ol className="mt-2 grid gap-1 sm:grid-cols-2">
+              {priorityPreview.ranked.map((item) => (
+                <li
+                  key={item.instanceId}
+                  className="flex min-w-0 items-center gap-2 rounded-md bg-[var(--background)] px-2 py-1.5 text-sm"
+                >
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-[--border] text-[10px] text-[--muted]">
+                    {item.rank}
+                  </span>
+                  <span className="truncate">{item.name}</span>
+                  {item.rank === 1 && (
+                    <span className="ml-auto flex-shrink-0 text-[10px] text-[--brand]">
+                      dedup winner
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-2 text-sm text-[--muted]">
+              No enabled add-ons to preview.
+            </p>
+          )}
+          {(priorityPreview.disabledCount > 0 ||
+            priorityPreview.omittedCount > 0) && (
+            <p className="mt-2 text-[11px] text-[--muted]">
+              {priorityPreview.disabledCount > 0 &&
+                `${priorityPreview.disabledCount} disabled omitted`}
+              {priorityPreview.disabledCount > 0 &&
+                priorityPreview.omittedCount > 0 &&
+                ' · '}
+              {priorityPreview.omittedCount > 0 &&
+                `${priorityPreview.omittedCount} more enabled sources follow`}
+            </p>
+          )}
+        </section>
         <DndContext
           modifiers={[restrictToVerticalAxis]}
           onDragEnd={handleDragEnd}

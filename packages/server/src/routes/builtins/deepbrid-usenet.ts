@@ -5,6 +5,7 @@ import {
   decodeDeepbridSubtitleConversionToken,
   DEEPBRID_PLAYER_BASE,
   DeepbridUsenetAddon,
+  DeepbridFinderClient,
   createDeepbridPlaybackUrl,
   createDeepbridPlaybackToken,
   decodeDeepbridPlaybackToken,
@@ -31,6 +32,7 @@ import {
   shouldForwardDeepbridConditionalHeaders,
   shouldForwardDeepbridRange,
 } from './deepbrid-playback.js';
+import { refreshExpiredDeepbridFinderLink } from './deepbrid-playback-refresh.js';
 import { convertDeepbridSubtitle } from './deepbrid-subtitle-conversion.js';
 
 const router: Router = Router();
@@ -295,10 +297,11 @@ async function handleDeepbridPlayback(
     }
     let upstream: Awaited<ReturnType<typeof makeRequest>> | undefined;
     let redirects = 0;
+    let expiredLinkRefreshes = 0;
     let suppressRangeAfterPlaylistMime = false;
     const forwardConditionalHeaders =
       shouldForwardDeepbridConditionalHeaders(playbackMode);
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 6; attempt++) {
       const headers: Record<string, string> = {
         Accept: '*/*',
         'Accept-Encoding': 'identity',
@@ -348,6 +351,29 @@ async function handleDeepbridPlayback(
         headers,
         rawOptions: { redirect: 'manual' },
       });
+      if (
+        playbackMode === 'direct' &&
+        !controller.signal.aborted &&
+        expiredLinkRefreshes === 0 &&
+        upstream.status === 410
+      ) {
+        const refreshed = await refreshExpiredDeepbridFinderLink(
+          upstream.status,
+          payload,
+          target.toString(),
+          (finderToken, archives) =>
+            new DeepbridFinderClient(payload.apiKey, 7_000).getContent(
+              finderToken,
+              archives
+            )
+        );
+        if (refreshed && refreshed !== target.toString()) {
+          await upstream.body?.cancel().catch(() => {});
+          target = validateDeepbridDownloadUrl(refreshed);
+          expiredLinkRefreshes++;
+          continue;
+        }
+      }
       if (isDeepbridRedirectStatus(upstream.status)) {
         const location = upstream.headers.get('location');
         await upstream.body?.cancel().catch(() => {});

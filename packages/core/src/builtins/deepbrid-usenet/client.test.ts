@@ -18,11 +18,99 @@ import {
   BoundedRollingMinuteCounter,
   getDeepbridAttemptTimeoutMs,
   getDeepbridApiRequestGateMetrics,
+  getDeepbridFinderRequestReport,
   normalizeDeepbridFinderNzbUrl,
   parseDeepbridFinderResult,
+  validateDeepbridFolderUrl,
   runDeepbridApiRequest,
   withDeepbridRateLimitRetry,
 } from './client.js';
+
+test('Deepbrid folder URL validation permits only documented HTTPS host families', () => {
+  assert.equal(
+    validateDeepbridFolderUrl('https://mega.nz/folder/abc#key').toString(),
+    'https://mega.nz/folder/abc#key'
+  );
+  assert.equal(
+    validateDeepbridFolderUrl('https://www.gofile.io/d/abc').hostname,
+    'www.gofile.io'
+  );
+  for (const value of [
+    'http://mega.nz/folder/abc',
+    'https://mega.nz.attacker.example/folder/abc',
+    'https://attacker.example/?next=https://mega.nz',
+    'https://user:pass@mega.nz/folder/abc',
+    'https://terabox.com:444/s/abc',
+  ]) {
+    assert.throws(() => validateDeepbridFolderUrl(value), {
+      code: 'invalid-folder-url',
+    });
+  }
+});
+
+test('folder resolution posts through the official client and classifies files without claiming playback', async () => {
+  const client = Object.create(
+    DeepbridOfficialClient.prototype
+  ) as DeepbridOfficialClient & {
+    requestJson: (
+      path: string,
+      options: { method?: string; body?: URLSearchParams }
+    ) => Promise<Record<string, unknown>>;
+  };
+  let request:
+    | { path: string; options: { method?: string; body?: URLSearchParams } }
+    | undefined;
+  client.requestJson = async (path, options) => {
+    request = { path, options };
+    return {
+      error: 0,
+      files: [
+        {
+          name: 'Example.Movie.1080p.mkv',
+          size: 1_000,
+          link: 'https://premium-dl.deepbrid.com/d/signed-fixture',
+        },
+        {
+          name: 'readme.nfo',
+          size: 64,
+          link: 'https://premium-dl.deepbrid.com/d/info-fixture',
+        },
+        {
+          name: 'ignored.txt',
+          link: 'https://attacker.example/file',
+        },
+      ],
+    };
+  };
+
+  const files = await client.resolveFolder('https://mega.nz/folder/example');
+  assert.equal(request?.path, '/generate/folder');
+  assert.equal(request?.options.method, 'POST');
+  assert.equal(
+    request?.options.body?.get('link'),
+    'https://mega.nz/folder/example'
+  );
+  assert.deepEqual(
+    files.map(({ name, playableCandidate, status }) => ({
+      name,
+      playableCandidate,
+      status,
+    })),
+    [
+      {
+        name: 'Example.Movie.1080p.mkv',
+        playableCandidate: true,
+        status: 'candidate',
+      },
+      { name: 'readme.nfo', playableCandidate: false, status: 'non-video' },
+      {
+        name: 'ignored.txt',
+        playableCandidate: false,
+        status: 'unreachable',
+      },
+    ]
+  );
+});
 
 test('Finder search rejects malformed successful response shapes', async () => {
   for (const response of [{}, { items: null }, { items: {} }]) {
@@ -306,7 +394,8 @@ test('unknown account request pacing uses the documented free-tier reserve', asy
 
   assert.equal(starts[1] - starts[0], 800);
   assert.equal(
-    registry.snapshot('credential-hash-unknown-tier').requestStartLimitPerMinute,
+    registry.snapshot('credential-hash-unknown-tier')
+      .requestStartLimitPerMinute,
     75
   );
 });
@@ -428,7 +517,7 @@ test('queued Finder request does not hit the API after its parent deadline', asy
       assert.equal((outcome.error as DeepbridApiError).code, 'retry-exhausted');
       assert.equal(
         (outcome.error as DeepbridApiError).retryExhaustionReason,
-        'request_gate_deadline'
+        'wrapper_budget_before_attempt'
       );
     }
   } finally {
@@ -513,7 +602,7 @@ test('local retry budget expires while waiting in a shared account cooldown', as
     assert.equal((outcome.error as DeepbridApiError).code, 'retry-exhausted');
     assert.equal(
       (outcome.error as DeepbridApiError).retryExhaustionReason,
-      'request_gate_deadline'
+      'wrapper_budget_before_attempt'
     );
     assert.equal(networkStarts, 0);
   } finally {
@@ -780,6 +869,207 @@ test('Deepbrid account API timeout starts after shared quota queue wait', async 
     await mockAgent.close();
     await active;
   }
+});
+
+test('Deepbrid account history lists secret-free rows and only deletes explicitly selected IDs', async () => {
+  const apiKey = `official-history-${Date.now()}-${Math.random()}`;
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  const pool = mockAgent.get('https://www.deepbrid.com');
+  pool
+    .intercept({
+      path: '/api/v1/downloads?limit=2&offset=4',
+      method: 'GET',
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+    .reply(
+      200,
+      JSON.stringify({
+        error: 0,
+        data: [
+          {
+            id: 11,
+            filename: 'Example.mkv',
+            size: '1.2 GB',
+            date: '2026-11-01',
+            original: 'https://private.invalid/path?token=must-not-leak',
+            download: 'https://private.invalid/signed-download',
+          },
+          { id: 12, filename: 'Other.mkv' },
+        ],
+      }),
+      { headers: { 'content-type': 'application/json' } }
+    );
+  pool
+    .intercept({
+      path: '/api/v1/downloads/delete?ids=11%2C12',
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+    .reply(
+      200,
+      JSON.stringify({ error: 0, deleted: 1, ids: [11], not_found: [12] }),
+      { headers: { 'content-type': 'application/json' } }
+    );
+  pool
+    .intercept({
+      path: '/api/v1/usenet/uploads/delete?ids=22',
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+    .reply(
+      200,
+      JSON.stringify({ error: 0, deleted: 1, ids: [22], not_found: [] }),
+      { headers: { 'content-type': 'application/json' } }
+    );
+  setGlobalDispatcher(mockAgent);
+
+  try {
+    const client = new DeepbridOfficialClient(apiKey);
+    const history = await client.listDownloads({ limit: 2, offset: 4 });
+    assert.deepEqual(history, [
+      { id: '11', filename: 'Example.mkv', size: '1.2 GB', date: '2026-11-01' },
+      { id: '12', filename: 'Other.mkv', size: undefined, date: undefined },
+    ]);
+    assert.equal(JSON.stringify(history).includes('private.invalid'), false);
+    await assert.rejects(client.deleteDownloads(['11', '12']), {
+      code: 'history-delete-confirmation-required',
+    });
+    await assert.rejects(
+      client.deleteUploads(
+        Array.from({ length: 101 }, (_, index) => index + 1),
+        {
+          confirm: true,
+        }
+      ),
+      { code: 'invalid-history-ids' }
+    );
+    assert.deepEqual(
+      await client.deleteDownloads(['11', '12'], { confirm: true }),
+      {
+        deleted: 1,
+        ids: ['11'],
+        notFound: ['12'],
+      }
+    );
+    assert.deepEqual(await client.deleteUploads([22], { confirm: true }), {
+      deleted: 1,
+      ids: ['22'],
+      notFound: [],
+    });
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+  }
+});
+
+test('Deepbrid download history accepts documented list envelope variants safely', async () => {
+  const responses = [
+    { items: [{ id: 1, filename: 'Items.mkv' }] },
+    { downloads: [{ id: '2', filename: 'Downloads.mkv' }] },
+    { data: { items: [{ id: 3, filename: 'Nested.mkv' }] } },
+  ];
+  const client = Object.create(
+    DeepbridOfficialClient.prototype
+  ) as DeepbridOfficialClient & {
+    requestJson: () => Promise<Record<string, unknown>>;
+  };
+
+  for (const [index, response] of responses.entries()) {
+    client.requestJson = async () => response;
+    assert.deepEqual(await client.listDownloads(), [
+      {
+        id: String(index + 1),
+        filename: ['Items.mkv', 'Downloads.mkv', 'Nested.mkv'][index],
+        size: undefined,
+        date: undefined,
+      },
+    ]);
+  }
+});
+
+test('download history pagination uses raw provider count when invalid rows are filtered', async () => {
+  const client = Object.create(
+    DeepbridOfficialClient.prototype
+  ) as DeepbridOfficialClient & {
+    requestJson: () => Promise<Record<string, unknown>>;
+  };
+  const providerRows = Array.from({ length: 50 }, (_, index) => ({
+    id: index === 17 ? 'not-an-id' : index + 1,
+    filename: `Release ${index + 1}.mkv`,
+  }));
+  client.requestJson = async () => ({ items: providerRows });
+
+  const page = await client.listDownloadsPage({ limit: 50, offset: 0 });
+  assert.equal(page.providerCount, 50);
+  assert.equal(page.entries.length, 49);
+  assert.equal(
+    page.entries.some((entry) => entry.id === 'not-an-id'),
+    false
+  );
+  assert.equal(page.hasNext, true);
+});
+
+test('Deepbrid history DELETE is not automatically replayed after an uncertain 503', async () => {
+  const apiKey = `history-delete-once-${Date.now()}-${Math.random()}`;
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: '/api/v1/downloads/delete?ids=47',
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+    .reply(503, JSON.stringify({ error: 503, message: 'try again' }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  setGlobalDispatcher(mockAgent);
+
+  try {
+    await assert.rejects(
+      new DeepbridOfficialClient(apiKey).deleteDownloads(['47'], {
+        confirm: true,
+      }),
+      { code: 'http-error' }
+    );
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+  }
+});
+
+test('Deepbrid upload history omits records whose identifiers cannot be safely deleted', async () => {
+  const client = Object.create(
+    DeepbridOfficialClient.prototype
+  ) as DeepbridOfficialClient & {
+    requestJson: () => Promise<Record<string, unknown>>;
+  };
+  client.requestJson = async () => ({
+    data: {
+      items: [
+        { id: 8, title: 'Usable.nzb', source_url: 'https://private.invalid/a' },
+        { id: 'opaque/id', title: 'Not safely selectable.nzb' },
+      ],
+    },
+  });
+
+  const uploads = await client.listUploads();
+  assert.deepEqual(uploads, [
+    {
+      id: '8',
+      title: 'Usable.nzb',
+      source: '',
+      sourceUrl: 'https://private.invalid/a',
+      hash: undefined,
+      addedAt: undefined,
+    },
+  ]);
+  assert.equal(JSON.stringify(uploads).includes('private.invalid'), true);
 });
 
 test('request-gate capacity never evicts active credentials and rejects overflow safely', async () => {
@@ -1586,6 +1876,206 @@ test('summarizes numeric Finder API rate-limit and gate metrics without request 
     JSON.stringify(snapshot),
     /sensitive request details|UND_ERR_SOCKET/
   );
+});
+
+test('separates cold Finder page timing from warm and stale cache usage', () => {
+  const metrics = new DeepbridFinderRequestMetrics();
+  metrics.recordFreshSearchCacheHit(2);
+  metrics.recordFreshSearchCacheHit(4);
+  metrics.recordColdSearchFetch(180);
+  metrics.recordColdSearchFetch(420);
+  metrics.recordColdSearchFetchFailure();
+  metrics.recordStaleSearchCacheFallback();
+
+  const snapshot = metrics.snapshot();
+  assert.deepEqual(snapshot.searchCache, {
+    freshHits: 2,
+    coalescedRequests: 0,
+    staleRateLimitFallbacks: 1,
+    coldFetches: 2,
+    coldFetchFailures: 1,
+    freshLookup: { samples: 2, p50Ms: 2, p95Ms: 4, maxMs: 4 },
+    coldFetch: { samples: 2, p50Ms: 180, p95Ms: 420, maxMs: 420 },
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot), /url|apiKey|token|secret/i);
+});
+
+test('coalesces an identical in-flight Finder page while keeping caller cancellation independent', async () => {
+  const apiKey = `coalesced-search-${Date.now()}-${Math.random()}`;
+  const otherApiKey = `isolated-search-${Date.now()}-${Math.random()}`;
+  const query = `coalesced-${Date.now()}-${Math.random()}`;
+  const priorSigningSecret = process.env.DEEPBRID_FINDER_SIGNING_SECRET;
+  process.env.DEEPBRID_FINDER_SIGNING_SECRET = 'test-only-signing-secret';
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: `/api/v1/usenet/finder/search?q=${encodeURIComponent(query)}&offset=0&limit=50`,
+      method: 'GET',
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+    .reply(
+      200,
+      JSON.stringify({
+        items: [{ token: 'fixture-result', title: 'Fixture' }],
+      }),
+      {
+        headers: {
+          'content-type': 'application/json',
+          date: new Date().toUTCString(),
+        },
+      }
+    )
+    .delay(80);
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: `/api/v1/usenet/finder/search?q=${encodeURIComponent(query)}&offset=0&limit=50`,
+      method: 'GET',
+      headers: { authorization: `Bearer ${otherApiKey}` },
+    })
+    .reply(
+      200,
+      JSON.stringify({
+        items: [{ token: 'other-fixture', title: 'Other Profile' }],
+      }),
+      {
+        headers: {
+          'content-type': 'application/json',
+          date: new Date().toUTCString(),
+        },
+      }
+    )
+    .delay(80);
+  setGlobalDispatcher(mockAgent);
+
+  try {
+    await initDb('sqlite::memory:');
+    await initialiseConfig();
+    const client = new DeepbridFinderClient(apiKey);
+    const overlappingClient = new DeepbridFinderClient(apiKey);
+    const isolatedClient = new DeepbridFinderClient(otherApiKey);
+    const abandoned = new AbortController();
+    const retained = new AbortController();
+    const abandonedRequest = client.searchPage(query, {
+      timeoutMs: 800,
+      signal: abandoned.signal,
+    });
+    const deadlineRequest = overlappingClient.searchPage(query, {
+      timeoutMs: 1_200,
+      deadlineAtMs: Date.now() + 15,
+    });
+    const retainedRequest = overlappingClient.searchPage(query, {
+      timeoutMs: 20_000,
+      signal: retained.signal,
+    });
+    const isolatedRequest = isolatedClient.searchPage(query);
+    abandoned.abort();
+
+    await assert.rejects(abandonedRequest, { name: 'AbortError' });
+    await assert.rejects(deadlineRequest, { code: 'retry-exhausted' });
+    const result = await retainedRequest;
+    assert.equal(result.results[0]?.title, 'Fixture');
+    const isolatedResult = await isolatedRequest;
+    assert.equal(isolatedResult.results[0]?.title, 'Other Profile');
+    const report = client.getRequestMetrics();
+    const overlappingReport = overlappingClient.getRequestMetrics();
+    const isolatedReport = isolatedClient.getRequestMetrics();
+    assert.equal(report.attemptsByKind.search, 1);
+    assert.equal(overlappingReport.attemptsByKind.search, 0);
+    assert.equal(overlappingReport.searchCache.coalescedRequests, 2);
+    assert.equal(isolatedReport.attemptsByKind.search, 1);
+    assert.equal(isolatedReport.searchCache.coalescedRequests, 0);
+    assert.equal(
+      getDeepbridFinderRequestReport(apiKey).attemptsByKind.search,
+      1,
+      'separate client instances should contribute to one account-level latency report'
+    );
+    assert.equal(
+      getDeepbridFinderRequestReport(otherApiKey).attemptsByKind.search,
+      1,
+      'different API keys must keep metrics isolated'
+    );
+    assert.doesNotMatch(
+      JSON.stringify({ report, overlappingReport, isolatedReport }),
+      /fixture-result|other-fixture|apiKey|token/i
+    );
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+    await closeDb();
+    if (priorSigningSecret === undefined) {
+      delete process.env.DEEPBRID_FINDER_SIGNING_SECRET;
+    } else {
+      process.env.DEEPBRID_FINDER_SIGNING_SECRET = priorSigningSecret;
+    }
+  }
+});
+
+test('Finder request report measures actual cold fetch and warm cache hit separately', async () => {
+  const apiKey = `cache-metrics-${Date.now()}-${Math.random()}`;
+  const query = `metrics-${Date.now()}-${Math.random()}`;
+  const priorSigningSecret = process.env.DEEPBRID_FINDER_SIGNING_SECRET;
+  process.env.DEEPBRID_FINDER_SIGNING_SECRET = 'test-only-signing-secret';
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: `/api/v1/usenet/finder/search?q=${encodeURIComponent(query)}&offset=0&limit=50`,
+      method: 'GET',
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+    .reply(
+      200,
+      JSON.stringify({
+        items: [{ token: 'safe-test', title: 'Test release' }],
+      }),
+      {
+        headers: {
+          'content-type': 'application/json',
+          date: new Date().toUTCString(),
+        },
+      }
+    );
+  setGlobalDispatcher(mockAgent);
+
+  try {
+    await initDb('sqlite::memory:');
+    await initialiseConfig();
+    const client = new DeepbridFinderClient(apiKey);
+    await client.searchPage(query);
+    await client.searchPage(query);
+    const report = client.getRequestMetrics();
+    assert.equal(report.searchCache.coldFetches, 1);
+    assert.equal(report.searchCache.freshHits, 1);
+    assert.equal(report.searchCache.coldFetch.samples, 1);
+    assert.equal(report.searchCache.freshLookup.samples, 1);
+    assert.equal(report.attemptsByKind.search, 1);
+    await assert.rejects(
+      client.searchPage(query, { deadlineAtMs: Date.now() - 1 }),
+      { code: 'retry-exhausted' }
+    );
+    assert.equal(client.getRequestMetrics().searchCache.freshHits, 1);
+    assert.doesNotMatch(
+      JSON.stringify(report),
+      /https?:\/\/|Bearer\s|safe-test/
+    );
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+    await closeDb();
+    if (priorSigningSecret === undefined) {
+      delete process.env.DEEPBRID_FINDER_SIGNING_SECRET;
+    } else {
+      process.env.DEEPBRID_FINDER_SIGNING_SECRET = priorSigningSecret;
+    }
+  }
 });
 
 test('classifies transport timeout and abort failures without retaining error data', () => {

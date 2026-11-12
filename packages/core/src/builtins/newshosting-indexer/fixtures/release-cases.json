@@ -1,0 +1,139 @@
+[
+  {
+    "title": "Example Feature Film (2024) 2160p UHD BluRay x265 HDR10+ DV TrueHD Atmos 7.1 English 14GB",
+    "expected": {
+      "resolution": "2160p",
+      "quality": "BluRay",
+      "codec": "x265",
+      "hdrFormats": ["HDR10+", "DV"],
+      "audioChannels": "7.1",
+      "languages": ["en"],
+      "sizeBytes": 15032385536
+    }
+  },
+  {
+    "title": "Example Mystery S01E02-E03 1080p WEB-DL x264 EAC3 5.1",
+    "expected": {
+      "resolution": "1080p",
+      "quality": "WEB-DL",
+      "codec": "x264",
+      "season": 1,
+      "episode": 2,
+      "episodeRange": { "start": 2, "end": 3 },
+      "audioChannels": "5.1"
+    }
+  },
+  {
+    "title": "Example Mystery Season 2 Complete 720p HDTV",
+    "expected": {
+      "resolution": "720p",
+      "quality": "HDTV",
+      "season": 2,
+      "seasonPack": true
+    }
+  },
+  {
+    "title": "Example Classic 1998 Extended Edition 1080p WEB-DL",
+    "expected": {
+      "resolution": "1080p",
+      "edition": "extended",
+      "normalizedTitle": "example classic"
+    }
+  },
+  {
+    "title": "Example Anime - 024 [1080p WEB-DL]",
+    "expected": {
+      "resolution": "1080p",
+      "absoluteEpisode": 24,
+      "normalizedTitle": "example anime"
+    },
+    "match": {
+      "media": { "type": "series", "season": 1, "episode": 24 },
+      "metadata": { "title": "Example Anime", "isAnime": true },
+      "expectedConfidence": "high",
+      "reasonIncludes": ["title", "absolute-episode"]
+    }
+  },
+  {
+    "title": "Example Drama S03E22-E23 1080p WEB-DL",
+    "expected": {
+      "season": 3,
+      "episode": 22,
+      "episodeRange": { "start": 22, "end": 23 }
+    },
+    "match": {
+      "media": { "type": "series", "season": 3, "episode": 23 },
+      "metadata": { "title": "Example Drama" },
+      "expectedConfidence": "high",
+      "reasonIncludes": ["episode-range"]
+    }
+  },
+  {
+    "title": "Example Drama Season 3 Complete 1080p WEB-DL 20GB",
+    "expected": {
+      "season": 3,
+      "seasonPack": true,
+      "sizeBytes": 21474836480
+    },
+    "match": {
+      "media": { "type": "series", "season": 3, "episode": 23 },
+      "metadata": { "title": "Example Drama" },
+      "expectedConfidence": "high",
+      "reasonIncludes": ["season-pack"]
+    }
+  },
+  {
+    "title": "Example Crime S00E03 720p HDTV",
+    "expected": { "season": 0, "episode": 3 },
+    "match": {
+      "media": { "type": "series", "season": 0, "episode": 3 },
+      "metadata": { "title": "Example Crime" },
+      "expectedConfidence": "high",
+      "reasonIncludes": ["episode"]
+    }
+  },
+  {
+    "title": "Chronicle The Return 2024 Directors Cut 2160p BluRay TrueHD Atmos 7.1 14GB",
+    "expected": {
+      "edition": "directors-cut",
+      "resolution": "2160p",
+      "audioChannels": "7.1"
+    },
+    "match": {
+      "media": { "type": "movie" },
+      "metadata": {
+        "title": "Example Chronicle",
+        "aliases": ["Chronicle: The Return"],
+        "year": 2024,
+        "edition": "director's cut"
+      },
+      "expectedConfidence": "high",
+      "reasonIncludes": ["title", "year", "edition"]
+    }
+  },
+  {
+    "title": "Example Drama S03E04 1080p WEB-DL",
+    "expected": { "season": 3, "episode": 4 },
+    "match": {
+      "media": { "type": "series", "season": 3, "episode": 23 },
+      "metadata": { "title": "Example Drama" },
+      "expectedConfidence": "low",
+      "reasonIncludes": ["episode-mismatch"]
+    }
+  },
+  {
+    "title": "Example Chronicle The Return 2024 2160p BluRay TrueHD Atmos 7.1 14GB",
+    "expected": { "resolution": "2160p", "audioChannels": "7.1" },
+    "match": {
+      "media": { "type": "movie" },
+      "metadata": {
+        "title": "Example Chronicle",
+        "aliases": ["Chronicle: The Return"],
+        "year": 2024,
+        "edition": "director's cut"
+      },
+      "expectedConfidence": "medium",
+      "reasonIncludes": ["year", "edition-unconfirmed"]
+    }
+  }
+]

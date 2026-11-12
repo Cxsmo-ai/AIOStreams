@@ -162,6 +162,77 @@ test('scores exact episodes above mismatched episodes', () => {
   assert.ok(exact.score > wrong.score);
 });
 
+test('scores release quality and explains sequel year and edition matches', () => {
+  const metadata = {
+    title: 'Example Movie',
+    aliases: ['Example: The Return'],
+    year: 2024,
+    edition: "director's cut",
+  };
+  const media = { type: 'movie' as const };
+  const preferredTitle =
+    'Example.The.Return.2024.Directors.Cut.2160p.TrueHD.Atmos.7.1.24GB.mkv';
+  const otherSequel = 'Example.The.Return.2014.Theatrical.720p.AAC.1.2GB.mkv';
+  const preferred = scoreNewshostingReleaseMatch(
+    preferredTitle,
+    media,
+    parseNewshostingRelease(preferredTitle),
+    metadata
+  );
+  const other = scoreNewshostingReleaseMatch(
+    otherSequel,
+    media,
+    parseNewshostingRelease(otherSequel),
+    metadata
+  );
+
+  assert.equal(
+    parseNewshostingRelease(preferredTitle).edition,
+    'directors-cut'
+  );
+  assert.ok(preferred.score > other.score);
+  assert.equal(preferred.confidence, 'high');
+  assert.ok(preferred.reason.includes('year'));
+  assert.ok(preferred.reason.includes('edition'));
+  assert.ok(preferred.signals.audio > 0);
+  assert.ok(preferred.signals.size > 0);
+});
+
+test('does not claim an untagged requested edition is confirmed', () => {
+  const metadata = {
+    title: 'Example Movie',
+    aliases: ['Example: The Return'],
+    year: 2024,
+    edition: "director's cut",
+  };
+  const title =
+    'Example.The.Return.2024.2160p.BluRay.TrueHD.Atmos.7.1.14GB.mkv';
+  const match = scoreNewshostingReleaseMatch(
+    title,
+    { type: 'movie' },
+    parseNewshostingRelease(title),
+    metadata
+  );
+
+  assert.equal(match.signals.edition, -120);
+  assert.ok(match.reason.includes('edition-unconfirmed'));
+  assert.notEqual(match.confidence, 'high');
+});
+
+test('normalizes combined HDR and language tags without promoting them to media facts', () => {
+  const release = parseNewshostingRelease(
+    'Example.Movie.2024.2160p.DV.HDR10+.TrueHD.Atmos.7.1.English.mkv'
+  );
+  assert.deepEqual(release.hdrFormats, ['HDR10+', 'DV']);
+  assert.deepEqual(release.languages, ['en']);
+  assert.equal(release.audioChannels, '7.1');
+  assert.equal(release.hdr, 'HDR10+');
+  assert.deepEqual(
+    parseNewshostingRelease('Example.Movie.DV.HDR10.HDR10+.mkv').hdrFormats,
+    ['HDR10+', 'DV', 'HDR10']
+  );
+});
+
 test('round-trips validated NZB result ids and rejects malformed ids', () => {
   const result = {
     name: 'The.Mentalist.S01E01.1080p.WEB-DL.mkv',
@@ -199,6 +270,27 @@ test('applies file-count and playable-video ranking signals', () => {
     rankNewshostingResult({ ...base, files: 1 }, 800) >
       rankNewshostingResult({ ...base, files: 30 }, 800)
   );
+});
+
+test('parses immersive surround layouts and object-audio tags from release names', () => {
+  const release = parseNewshostingRelease(
+    'Example.Movie.2026.2160p.WEB-DL.DDP5.1.2.Atmos.DV-GROUP'
+  );
+
+  assert.equal(release.resolution, '2160p');
+  assert.equal(release.audioChannels, '5.1.2');
+  assert.ok(release.audioFormats?.some((format) => /DDP5\.1/i.test(format)));
+  assert.equal(release.hdr, 'DV');
+});
+
+test('parses DTS:X and 7.1.4 without treating channel tags as title words', () => {
+  const release = parseNewshostingRelease(
+    'Example.Show.S01E02.1080p.BluRay.TrueHD.DTS-X.7.1.4-GROUP'
+  );
+
+  assert.equal(release.audioChannels, '7.1.4');
+  assert.ok(release.audioFormats?.some((format) => /DTS[. -]*X/i.test(format)));
+  assert.equal(release.normalizedTitle, 'example show');
 });
 
 test('keeps requested episodes and season packs while rejecting explicit mismatches', () => {

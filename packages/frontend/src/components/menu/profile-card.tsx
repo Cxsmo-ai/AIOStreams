@@ -8,6 +8,7 @@ import { SettingsCard } from '@/components/shared/settings-card';
 import { useSession } from '@/context/session';
 import { useUserData } from '@/context/userData';
 import { configProfilesQuery } from '@/lib/queries';
+import { DeepbridHistoryManager } from './deepbrid-history-manager';
 import {
   saveConfigProfile,
   updateConfigProfile,
@@ -178,6 +179,11 @@ export function ProfileCard() {
           >
             Delete profile
           </Button>
+          <DeepbridHistoryManager
+            key={`${sessionUser.username}:${profile.id}:${profile.updatedAt}`}
+            profileId={profile.id}
+            sessionOwner={sessionUser.username}
+          />
         </div>
       )}
     </SettingsCard>

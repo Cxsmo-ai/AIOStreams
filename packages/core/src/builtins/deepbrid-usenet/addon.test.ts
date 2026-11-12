@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildDeepbridQueries,
+  classifyDeepbridArchiveIntegrity,
   chooseDeepbridVideoFiles,
   DeepbridProgressiveResolutionQueue,
   createDeepbridPlaybackToken,
@@ -17,6 +18,7 @@ import {
   runQueuedDeepbridRequest,
   runWithinDeepbridRequestBudget,
   searchDeepbridFinderPages,
+  scoreDeepbridSpec,
   summarizeDeepbridPagination,
 } from './addon.js';
 import {
@@ -34,11 +36,13 @@ import type { DeepbridFinderPaginationOutcome } from './addon.js';
 import {
   DeepbridApiError,
   DeepbridRequestSigner,
+  assessDeepbridArchiveVolumes,
   isDeepbridArchiveName,
   isDeepbridStorageHost,
   isTrustedDeepbridDownloadHost,
   isDeepbridVideoName,
   isLikelyDeepbridVideoName,
+  classifyDeepbridUploadFile,
   validateDeepbridDownloadUrl,
 } from './client.js';
 import {
@@ -116,6 +120,10 @@ class TestDeepbridParser extends DeepbridUsenetStreamParser {
 
   size(stream: Stream, parsed: ParsedStream) {
     return this.getSize(stream, parsed);
+  }
+
+  extras(stream: Stream, parsed: ParsedStream) {
+    return this.getExtras(stream, parsed);
   }
 
   streamType(stream: Stream, parsed: ParsedStream) {
@@ -380,6 +388,7 @@ test('round-trips encrypted, signed playback capabilities', () => {
 
 test('recognizes archive and video names', () => {
   assert.equal(isDeepbridArchiveName('release.part01.rar'), true);
+  assert.equal(isDeepbridArchiveName('release.zip.001'), true);
   assert.equal(isDeepbridArchiveName('release.mkv'), false);
   assert.equal(isDeepbridVideoName('release.MKV'), true);
   assert.equal(isDeepbridVideoName('release.nfo'), false);
@@ -388,6 +397,44 @@ test('recognizes archive and video names', () => {
     true
   );
   assert.equal(isLikelyDeepbridVideoName('Titanic.1997.iso'), false);
+});
+
+test('marks provider-unreachable upload files as non-playable without exposing raw reasons', () => {
+  assert.deepEqual(
+    classifyDeepbridUploadFile({
+      name: 'Example.Show.S01E01.mkv',
+      link: '',
+      unreachable: 'truncated_missing_volumes',
+    }),
+    {
+      playableCandidate: false,
+      status: 'unreachable',
+      reason: 'provider-unreachable',
+    }
+  );
+  assert.deepEqual(
+    classifyDeepbridUploadFile({
+      name: 'Example.Show.S01E01.mkv',
+      link: 'https://cdn.example/video.mkv',
+    }),
+    { playableCandidate: true, status: 'candidate' }
+  );
+  assert.equal(
+    classifyDeepbridUploadFile({
+      name: 'Example.Show.S01E01.mkv',
+      link: 'https://cdn.example/video.mkv',
+      unreachable: 'truncated_missing_volumes',
+    }).playableCandidate,
+    false,
+    'provider-declared unreachable must win even when a stale link is present'
+  );
+  assert.equal(
+    classifyDeepbridUploadFile({
+      name: 'Example.Show.S01E01.nfo',
+      link: 'https://cdn.example/video.nfo',
+    }).playableCandidate,
+    false
+  );
 });
 
 test('selects the requested episode when an expanded season has many files', () => {
@@ -619,6 +666,131 @@ test('marks playable Deepbrid Finder links as resolved/cached Usenet', () => {
   assert.equal(parser.size(stream, parsed), 4_294_967_296);
 });
 
+test('DeepSpec score uses transparent Deepbrid evidence and aggregates Finder source coverage', () => {
+  const baseline = scoreDeepbridSpec({
+    titleMatchConfirmed: true,
+    containerProbePassed: false,
+    result: { sources: 0 },
+    file: { name: 'Example.Movie.mkv', size: 0 },
+  });
+  const probed = scoreDeepbridSpec({
+    titleMatchConfirmed: true,
+    containerProbePassed: true,
+    result: { sources: 0 },
+    file: { name: 'Example.Movie.mkv', size: 0 },
+  });
+  const broadFinderCoverage = scoreDeepbridSpec({
+    titleMatchConfirmed: true,
+    containerProbePassed: true,
+    result: { sources: 20 },
+    file: {
+      name: 'Example.Movie.1080p.WEB-DL.x265.HDR10.DDP5.1.mkv',
+      size: 4_000_000_000,
+    },
+  });
+
+  assert.ok(probed > baseline, 'successful media probe improves confidence');
+  assert.ok(
+    broadFinderCoverage > probed,
+    'aggregate Finder source count and parsed release evidence contribute'
+  );
+  assert.ok(broadFinderCoverage <= 100);
+  assert.equal(
+    scoreDeepbridSpec({
+      titleMatchConfirmed: true,
+      containerProbePassed: true,
+      result: { sources: 100_000 },
+      file: {
+        name: 'Example.Movie.2160p.REMUX.AV1.DV.TrueHD.Atmos.7.1.4.mkv',
+        size: 100_000_000_000,
+      },
+    }),
+    100,
+    'score is capped at 100 even for unusually rich metadata'
+  );
+});
+
+test('Deepbrid source-card extras expose DeepSpec as an estimate, not official TrueSpec verification', () => {
+  const parser = new TestDeepbridParser(parserAddon);
+  const parsed = {
+    addon: parserAddon,
+    type: 'http',
+    proxied: false,
+  } as ParsedStream;
+  const extras = parser.extras(
+    {
+      name: '[DB⚡] Deepbrid Usenet · Direct',
+      title: 'Example Movie',
+      description: '✦ DeepSpec 82/100 · AIOStreams estimate',
+      url: 'https://storage.example/movie.mkv',
+      type: 'usenet',
+      behaviorHints: {
+        deepbridSpecScore: 82,
+        deepbridSpecSourceCount: 9,
+        deepbridSpecTitleMatch: true,
+        deepbridSpecContainerProbePassed: true,
+        deepbridSpecVersion: 1,
+        deepbridMatchConfidence: 'high',
+        deepbridMatchScore: 1_234,
+        deepbridMatchEvidence: 'title,episode',
+        deepbridEvidenceVersion: 1,
+        deepbridEvidence: {
+          parsed: true,
+          resolved: true,
+          probed: true,
+          playbackConfirmed: false,
+        },
+      },
+    },
+    parsed
+  );
+
+  assert.deepEqual(extras?.deepbridSpec, {
+    score: 82,
+    sourceCount: 9,
+    titleMatch: true,
+    containerProbePassed: true,
+    technicalEvidence: 'filename-inferred',
+    scoreVersion: 1,
+    rating: 'aiostreams-estimate',
+  });
+  assert.ok(extras?.formattingSuffix?.some((item) => item.includes('82/100')));
+  assert.ok(
+    extras?.formattingSuffix?.some((item) => item.includes('Finder sources: 9'))
+  );
+  assert.deepEqual(extras?.deepbridMatch, {
+    confidence: 'high',
+    score: 1_234,
+    reason: 'title,episode',
+  });
+  assert.deepEqual(extras?.deepbridEvidence, {
+    parsed: true,
+    resolved: true,
+    probed: true,
+    playbackConfirmed: false,
+  });
+  assert.ok(
+    extras?.formattingSuffix?.some((item) =>
+      item.includes('Playback unverified')
+    )
+  );
+
+  const malformed = parser.extras(
+    {
+      name: '[DB⚡] Deepbrid Usenet · Direct',
+      title: 'Example Movie',
+      url: 'https://storage.example/movie.mkv',
+      type: 'usenet',
+      behaviorHints: {
+        deepbridSpecScore: null,
+        deepbridSpecVersion: 1,
+      },
+    },
+    parsed
+  );
+  assert.equal(malformed?.deepbridSpec, undefined);
+});
+
 test('keeps service routing and indexer formatting for indexer-mode results', () => {
   const parser = new TestDeepbridParser(parserAddon);
   const stream: Stream = {
@@ -745,6 +917,51 @@ test('resolves Deepbrid content in bounded batches and stops at max results', as
     resolved.every((item) => item.archiveExpanded === false),
     true
   );
+});
+
+test('eligibility-only Finder probes never count as a passed container probe', async () => {
+  const [resolved] = await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'eligibility-only',
+          title: 'Example Movie 1080p',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1_000_000_000,
+          sizeHuman: '1 GB',
+          date: '',
+          sources: 12,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 5_000,
+      getContent: async () => ({
+        title: 'Example Movie',
+        files: [
+          {
+            name: 'Example.Movie.1080p.WEB-DL.mkv',
+            link: 'https://storage.example/movie.mkv',
+            size: 1_000_000_000,
+            sizeHuman: '1 GB',
+          },
+        ],
+        hasPassword: false,
+        password: '',
+      }),
+      probeFile: async () => true,
+      probeFileValidatesContainer: false,
+    }
+  );
+
+  assert.equal(resolved?.containerProbePassed, false);
 });
 
 test('zero limits keep every Deepbrid candidate and every resolved file', async () => {
@@ -1013,6 +1230,122 @@ test('classifies resolver failures without retaining error text', () => {
       classifyDeepbridResolutionFailure(connection),
     ]),
     /PRIVATE_/i
+  );
+});
+
+test('archive expansion is not reported as archive-integrity verification', () => {
+  assert.equal(classifyDeepbridArchiveIntegrity(true), 'not-verified');
+  assert.equal(classifyDeepbridArchiveIntegrity(false), 'not-assessed');
+});
+
+test('propagates incomplete split-archive evidence onto resolved Deepbrid files', async () => {
+  const [resolved] = await resolveDeepbridFiles(
+    [
+      {
+        result: {
+          token: 'incomplete-archive',
+          title: 'Example Movie 2026 1080p',
+          category: '',
+          categoryName: '',
+          kind: '',
+          size: 1_000_000_000,
+          sizeHuman: '1 GB',
+          date: '',
+          sources: 1,
+        },
+        score: 100,
+        confirmed: true,
+      },
+    ],
+    { type: 'movie' },
+    {
+      concurrency: 1,
+      maxResults: 0,
+      deadline: Date.now() + 5_000,
+      getContent: async (_token, archives) => ({
+        title: 'Example Movie',
+        files: archives
+          ? [
+              {
+                name: 'Example.Movie.2026.mkv',
+                link: 'https://storage.example/movie.mkv',
+                size: 1_000,
+                sizeHuman: '',
+              },
+            ]
+          : [
+              {
+                name: 'Example.Movie.part01.rar',
+                link: 'https://storage.example/part01.rar',
+                size: 10,
+                sizeHuman: '',
+              },
+              {
+                name: 'Example.Movie.part03.rar',
+                link: 'https://storage.example/part03.rar',
+                size: 10,
+                sizeHuman: '',
+              },
+            ],
+        hasPassword: false,
+        password: '',
+      }),
+    }
+  );
+
+  assert.equal(resolved.archiveExpanded, true);
+  assert.equal(resolved.archiveIntegrity, 'incomplete');
+});
+
+test('detects visible missing archive-volume indices without claiming a full set is verified', () => {
+  const gap = [{ name: 'Release.part01.rar' }, { name: 'Release.part03.rar' }];
+  assert.deepEqual(assessDeepbridArchiveVolumes(gap), {
+    hasArchives: true,
+    incomplete: true,
+    unreachableArchiveCount: 0,
+    missingVolumeNumbers: [2],
+  });
+  assert.equal(classifyDeepbridArchiveIntegrity(true, gap), 'incomplete');
+
+  assert.deepEqual(
+    assessDeepbridArchiveVolumes([
+      { name: 'Legacy.rar' },
+      { name: 'Legacy.r00' },
+      { name: 'Legacy.r02' },
+    ]).missingVolumeNumbers,
+    [1],
+    'old-style RAR volume sequences are checked for internal gaps'
+  );
+  assert.deepEqual(
+    assessDeepbridArchiveVolumes([
+      { name: 'Split.zip' },
+      { name: 'Split.z01' },
+      { name: 'Split.z03' },
+    ]).missingVolumeNumbers,
+    [2],
+    'split ZIP sequences are checked for internal gaps'
+  );
+
+  const unreachable = [
+    { name: 'Release.7z.001' },
+    { name: 'Release.7z.002', unreachable: 'provider-specific detail' },
+  ];
+  assert.equal(
+    assessDeepbridArchiveVolumes(unreachable).unreachableArchiveCount,
+    1
+  );
+  assert.equal(
+    classifyDeepbridArchiveIntegrity(true, unreachable),
+    'incomplete'
+  );
+
+  assert.equal(
+    classifyDeepbridArchiveIntegrity(true, [
+      { name: 'Release.part01.rar' },
+      { name: 'Release.part02.rar' },
+    ]),
+    'not-verified',
+    'a contiguous visible list does not prove that the final volume is present'
   );
 });
 

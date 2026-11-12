@@ -8,6 +8,8 @@ export interface NewshostingMediaMetadata {
   title?: string;
   aliases?: string[];
   year?: number;
+  /** Preferred cut when known (e.g. extended, director's cut, remastered). */
+  edition?: string;
   countries?: string[];
   isAnime?: boolean;
 }
@@ -17,7 +19,16 @@ export interface ParsedNewshostingRelease {
   quality: 'REMUX' | 'BluRay' | 'WEB-DL' | 'WEBRip' | 'HDTV' | 'unknown';
   codec: 'x265' | 'x264' | 'AV1' | 'unknown';
   hdr: 'HDR10' | 'DV' | 'HDR10+' | 'none' | 'unknown';
+  /** All filename-inferred HDR labels; a release can carry multiple tags. */
+  hdrFormats?: Array<'HDR10' | 'DV' | 'HDR10+'>;
+  edition?: 'theatrical' | 'extended' | 'directors-cut' | 'remastered';
   audio?: string;
+  /** Channel layout inferred from the release name, not from a media probe. */
+  audioChannels?: string;
+  /** Audio format tags inferred from the release name, in source order. */
+  audioFormats?: string[];
+  /** Spoken-language codes inferred from common release-name tags only. */
+  languages?: string[];
   releaseGroup?: string;
   normalizedTitle: string;
   season?: number;
@@ -44,6 +55,30 @@ function parseSizeBytes(title: string): number | undefined {
   );
 }
 
+function parseEdition(title: string): ParsedNewshostingRelease['edition'] {
+  if (
+    /\b(?:director'?s[ ._-]*cut|the[ ._-]*director'?s[ ._-]*edition)\b/i.test(
+      title
+    )
+  )
+    return 'directors-cut';
+  if (/\b(?:extended(?:[ ._-]*edition)?|unrated[ ._-]*extended)\b/i.test(title))
+    return 'extended';
+  if (
+    /\b(?:theatrical(?:[ ._-]*cut|[ ._-]*edition)?|cinema[ ._-]*cut)\b/i.test(
+      title
+    )
+  )
+    return 'theatrical';
+  if (
+    /\b(?:remaster(?:ed)?|restored(?:[ ._-]*edition)?|4k[ ._-]*remaster)\b/i.test(
+      title
+    )
+  )
+    return 'remastered';
+  return undefined;
+}
+
 function normalizeReleaseTitle(title: string, releaseGroup?: string): string {
   let normalized = title;
   if (releaseGroup) {
@@ -56,7 +91,7 @@ function normalizeReleaseTitle(title: string, releaseGroup?: string): string {
   return normalized
     .replace(/\[[^\]]+\]|\([^)]+\)/g, ' ')
     .replace(
-      /\b(?:2160p|1080p|720p|480p|4k|uhd|hdr10\+?|hdr|dv|dovi|dolby vision|remux|blu-?ray|web-?dl|webrip|hdtv|x26[45]|h26[45]|hevc|avc|av1|aac|ac3|eac3|ddp?5\.1|ddp?7\.1|atmos|truehd|dts(?:[.\s-]*hd)?(?:[.\s-]*ma)?|ma|flac|proper|repack|internal|multi|subbed|dubbed|dual audio|complete|season\s*\d{1,2}|season|pack|mkv|mp4|avi|rar|7z|zip)\b/gi,
+      /\b(?:2160p|1080p|720p|480p|4k|uhd|hdr10\+?|hdr|dv|dovi|dolby vision|remux|blu-?ray|web-?dl|webrip|hdtv|x26[45]|h26[45]|hevc|avc|av1|aac|ac3|eac3|ddp?5\.1|ddp?7\.1|atmos|truehd|dts(?:[.\s-]*x|[.\s-]*hd(?:[.\s-]*ma)?)?|ma|flac|(?:1|2|5|7)\.\d(?:\.\d)?|proper|repack|internal|multi|subbed|dubbed|dual audio|complete|season\s*\d{1,2}|season|pack|mkv|mp4|avi|rar|7z|zip|theatrical(?:[ ._-]*cut|[ ._-]*edition)?|extended(?:[ ._-]*edition)?|director'?s[ ._-]*cut|remaster(?:ed)?|restored(?:[ ._-]*edition)?|cinema[ ._-]*cut)\b/gi,
       ' '
     )
     .replace(/\bs\d{1,2}(?:[\s._-]*e\d{1,3}(?:[\s._-]*e\d{1,3})?)?\b/gi, ' ')
@@ -91,20 +126,72 @@ export function parseNewshostingRelease(
   else if (/\b(?:x264|h264|avc)\b/i.test(title)) codec = 'x264';
   else if (/\bav1\b/i.test(title)) codec = 'AV1';
 
-  let hdr: ParsedNewshostingRelease['hdr'] = 'none';
+  const hdrFormats: NonNullable<ParsedNewshostingRelease['hdrFormats']> = [];
   if (/(?:^|[\s._-])(?:hdr10\+|hdr10plus)(?:$|[\s._-])/i.test(title))
-    hdr = 'HDR10+';
-  else if (/\b(?:dv|dovi|dolby vision)\b/i.test(title)) hdr = 'DV';
-  else if (/\bhdr(?:10)?\b/i.test(title)) hdr = 'HDR10';
+    hdrFormats.push('HDR10+');
+  if (/\b(?:dv|dovi|dolby[ ._-]*vision)\b/i.test(title)) hdrFormats.push('DV');
+  if ([...title.matchAll(/\bhdr(?:10)?\b(?!\s*\+|\s*plus)/gi)].length > 0) {
+    hdrFormats.push('HDR10');
+  }
+  const hdr: ParsedNewshostingRelease['hdr'] = hdrFormats.includes('HDR10+')
+    ? 'HDR10+'
+    : hdrFormats.includes('DV')
+      ? 'DV'
+      : hdrFormats.includes('HDR10')
+        ? 'HDR10'
+        : 'none';
+  const edition = parseEdition(title);
 
-  const audioMatch = title.match(
-    /\b(?:truehd(?:[.\s-]*atmos)?|atmos|dts[.\s-]*hd(?:[.\s-]*ma)?|dts|ddp?7\.1|ddp?5\.1|eac3|ac3|aac|flac)\b/i
+  const audioFormats = [
+    ...new Set(
+      [
+        ...title.matchAll(
+          /\b(?:truehd(?:[.\s-]*atmos)?|atmos|dts[.\s-]*x|dts[.\s-]*hd(?:[.\s-]*ma)?|dts|ddp?7\.1|ddp?5\.1|eac3(?:[.\s-]*joc)?|ac3|aac|flac)\b/gi
+        ),
+      ].map((match) => match[0])
+    ),
+  ];
+  const languageAliases: Record<string, string> = {
+    english: 'en',
+    eng: 'en',
+    en: 'en',
+    french: 'fr',
+    fre: 'fr',
+    fra: 'fr',
+    german: 'de',
+    ger: 'de',
+    deu: 'de',
+    spanish: 'es',
+    spa: 'es',
+    italian: 'it',
+    ita: 'it',
+    japanese: 'ja',
+    jpn: 'ja',
+    korean: 'ko',
+    kor: 'ko',
+    chinese: 'zh',
+    chi: 'zh',
+    mandarin: 'zh',
+    russian: 'ru',
+    rus: 'ru',
+  };
+  const languages = [
+    ...new Set(
+      [
+        ...title.matchAll(
+          /(?:^|[\s._\[(-])(english|eng|en|french|fre|fra|german|ger|deu|spanish|spa|italian|ita|japanese|jpn|korean|kor|chinese|chi|mandarin|russian|rus)(?=$|[\s._\])-])/gi
+        ),
+      ].map((match) => languageAliases[match[1].toLowerCase()])
+    ),
+  ];
+  const audioChannelsMatch = title.match(
+    /(?<!\d)((?:1|2|5|7)\.\d(?:\.\d)?)(?!\.\d)/i
   );
   const releaseGroupMatch =
     title.match(/(?:^|[-_.\s])([A-Za-z0-9]{2,})$/) ||
     title.match(/\[([A-Za-z0-9]{2,})\]\s*$/);
   const sxeMatch = title.match(
-    /\bS(\d{1,2})[\s._-]*E(\d{1,3})(?:[\s._-]*E?(\d{1,3}))?\b/i
+    /\bS(\d{1,2})[\s._-]*E(\d{1,3})(?:\s*(?:[-~]\s*E?|E)(\d{1,3}))?\b/i
   );
   const xMatch = title.match(/\b(\d{1,2})x(\d{1,3})\b/i);
   const seasonEpisodeMatch = title.match(
@@ -120,7 +207,8 @@ export function parseNewshostingRelease(
     !sxeMatch &&
     (/\b(?:complete|season\s*\d{1,2}|s\d{1,2})\b.*\b(?:season|pack|complete)\b/i.test(
       title
-    ) || /\bS\d{1,2}\b(?![\s._-]*E\d{1,3})/i.test(title));
+    ) ||
+      /\bS\d{1,2}\b(?![\s._-]*E\d{1,3})/i.test(title));
 
   const season = parseNumber(
     sxeMatch?.[1] ||
@@ -141,18 +229,27 @@ export function parseNewshostingRelease(
     return true;
   });
   const rangeEnd = parseNumber(sxeMatch?.[3]);
-  const absoluteEpisode = episode ? undefined : parseNumber(absoluteMatch?.[1]);
-  const absoluteRangeEnd = parseNumber(absoluteMatch?.[2]);
-  const rangeStart = episode || absoluteEpisode;
-  const finalRangeEnd = rangeEnd || absoluteRangeEnd;
-  const episodeRange =
-    finalRangeEnd && rangeStart
-      ? { start: rangeStart, end: finalRangeEnd }
+  const absoluteEpisode =
+    episode !== undefined ? undefined : parseNumber(absoluteMatch?.[1]);
+  const absoluteRangeEnd =
+    absoluteEpisode !== undefined ? parseNumber(absoluteMatch?.[2]) : undefined;
+  const explicitEpisodeRange =
+    episode !== undefined && rangeEnd !== undefined && rangeEnd >= episode
+      ? { start: episode, end: rangeEnd }
       : undefined;
+  const absoluteEpisodeRange =
+    absoluteEpisode !== undefined &&
+    absoluteRangeEnd !== undefined &&
+    absoluteRangeEnd >= absoluteEpisode
+      ? { start: absoluteEpisode, end: absoluteRangeEnd }
+      : undefined;
+  // Keep range endpoints from the same filename expression; an S/E number
+  // must never be paired with an unrelated numeric range elsewhere in title.
+  const episodeRange = explicitEpisodeRange ?? absoluteEpisodeRange;
   const candidateGroup = releaseGroupMatch?.[1];
   const releaseGroup =
     candidateGroup &&
-    !/^(?:2160p|1080p|720p|480p|4k|uhd|hevc|x265|x264|h264|h265|avc|av1|webdl|webrip|bluray|remux|dv|dovi|hdr|hdr10|aac|ac3|eac3|dts|truehd|atmos)$/i.test(
+    !/^(?:2160p|1080p|720p|480p|4k|uhd|hevc|x265|x264|h264|h265|avc|av1|web|dl|webdl|webrip|bluray|remux|dv|dovi|hdr|hdr10|aac|ac3|eac3|dts|truehd|atmos)$/i.test(
       candidateGroup
     )
       ? candidateGroup
@@ -170,7 +267,12 @@ export function parseNewshostingRelease(
     quality,
     codec,
     hdr,
-    audio: audioMatch?.[0],
+    hdrFormats,
+    edition,
+    audio: audioFormats[0],
+    audioChannels: audioChannelsMatch?.[1],
+    audioFormats,
+    languages,
     releaseGroup,
     normalizedTitle,
     season,
@@ -294,9 +396,17 @@ export function scoreNewshostingReleaseMatch(
   media: NewshostingMediaRequest,
   parsed = parseNewshostingRelease(rawTitle),
   metadata?: NewshostingMediaMetadata
-): { score: number; reason: string } {
+): {
+  score: number;
+  reason: string;
+  confidence: 'high' | 'medium' | 'low';
+  signals: Record<string, number>;
+} {
   const similarity = bestTitleSimilarity(parsed, rawTitle, metadata);
-  let score = Math.round(similarity * 500);
+  const signals: Record<string, number> = {
+    title: Math.round(similarity * 500),
+  };
+  let score = signals.title;
   const reasons: string[] = [];
 
   if (similarity >= 0.8) {
@@ -309,21 +419,97 @@ export function scoreNewshostingReleaseMatch(
     reasons.push('weak-title');
   }
 
-  if (media.type === 'series') {
-    const releaseYear = Number.parseInt(
-      rawTitle.match(/\b(?:19|20)\d{2}\b/)?.[0] || '',
-      10
+  const releaseYear = Number.parseInt(
+    rawTitle.match(/\b(?:19|20)\d{2}\b/)?.[0] || '',
+    10
+  );
+  if (
+    media.type === 'movie' &&
+    metadata?.year &&
+    Number.isFinite(releaseYear)
+  ) {
+    if (releaseYear === metadata.year) {
+      signals.year = 180;
+      score += signals.year;
+      reasons.push('year');
+    } else {
+      signals.year = metadata.isAnime ? -900 : -320;
+      score += signals.year;
+      reasons.push('year-mismatch');
+    }
+  }
+  if (metadata?.edition) {
+    const wanted = normalizeNewshostingComparableTitle(metadata.edition);
+    const actual = parsed.edition?.replace('-', ' ');
+    if (actual && normalizeNewshostingComparableTitle(actual) === wanted) {
+      signals.edition = 140;
+      score += signals.edition;
+      reasons.push('edition');
+    } else if (actual) {
+      signals.edition = -180;
+      score += signals.edition;
+      reasons.push('edition-mismatch');
+    } else {
+      // Missing edition tags are uncertainty, not proof that the requested
+      // cut is absent. Keep the candidate available, but don't present it as
+      // an edition-confirmed match or let it outrank a positively tagged cut.
+      signals.edition = -120;
+      score += signals.edition;
+      reasons.push('edition-unconfirmed');
+    }
+  }
+
+  // These modest, explicit weights rank better-specified releases without
+  // turning missing filename tags into hard exclusions.
+  const resolutionPoints: Record<
+    ParsedNewshostingRelease['resolution'],
+    number
+  > = {
+    '2160p': 35,
+    '1080p': 30,
+    '720p': 18,
+    '480p': 5,
+    unknown: 0,
+  };
+  signals.resolution = resolutionPoints[parsed.resolution];
+  score += signals.resolution;
+  if (parsed.resolution !== 'unknown')
+    reasons.push(`resolution:${parsed.resolution}`);
+  if (parsed.audioFormats?.length) {
+    signals.audio = Math.min(
+      24,
+      parsed.audioFormats.length * 8 + (parsed.audioChannels ? 4 : 0)
     );
+    score += signals.audio;
+    reasons.push(`audio:${parsed.audioFormats.join('+')}`);
+  }
+  if (parsed.languages?.length) {
+    signals.language = Math.min(12, parsed.languages.length * 4);
+    score += signals.language;
+    reasons.push(`language:${parsed.languages.join('+')}`);
+  }
+  if (parsed.sizeBytes !== undefined) {
+    // Reward plausible feature-sized media; avoid assuming larger is always better.
+    const gib = parsed.sizeBytes / 1_073_741_824;
+    signals.size = gib >= 1 && gib <= 35 ? 18 : gib > 0.2 && gib < 80 ? 6 : -10;
+    score += signals.size;
+    reasons.push('size');
+  }
+
+  if (media.type === 'series') {
+    // For series, a release-year often describes a later season rather than
+    // the show's premiere. Preserve the established cautious series weighting.
     if (metadata?.year && Number.isFinite(releaseYear)) {
       if (releaseYear === metadata.year) {
-        score += 180;
+        signals.year = 180;
+        score += signals.year;
         reasons.push('year');
       } else {
-        score -= metadata.isAnime ? 900 : 320;
+        signals.year = metadata.isAnime ? -900 : -320;
+        score += signals.year;
         reasons.push('year-mismatch');
       }
     }
-
     const normalizedRaw = normalizeNewshostingComparableTitle(rawTitle);
     const countries = (metadata?.countries || []).map((country) =>
       country.toLowerCase()
@@ -348,9 +534,9 @@ export function scoreNewshostingReleaseMatch(
     const directEpisode = parsed.episode === media.episode;
     const rangeEpisode = Boolean(
       parsed.episodeRange &&
-        media.episode &&
-        parsed.episodeRange.start <= media.episode &&
-        parsed.episodeRange.end >= media.episode
+      media.episode &&
+      parsed.episodeRange.start <= media.episode &&
+      parsed.episodeRange.end >= media.episode
     );
 
     if (parsed.season === media.season && directEpisode) {
@@ -378,5 +564,23 @@ export function scoreNewshostingReleaseMatch(
     }
   }
 
-  return { score: Math.max(0, score), reason: reasons.join(',') };
+  const finalScore = Math.max(0, score);
+  const editionUnconfirmed = reasons.includes('edition-unconfirmed');
+  const editionMismatch = reasons.includes('edition-mismatch');
+  return {
+    score: finalScore,
+    reason: reasons.join(','),
+    confidence:
+      finalScore >= 1_100 &&
+      !reasons.includes('episode-mismatch') &&
+      !editionUnconfirmed &&
+      !editionMismatch
+        ? 'high'
+        : finalScore >= 650 &&
+            !reasons.includes('episode-mismatch') &&
+            !editionMismatch
+          ? 'medium'
+          : 'low',
+    signals,
+  };
 }

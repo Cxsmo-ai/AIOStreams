@@ -66,6 +66,111 @@ export class DeepbridUsenetStreamParser extends BuiltinStreamParser {
     }
     return super.getService(stream, currentParsedStream);
   }
+
+  protected override getExtras(
+    stream: Stream,
+    currentParsedStream: ParsedStream
+  ): ParsedStream['extra'] {
+    const hints = stream.behaviorHints as
+      | (Record<string, unknown> & {
+          deepbridSpecScore?: unknown;
+          deepbridSpecSourceCount?: unknown;
+          deepbridSpecTitleMatch?: unknown;
+          deepbridSpecContainerProbePassed?: unknown;
+          deepbridSpecVersion?: unknown;
+          deepbridMatchConfidence?: unknown;
+          deepbridMatchScore?: unknown;
+          deepbridMatchEvidence?: unknown;
+          deepbridEvidenceVersion?: unknown;
+          deepbridEvidence?: unknown;
+        })
+      | undefined;
+    const baseExtras = super.getExtras(stream, currentParsedStream);
+    const inheritedSuffix = Array.isArray(baseExtras?.formattingSuffix)
+      ? baseExtras.formattingSuffix.filter(
+          (value): value is string => typeof value === 'string'
+        )
+      : [];
+    const rawScore = hints?.deepbridSpecScore;
+    if (
+      hints?.deepbridSpecVersion !== 1 ||
+      typeof rawScore !== 'number' ||
+      !Number.isFinite(rawScore) ||
+      rawScore < 0 ||
+      rawScore > 100
+    ) {
+      return baseExtras;
+    }
+
+    const score = Math.round(rawScore);
+    const rawSourceCount = Number(hints?.deepbridSpecSourceCount);
+    const sourceCount = Number.isFinite(rawSourceCount)
+      ? Math.max(0, Math.floor(rawSourceCount))
+      : undefined;
+    const evidence: string[] = [];
+    if (hints?.deepbridSpecTitleMatch === true) evidence.push('title match');
+    if (hints?.deepbridSpecContainerProbePassed === true)
+      evidence.push('range/container probe passed');
+    if (sourceCount !== undefined && sourceCount > 0)
+      evidence.push(`Finder sources: ${sourceCount}`);
+
+    const rawMatchScore = Number(hints?.deepbridMatchScore);
+    const matchScore = Number.isFinite(rawMatchScore)
+      ? Math.max(0, Math.min(10_000, Math.round(rawMatchScore)))
+      : undefined;
+    const confidence =
+      hints?.deepbridMatchConfidence === 'high' ||
+      hints?.deepbridMatchConfidence === 'medium' ||
+      hints?.deepbridMatchConfidence === 'low'
+        ? hints.deepbridMatchConfidence
+        : undefined;
+    const rawEvidence =
+      hints?.deepbridEvidence && typeof hints.deepbridEvidence === 'object'
+        ? (hints.deepbridEvidence as Record<string, unknown>)
+        : undefined;
+    const pipelineEvidence =
+      hints?.deepbridEvidenceVersion === 1 && rawEvidence
+        ? {
+            parsed: rawEvidence.parsed === true,
+            resolved: rawEvidence.resolved === true,
+            probed: rawEvidence.probed === true,
+            playbackConfirmed: rawEvidence.playbackConfirmed === true,
+          }
+        : undefined;
+    const matchReason =
+      typeof hints?.deepbridMatchEvidence === 'string'
+        ? hints.deepbridMatchEvidence.slice(0, 240)
+        : undefined;
+
+    return {
+      ...(baseExtras || {}),
+      deepbridSpec: {
+        score,
+        sourceCount,
+        titleMatch: hints?.deepbridSpecTitleMatch === true,
+        containerProbePassed: hints?.deepbridSpecContainerProbePassed === true,
+        technicalEvidence: 'filename-inferred',
+        scoreVersion: hints?.deepbridSpecVersion === 1 ? 1 : undefined,
+        rating: 'aiostreams-estimate',
+      },
+      deepbridMatch:
+        confidence || matchScore !== undefined || matchReason
+          ? { confidence, score: matchScore, reason: matchReason }
+          : undefined,
+      deepbridEvidence: pipelineEvidence,
+      formattingSuffix: [
+        ...inheritedSuffix,
+        `✦ DeepSpec ${score}/100 · AIOStreams estimate`,
+        evidence.length ? `🔎 ${evidence.join(' · ')}` : undefined,
+        confidence
+          ? `🎯 Filename/title match estimate: ${confidence}`
+          : undefined,
+        pipelineEvidence
+          ? `✅ Parsed${pipelineEvidence.resolved ? ' · Resolved' : ''}${pipelineEvidence.probed ? ' · Probed' : ''}${pipelineEvidence.playbackConfirmed ? ' · Playback confirmed' : ' · Playback unverified'}`
+          : undefined,
+      ].filter((value): value is string => Boolean(value)),
+    };
+  }
 }
 
 export class DeepbridUsenetPreset extends BuiltinAddonPreset {

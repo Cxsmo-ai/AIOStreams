@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import pLimit from 'p-limit';
 import { ParsedId } from '../../utils/id-parser.js';
@@ -25,6 +25,8 @@ import {
   DeepbridFinderFile,
   DeepbridFinderResult,
   DeepbridRetryExhaustionReason,
+  assessDeepbridArchiveVolumes,
+  classifyDeepbridUploadFile,
   isDeepbridArchiveName,
   isDeepbridVideoName,
   validateDeepbridDownloadUrl,
@@ -38,6 +40,8 @@ export {
 } from './playback.js';
 import {
   hasSuccessfulDeepbridProbe,
+  isDeepbridProbeQuarantined,
+  rememberFailedDeepbridProbe,
   rememberSuccessfulDeepbridProbe,
 } from './probe-cache.js';
 import {
@@ -51,6 +55,17 @@ const logger = createLogger('deepbrid-usenet');
 // process-wide ceiling while still allowing one request to resolve candidates
 // in parallel and retain every valid result.
 const deepbridNetworkLimit = pLimit(10);
+
+/** Keep private/signed download capabilities out of process-local cache keys. */
+function deepbridProbeCacheKey(
+  apiKey: string,
+  link: string,
+  extension: string
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify([apiKey, link, extension]))
+    .digest('hex');
+}
 
 export const DeepbridUsenetConfigSchema = BaseDebridConfigSchema.extend({
   /** Copied from the global Deepbrid service during preset generation. */
@@ -127,14 +142,25 @@ function rankResult(
   result: DeepbridFinderResult,
   media: NewshostingMediaRequest,
   metadata: NewshostingMediaMetadata
-): { score: number; confirmed: boolean } {
+): {
+  score: number;
+  confirmed: boolean;
+  confidence: 'high' | 'medium' | 'low';
+  matchReason: string;
+} {
+  const parsedRelease = parseNewshostingRelease(result.title);
+  if (parsedRelease.sizeBytes === undefined && result.size > 0) {
+    parsedRelease.sizeBytes = result.size;
+  }
   const match = scoreNewshostingReleaseMatch(
     result.title,
     media,
-    parseNewshostingRelease(result.title),
+    parsedRelease,
     metadata
   );
   let score = match.score + Math.min(200, result.sources * 10);
+  // Keep candidate ordering compatible with the established Finder ranking.
+  // DeepSpec is display-only and must not alter progressive candidate choice.
   if (
     /\b(?:2160p|1080p|720p|4k|uhd|web-?dl|webrip|blu-?ray|remux|hdtv)\b/i.test(
       result.title
@@ -150,6 +176,8 @@ function rankResult(
   return {
     score,
     confirmed: match.score >= (media.type === 'series' ? 650 : 600),
+    confidence: match.confidence,
+    matchReason: match.reason,
   };
 }
 
@@ -160,7 +188,7 @@ export function chooseDeepbridVideoFiles(
 ): DeepbridFinderFile[] {
   const videos = files.filter(
     (file) =>
-      isDeepbridVideoName(file.name) &&
+      classifyDeepbridUploadFile(file).playableCandidate &&
       !/(?:^|[._ -])(?:sample|trailer|proof)(?:[._ -]|$)/i.test(file.name)
   );
   if (media.type !== 'series' || !media.season || !media.episode) return videos;
@@ -239,6 +267,8 @@ type RankedDeepbridResult = {
   result: DeepbridFinderResult;
   score: number;
   confirmed: boolean;
+  confidence: 'high' | 'medium' | 'low';
+  matchReason: string;
 };
 
 export function prioritizeDeepbridSeasonPacks(
@@ -275,7 +305,83 @@ export function prioritizeDeepbridSeasonPacks(
 type ResolvedDeepbridFile = RankedDeepbridResult & {
   file: DeepbridFinderFile;
   archiveExpanded: boolean;
+  archiveIntegrity: 'not-assessed' | 'not-verified' | 'incomplete';
+  containerProbePassed: boolean;
 };
+
+export interface DeepbridSpecScoreInput {
+  titleMatchConfirmed: boolean;
+  containerProbePassed: boolean;
+  result: Pick<DeepbridFinderResult, 'sources'> &
+    Partial<Pick<DeepbridFinderResult, 'size'>>;
+  file: Pick<DeepbridFinderFile, 'name' | 'size'>;
+}
+
+/** AIOStreams-side card score; not Deepbrid's own TrueSpec verification. */
+export function scoreDeepbridSpec(input: DeepbridSpecScoreInput): number {
+  const release = parseNewshostingRelease(input.file.name);
+  const resolutionPoints: Record<string, number> = {
+    '2160p': 10,
+    '1080p': 9,
+    '720p': 7,
+    '480p': 4,
+  };
+  const qualityPoints: Record<string, number> = {
+    REMUX: 8,
+    BluRay: 7,
+    'WEB-DL': 6,
+    WEBRip: 5,
+    HDTV: 3,
+  };
+  const sourcePoints = Math.min(12, Math.max(0, input.result.sources) * 2);
+  const metadataPoints =
+    (resolutionPoints[release.resolution] ?? 0) +
+    (qualityPoints[release.quality] ?? 0) +
+    (release.codec === 'unknown' ? 0 : 5) +
+    (release.hdr === 'none' || release.hdr === 'unknown' ? 0 : 4) +
+    (release.audioFormats?.length ? 5 : 0) +
+    (release.audioChannels ? 3 : 0) +
+    (input.file.size > 0 || (input.result.size ?? 0) > 0 ? 3 : 0);
+  return Math.min(
+    100,
+    (input.titleMatchConfirmed ? 30 : 0) +
+      (input.containerProbePassed ? 25 : 0) +
+      sourcePoints +
+      metadataPoints
+  );
+}
+
+function formatDeepbridSpecEvidence(
+  result: DeepbridFinderResult,
+  file: DeepbridFinderFile,
+  score: number,
+  containerProbePassed: boolean
+): string[] {
+  const release = parseNewshostingRelease(file.name);
+  const filenameTags = [
+    release.resolution !== 'unknown' ? release.resolution : undefined,
+    release.codec !== 'unknown' ? release.codec : undefined,
+    ...(release.hdrFormats ?? []),
+    ...(release.audioFormats ?? (release.audio ? [release.audio] : [])),
+    release.audioChannels,
+    release.languages?.length
+      ? `Languages ${release.languages.join('/')}`
+      : undefined,
+  ].filter((value): value is string => Boolean(value));
+  return [
+    result.title,
+    file.name,
+    filenameTags.length
+      ? `🎞 ${filenameTags.join(' · ')} (filename tags; not media-inspected)`
+      : undefined,
+    `✦ DeepSpec ${score}/100 · AIOStreams estimate v1`,
+    `🔎 Finder sources: ${result.sources} · ${
+      containerProbePassed
+        ? 'range/container probe passed'
+        : 'range/container probe not verified'
+    }`,
+  ].filter((line): line is string => Boolean(line));
+}
 
 export interface ResolveDeepbridOptions {
   concurrency: number;
@@ -294,6 +400,8 @@ export interface ResolveDeepbridOptions {
     file: DeepbridFinderFile,
     options: { timeoutMs: number; signal?: AbortSignal }
   ) => Promise<boolean>;
+  /** Set false when probeFile is only an eligibility filter, not a container probe. */
+  probeFileValidatesContainer?: boolean;
   /** Receives each successful candidate batch as soon as it is verified. */
   onResolved?: (
     files: ResolvedDeepbridFile[],
@@ -469,6 +577,20 @@ export function classifyDeepbridResolutionFailure(
     current = value.cause;
   }
   return 'other';
+}
+
+/** Archive expansion does not prove that every multipart volume was present. */
+export function classifyDeepbridArchiveIntegrity(
+  archiveExpanded: boolean,
+  listedArchiveFiles: readonly Pick<
+    DeepbridFinderFile,
+    'name' | 'unreachable'
+  >[] = []
+): 'not-assessed' | 'not-verified' | 'incomplete' {
+  if (assessDeepbridArchiveVolumes(listedArchiveFiles).incomplete) {
+    return 'incomplete';
+  }
+  return archiveExpanded ? 'not-verified' : 'not-assessed';
 }
 
 function emptyDeepbridResolutionFailureClasses(): Record<
@@ -735,6 +857,9 @@ export async function resolveDeepbridFiles(
           timeoutMs,
           signal: options.signal,
         });
+        const listedArchiveFiles = content.files.filter((file) =>
+          isDeepbridArchiveName(file.name)
+        );
         if (content.hasPassword) {
           passwordProtected += 1;
           continue;
@@ -771,6 +896,11 @@ export async function resolveDeepbridFiles(
             ...item,
             file,
             archiveExpanded,
+            archiveIntegrity: classifyDeepbridArchiveIntegrity(
+              archiveExpanded,
+              listedArchiveFiles
+            ),
+            containerProbePassed: false,
           }));
           resolvedByIndex.set(index, values);
           resolvedCount += values.length;
@@ -788,7 +918,17 @@ export async function resolveDeepbridFiles(
                 timeoutMs: probeTimeoutMs,
                 signal: options.signal,
               }))
-                ? { ...item, file, archiveExpanded }
+                ? {
+                    ...item,
+                    file,
+                    archiveExpanded,
+                    archiveIntegrity: classifyDeepbridArchiveIntegrity(
+                      archiveExpanded,
+                      listedArchiveFiles
+                    ),
+                    containerProbePassed:
+                      options.probeFileValidatesContainer !== false,
+                  }
                 : undefined;
             })
           );
@@ -1442,46 +1582,91 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       files: ResolvedDeepbridFile[],
       resolutionCoverage: 'progressive' | 'partial' | 'complete' = 'progressive'
     ): Stream[] =>
-      files.flatMap(({ result, file, archiveExpanded }) => {
-        const target = validateDeepbridDownloadUrl(file.link);
-        const playbackVariants = createDeepbridPlaybackVariants(
-          {
-            apiKey: this.deepbridApiKey,
-            url: target.toString(),
-            filename: file.name,
-            size: file.size || undefined,
-          },
-          this.userData.playbackMode
-        );
-        return playbackVariants.map(
-          ({ mode, label, url }) =>
-            ({
-              name: `[DB⚡] Deepbrid Usenet · ${label}`,
-              title: result.title,
-              description: `${result.title}\n${file.name}\n📺 ${label} · 🔍 Deepbrid Usenet${result.sources ? ` · ${result.sources} sources` : ''}`,
-              url,
-              type: 'usenet',
-              idMatched: true,
-              age: ageHours(result.date),
-              behaviorHints: {
-                notWebReady: false,
-                filename: file.name,
-                videoSize: file.size || result.size || undefined,
-                bingeGroup: `deepbrid-usenet|${file.name.toLowerCase()}`,
-                deepbridPlaybackMode: mode,
-                deepbridSeasonPack:
-                  parseNewshostingRelease(result.title).seasonPack === true,
-                deepbridReleaseTitle: result.title,
-                deepbridReleaseSize: result.size || undefined,
-                deepbridNzbHash: file.nzbUrl
-                  ? hashNzbUrl(file.nzbUrl)
-                  : undefined,
-                deepbridArchiveExpanded: archiveExpanded,
-                deepbridResolutionCoverage: resolutionCoverage,
-              },
-            }) satisfies Stream
-        );
-      });
+      files.flatMap(
+        ({
+          result,
+          file,
+          archiveExpanded,
+          archiveIntegrity,
+          confirmed,
+          score,
+          confidence,
+          matchReason,
+          containerProbePassed,
+        }) => {
+          const target = validateDeepbridDownloadUrl(file.link);
+          const deepbridSpecScore = scoreDeepbridSpec({
+            titleMatchConfirmed: confirmed,
+            containerProbePassed,
+            result,
+            file,
+          });
+          const details = formatDeepbridSpecEvidence(
+            result,
+            file,
+            deepbridSpecScore,
+            containerProbePassed
+          );
+          const playbackVariants = createDeepbridPlaybackVariants(
+            {
+              apiKey: this.deepbridApiKey,
+              url: target.toString(),
+              filename: file.name,
+              size: file.size || undefined,
+              finderToken: result.token,
+              finderArchives: archiveExpanded,
+            },
+            this.userData.playbackMode
+          );
+          return playbackVariants.map(
+            ({ mode, label, url }) =>
+              ({
+                name: `[DB⚡] Deepbrid Usenet · ${label}`,
+                title: result.title,
+                description: [
+                  ...details,
+                  `📺 ${label} · 🔍 Deepbrid Usenet`,
+                ].join('\n'),
+                url,
+                type: 'usenet',
+                idMatched: true,
+                age: ageHours(result.date),
+                behaviorHints: {
+                  notWebReady: false,
+                  filename: file.name,
+                  videoSize: file.size || result.size || undefined,
+                  bingeGroup: `deepbrid-usenet|${file.name.toLowerCase()}`,
+                  deepbridPlaybackMode: mode,
+                  deepbridSeasonPack:
+                    parseNewshostingRelease(result.title).seasonPack === true,
+                  deepbridReleaseTitle: result.title,
+                  deepbridReleaseSize: result.size || undefined,
+                  deepbridSpecScore,
+                  deepbridSpecSourceCount: result.sources,
+                  deepbridSpecTitleMatch: confirmed,
+                  deepbridSpecContainerProbePassed: containerProbePassed,
+                  deepbridSpecVersion: 1,
+                  deepbridMatchConfidence: confidence,
+                  deepbridMatchScore: score,
+                  deepbridMatchEvidence: matchReason,
+                  deepbridEvidenceVersion: 1,
+                  deepbridEvidence: {
+                    parsed: true,
+                    resolved: true,
+                    probed: containerProbePassed,
+                    playbackConfirmed: false,
+                  },
+                  deepbridNzbHash: file.nzbUrl
+                    ? hashNzbUrl(file.nzbUrl)
+                    : undefined,
+                  deepbridArchiveExpanded: archiveExpanded,
+                  deepbridArchiveIntegrity: archiveIntegrity,
+                  deepbridResolutionCoverage: resolutionCoverage,
+                },
+              }) satisfies Stream
+          );
+        }
+      );
     const resolveCandidates = (
       batch: RankedDeepbridResult[],
       candidateOffset = 0
@@ -1498,11 +1683,18 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         probeFile: (file, requestOptions) => {
           const extension =
             file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
-          const cacheKey = `${file.link}\u0000${extension}`;
+          const cacheKey = deepbridProbeCacheKey(
+            this.deepbridApiKey,
+            file.link,
+            extension
+          );
           const cached = probeCache.get(cacheKey);
           if (cached) return cached;
           if (hasSuccessfulDeepbridProbe(cacheKey)) {
             return Promise.resolve(true);
+          }
+          if (isDeepbridProbeQuarantined(cacheKey)) {
+            return Promise.resolve(false);
           }
           const probe = deepbridNetworkLimit(() =>
             runWithinDeepbridRequestBudget(
@@ -1518,6 +1710,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
             )
           ).then((playable) => {
             if (playable) rememberSuccessfulDeepbridProbe(cacheKey);
+            else if (!signal?.aborted) rememberFailedDeepbridProbe(cacheKey);
             return playable;
           });
           probeCache.set(cacheKey, probe);
@@ -1828,8 +2021,13 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       probe: async (item) => {
         const extension =
           item.file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
-        const cacheKey = `${item.file.link}\u0000${extension}`;
+        const cacheKey = deepbridProbeCacheKey(
+          this.deepbridApiKey,
+          item.file.link,
+          extension
+        );
         if (hasSuccessfulDeepbridProbe(cacheKey)) return true;
+        if (isDeepbridProbeQuarantined(cacheKey)) return false;
         let probe = this.bothProbeCache.get(cacheKey);
         if (!probe) {
           probe = deepbridNetworkLimit(() =>
@@ -1843,11 +2041,16 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
                   signal,
                 })
             )
-          );
+          ).then((playable) => {
+            if (playable) rememberSuccessfulDeepbridProbe(cacheKey);
+            else if (!signal?.aborted) rememberFailedDeepbridProbe(cacheKey);
+            return playable;
+          });
           this.bothProbeCache.set(cacheKey, probe);
         }
-        if (!(await probe)) return false;
-        rememberSuccessfulDeepbridProbe(cacheKey);
+        if (!(await probe)) {
+          return false;
+        }
         return true;
       },
     });
@@ -1875,12 +2078,26 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
 
     return probeBatch.playable.flatMap((item) => {
       const target = validateDeepbridDownloadUrl(item.file.link);
+      const deepbridSpecScore = scoreDeepbridSpec({
+        titleMatchConfirmed: item.confirmed,
+        containerProbePassed: true,
+        result: item.result,
+        file: item.file,
+      });
+      const details = formatDeepbridSpecEvidence(
+        item.result,
+        item.file,
+        deepbridSpecScore,
+        true
+      );
       const playbackVariants = createDeepbridPlaybackVariants(
         {
           apiKey: this.deepbridApiKey,
           url: target.toString(),
           filename: item.file.name,
           size: item.file.size || undefined,
+          finderToken: item.result.token,
+          finderArchives: item.archiveExpanded,
         },
         this.userData.playbackMode
       );
@@ -1888,7 +2105,9 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         return {
           name: `[DB⚡] Deepbrid Usenet · ${label}`,
           title: item.result.title,
-          description: `${item.result.title}\n${item.file.name}\n📺 ${label} · 🔍 Deepbrid Usenet${item.result.sources ? ` · ${item.result.sources} sources` : ''}`,
+          description: [...details, `📺 ${label} · 🔍 Deepbrid Usenet`].join(
+            '\n'
+          ),
           url,
           type: 'usenet',
           idMatched: true,
@@ -1903,6 +2122,21 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
               parseNewshostingRelease(item.result.title).seasonPack === true,
             deepbridReleaseTitle: item.result.title,
             deepbridReleaseSize: item.result.size || undefined,
+            deepbridSpecScore,
+            deepbridSpecSourceCount: item.result.sources,
+            deepbridSpecTitleMatch: item.confirmed,
+            deepbridSpecContainerProbePassed: true,
+            deepbridSpecVersion: 1,
+            deepbridMatchConfidence: item.confidence,
+            deepbridMatchScore: item.score,
+            deepbridMatchEvidence: item.matchReason,
+            deepbridEvidenceVersion: 1,
+            deepbridEvidence: {
+              parsed: true,
+              resolved: true,
+              probed: true,
+              playbackConfirmed: false,
+            },
             deepbridNzbHash: item.file.nzbUrl
               ? hashNzbUrl(item.file.nzbUrl)
               : undefined,
@@ -1913,6 +2147,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
               .update(item.file.link)
               .digest('hex'),
             deepbridArchiveExpanded: item.archiveExpanded,
+            deepbridArchiveIntegrity: item.archiveIntegrity,
           },
         } satisfies Stream;
       });
@@ -2060,6 +2295,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         // Finder NZBs must reach other services even if their direct media
         // endpoint is unavailable; direct playback is separately probed.
         probeFile: () => Promise.resolve(true),
+        probeFileValidatesContainer: false,
         // Probe direct playback as candidates resolve, but don't block the
         // Finder content workers: the external NZB branch must still receive
         // results when direct validation is slow or unavailable.

@@ -521,6 +521,137 @@ export async function openConfigProfile(id: string) {
   );
 }
 
+export interface DeepbridProfileHistoryEntry {
+  id: string;
+  filename: string;
+  size?: string;
+  date?: string;
+}
+
+export async function getDeepbridProfileHistory(
+  profileId: string,
+  options: { kind: 'downloads' | 'uploads'; limit: number; offset: number }
+) {
+  const query = new URLSearchParams({
+    kind: options.kind,
+    limit: String(options.limit),
+    offset: String(options.offset),
+  });
+  return api<{
+    kind: 'downloads' | 'uploads';
+    limit: number;
+    offset: number;
+    entries: DeepbridProfileHistoryEntry[];
+    hasNext: boolean;
+  }>(`/profiles/${profileId}/deepbrid/history?${query}`);
+}
+
+export interface DeepbridUploadDetails {
+  id: string;
+  title: string;
+  files: Array<{
+    name: string;
+    size?: number;
+    sizeHuman: string;
+    kind: 'archive' | 'video-candidate' | 'other';
+    status: 'candidate' | 'unreachable' | 'non-video';
+    reason?:
+      'provider-unreachable' | 'missing-link' | 'not-video' | 'untrusted-link';
+  }>;
+  archive: {
+    status: 'not-assessed' | 'not-verified' | 'incomplete';
+    missingVolumeNumbers: number[];
+    unreachableArchiveCount: number;
+  };
+}
+
+export async function getDeepbridProfileUploadDetails(
+  profileId: string,
+  uploadId: string
+) {
+  return api<DeepbridUploadDetails>(
+    `/profiles/${profileId}/deepbrid/uploads/${encodeURIComponent(uploadId)}`
+  );
+}
+
+export interface DeepbridFolderFile {
+  name: string;
+  size?: number;
+  sizeHuman: string;
+  playableCandidate: boolean;
+  status: 'candidate' | 'unreachable' | 'non-video';
+  reason?:
+    'provider-unreachable' | 'missing-link' | 'not-video' | 'untrusted-link';
+}
+
+export async function resolveDeepbridProfileFolder(
+  profileId: string,
+  link: string
+) {
+  return api<{ files: DeepbridFolderFile[] }>(
+    `POST /profiles/${profileId}/deepbrid/folder`,
+    { body: { link } }
+  );
+}
+
+export interface DeepbridProfileSelfTestResult {
+  overall: 'passed' | 'failed';
+  account: {
+    status: 'connected' | 'failed';
+    failureKind?:
+      'authentication' | 'rate-limited' | 'provider-error' | 'network-error';
+    durationMs: number;
+  };
+  checks: Array<{
+    id: 'rate-limit-retry' | 'release-parser' | 'archive-gap-parser';
+    status: 'passed' | 'failed';
+    durationMs: number;
+  }>;
+}
+
+export interface DeepbridProfileMetrics {
+  scope: 'since-process-start';
+  search: {
+    coldFetches: number;
+    failedColdFetches: number;
+    freshCacheHits: number;
+    coalescedRequests: number;
+    p50Ms: number;
+    p95Ms: number;
+    samples: number;
+    warmP50Ms: number;
+    warmP95Ms: number;
+    warmSamples: number;
+  };
+  queue: { p50Ms: number; p95Ms: number; samples: number };
+  rateLimitedResponses: number;
+  transportFailures: number;
+}
+
+export async function getDeepbridProfileMetrics(profileId: string) {
+  return api<DeepbridProfileMetrics>(`/profiles/${profileId}/deepbrid/metrics`);
+}
+
+export async function runDeepbridProfileSelfTest(profileId: string) {
+  return api<DeepbridProfileSelfTestResult>(
+    `POST /profiles/${profileId}/deepbrid/self-test`
+  );
+}
+
+export async function deleteDeepbridProfileHistory(
+  profileId: string,
+  kind: 'downloads' | 'uploads',
+  ids: string[]
+) {
+  return api<{
+    deleted: number;
+    ids: string[];
+    notFound: string[];
+  }>(`DELETE /profiles/${profileId}/deepbrid/history`, {
+    body: { kind, ids, confirm: true },
+  });
+}
+
 /**
  * Resolve synced items (regex patterns and/or stream expressions) from URLs
  */
