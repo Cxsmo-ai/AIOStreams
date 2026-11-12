@@ -3,10 +3,12 @@ import test from 'node:test';
 import {
   buildDeepbridQueries,
   chooseDeepbridVideoFiles,
+  DeepbridProgressiveResolutionQueue,
   createDeepbridPlaybackToken,
   decodeDeepbridPlaybackToken,
   DeepbridUsenetConfigSchema,
   classifyDeepbridResolutionFailure,
+  deepbridCoverageStatus,
   DeepbridResolutionIncompleteError,
   filterDeepbridProbeResults,
   prioritizeDeepbridSeasonPacks,
@@ -67,6 +69,32 @@ test('extends only progressive Finder resolution and keeps a bounded caller marg
   assert.equal(deepbridProgressiveOuterTimeout(50_000), 3_660_000);
   assert.equal(deepbridProgressiveOuterTimeout(750_000), 3_660_000);
   assert.equal(deepbridProgressiveOuterTimeout(4_500_000), 4_560_000);
+});
+
+test('all Deepbrid Finder modes classify failed queries, pagination, resolution, and aborts as partial', () => {
+  for (const mode of ['direct', 'both', 'indexer']) {
+    assert.equal(deepbridCoverageStatus({}), 'complete', `${mode}: complete`);
+    assert.equal(
+      deepbridCoverageStatus({ failedSearches: 1 }),
+      'partial',
+      `${mode}: failed query`
+    );
+    assert.equal(
+      deepbridCoverageStatus({ incompleteQueries: 1 }),
+      'partial',
+      `${mode}: incomplete paging`
+    );
+    assert.equal(
+      deepbridCoverageStatus({ resolutionFailures: 1 }),
+      'partial',
+      `${mode}: resolution failure`
+    );
+    assert.equal(
+      deepbridCoverageStatus({ aborted: true }),
+      'partial',
+      `${mode}: aborted`
+    );
+  }
 });
 
 class TestDeepbridParser extends DeepbridUsenetStreamParser {
@@ -1946,6 +1974,9 @@ test('Deepbrid Finder search paginates and retains already fetched pages', async
           invalidCount: 0,
         };
       }
+      if (offset === 100) {
+        return { results: [], rawCount: 0, invalidCount: 0 };
+      }
       throw new Error('unexpected extra page');
     },
   } as unknown as DeepbridFinderClient;
@@ -1954,10 +1985,10 @@ test('Deepbrid Finder search paginates and retains already fetched pages', async
     deadline: Date.now() + 10_000,
     onOutcome: (value) => (outcome = value),
   });
-  assert.deepEqual(calls, [0, 50]);
+  assert.deepEqual(calls, [0, 50, 100]);
   assert.equal(results.length, 51);
   assert.deepEqual(outcome, {
-    pagesFetched: 2,
+    pagesFetched: 3,
     pageRetries: 0,
     resultCount: 51,
     invalidResultCount: 0,
@@ -2040,14 +2071,14 @@ test('Deepbrid Finder retries a transient page failure without skipping that pag
     onOutcome: (value) => (outcome = value),
   });
 
-  assert.deepEqual(calls, [0, 50, 50]);
+  assert.deepEqual(calls, [0, 50, 50, 100, 100, 150, 150, 200, 200]);
   assert.equal(results.length, 51);
   assert.deepEqual(outcome, {
-    pagesFetched: 2,
-    pageRetries: 1,
+    pagesFetched: 5,
+    pageRetries: 4,
     resultCount: 51,
     invalidResultCount: 0,
-    termination: 'no-more-results',
+    termination: 'repeated-page',
   });
 });
 
@@ -2283,18 +2314,21 @@ test('Deepbrid Finder continues after malformed rows in a full provider page', a
           invalidCount: 1,
         };
       }
-      return {
-        results: [makeResult('later-valid')],
-        rawCount: 1,
-        invalidCount: 0,
-      };
+      if (offset === 50) {
+        return {
+          results: [makeResult('later-valid')],
+          rawCount: 1,
+          invalidCount: 0,
+        };
+      }
+      return { results: [], rawCount: 0, invalidCount: 0 };
     },
   } as unknown as DeepbridFinderClient;
 
   const results = await searchDeepbridFinderPages(client, 'sample title', {
     deadline: Date.now() + 10_000,
   });
-  assert.deepEqual(offsets, [0, 50]);
+  assert.deepEqual(offsets, [0, 50, 100]);
   assert.equal(results.length, 50);
   assert.equal(
     results.some((result) => result.token === 'later-valid'),
@@ -2302,13 +2336,15 @@ test('Deepbrid Finder continues after malformed rows in a full provider page', a
   );
 });
 
-test('Deepbrid Finder continues through bounded all-invalid full pages', async () => {
+test('Deepbrid Finder keeps paging through all-invalid pages until an empty page', async () => {
   const offsets: number[] = [];
   const client = {
     searchPage: async (_query: string, options: { offset?: number }) => {
       const offset = options.offset ?? 0;
       offsets.push(offset);
-      return { results: [], rawCount: 50, invalidCount: 50 };
+      return offset < 150
+        ? { results: [], rawCount: 50, invalidCount: 50 }
+        : { results: [], rawCount: 0, invalidCount: 0 };
     },
   } as unknown as DeepbridFinderClient;
   let outcome: DeepbridFinderPaginationOutcome | undefined;
@@ -2318,14 +2354,163 @@ test('Deepbrid Finder continues through bounded all-invalid full pages', async (
     onOutcome: (value) => (outcome = value),
   });
 
-  assert.deepEqual(offsets, [0, 50, 100]);
+  assert.deepEqual(offsets, [0, 50, 100, 150]);
   assert.deepEqual(results, []);
   assert.deepEqual(outcome, {
-    pagesFetched: 3,
+    pagesFetched: 4,
     pageRetries: 0,
     resultCount: 0,
     invalidResultCount: 150,
-    termination: 'invalid-page-limit',
+    termination: 'no-more-results',
+  });
+});
+
+test('Deepbrid Finder continues after a duplicate-only page and emits discovery before fetching the next page', async () => {
+  const events: string[] = [];
+  const makeResult = (token: string): DeepbridFinderResult => ({
+    token,
+    title: token,
+    category: '',
+    categoryName: '',
+    kind: '',
+    size: 1,
+    sizeHuman: '',
+    date: '',
+    sources: 1,
+  });
+  const firstPage = Array.from({ length: 50 }, (_, index) =>
+    makeResult(`duplicate-${index}`)
+  );
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      events.push(`request:${offset}`);
+      if (offset === 0)
+        return { results: firstPage, rawCount: 50, invalidCount: 0 };
+      if (offset === 50)
+        return { results: firstPage, rawCount: 50, invalidCount: 0 };
+      if (offset === 100) {
+        return {
+          results: [makeResult('after-duplicate')],
+          rawCount: 1,
+          invalidCount: 0,
+        };
+      }
+      return { results: [], rawCount: 0, invalidCount: 0 };
+    },
+  } as unknown as DeepbridFinderClient;
+
+  const results = await searchDeepbridFinderPages(client, 'sample title', {
+    deadline: Date.now() + 10_000,
+    onPage: ({ offset, results }) =>
+      events.push(`discovered:${offset}:${results.length}`),
+  });
+
+  assert.deepEqual(events.slice(0, 3), [
+    'request:0',
+    'discovered:0:50',
+    'request:50',
+  ]);
+  assert.equal(results.length, 51);
+  assert.equal(results.at(-1)?.token, 'after-duplicate');
+});
+
+test('progressive page resolution completes while a later Finder page is still blocked', async () => {
+  let completeFirstResolution!: () => void;
+  const firstResolution = new Promise<void>((resolve) => {
+    completeFirstResolution = resolve;
+  });
+  let finalPageRequested = false;
+  const queue = new DeepbridProgressiveResolutionQueue<string>();
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      if (offset === 0) {
+        return {
+          results: [
+            {
+              token: 'early-candidate',
+              title: 'Early candidate',
+              category: '',
+              categoryName: '',
+              kind: '',
+              size: 1,
+              sizeHuman: '',
+              date: '',
+              sources: 1,
+            },
+          ],
+          rawCount: 1,
+          invalidCount: 0,
+        };
+      }
+      finalPageRequested = true;
+      await firstResolution;
+      return { results: [], rawCount: 0, invalidCount: 0 };
+    },
+  } as unknown as DeepbridFinderClient;
+
+  const search = searchDeepbridFinderPages(client, 'sample', {
+    deadline: Date.now() + 10_000,
+    onPage: ({ results }) => {
+      return queue.enqueue(
+        results.map((result) => result.token),
+        async (batch) => {
+          completeFirstResolution();
+          return batch.map((token) => `resolved:${token}`);
+        }
+      );
+    },
+  });
+  await search;
+  const { resolved, failures } = await queue.drain();
+
+  assert.equal(finalPageRequested, true);
+  assert.deepEqual(resolved, ['resolved:early-candidate']);
+  assert.deepEqual(failures, []);
+});
+
+test('progressive resolution keeps earlier results after a later batch fails', async () => {
+  const queue = new DeepbridProgressiveResolutionQueue<string>();
+  queue.enqueue(['first'], async () => ['resolved:first']);
+  queue.enqueue(['second'], async () => {
+    throw new Error('test failure');
+  });
+
+  const result = await queue.drain();
+  assert.deepEqual(result.resolved, ['resolved:first']);
+  assert.equal(result.failures.length, 1);
+});
+
+test('progressive resolution applies bounded backpressure to pending candidates', async () => {
+  let releaseFirst!: () => void;
+  const firstWork = new Promise<void>((resolve) => (releaseFirst = resolve));
+  let secondAccepted = false;
+  const queue = new DeepbridProgressiveResolutionQueue<string>();
+  const first = queue.enqueue(
+    Array.from({ length: 150 }, () => 'first'),
+    async () => {
+      await firstWork;
+      return [];
+    }
+  );
+  await Promise.resolve();
+  const second = queue.enqueue(
+    Array.from({ length: 100 }, () => 'second'),
+    async () => {
+      secondAccepted = true;
+      return [];
+    }
+  );
+  await Promise.resolve();
+  assert.equal(secondAccepted, false);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.equal(secondAccepted, true);
+  assert.deepEqual(await queue.drain(), {
+    resolved: [],
+    failures: [],
+    failedBatchCount: 0,
   });
 });
 

@@ -545,6 +545,71 @@ export function runQueuedDeepbridRequest<T>(
   );
 }
 
+/**
+ * Serializes page batches without waiting inside Finder pagination. Discovery
+ * can keep fetching later pages while the earliest available candidate batch
+ * resolves; drain() is the only synchronization barrier, at response finish.
+ */
+export class DeepbridProgressiveResolutionQueue<TInput, TOutput = TInput> {
+  private tail: Promise<void> = Promise.resolve();
+  private readonly resolved: TOutput[] = [];
+  private readonly failures: unknown[] = [];
+  private failedBatchCount = 0;
+  private pendingCandidates = 0;
+  private readonly waiters: Array<() => void> = [];
+  private static readonly MAX_PENDING_CANDIDATES = 200;
+
+  async enqueue(
+    batch: TInput[],
+    resolve: (batch: TInput[]) => Promise<TOutput[]>,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (batch.length === 0 || signal?.aborted) return;
+    while (
+      !signal?.aborted &&
+      this.pendingCandidates > 0 &&
+      this.pendingCandidates + batch.length >
+        DeepbridProgressiveResolutionQueue.MAX_PENDING_CANDIDATES
+    ) {
+      await new Promise<void>((resolve) => {
+        const wake = (): void => {
+          signal?.removeEventListener('abort', wake);
+          resolve();
+        };
+        this.waiters.push(wake);
+        signal?.addEventListener('abort', wake, { once: true });
+      });
+    }
+    if (signal?.aborted) return;
+    this.pendingCandidates += batch.length;
+    this.tail = this.tail.then(async () => {
+      try {
+        this.resolved.push(...(await resolve(batch)));
+      } catch (error) {
+        this.failedBatchCount++;
+        if (this.failures.length < 32) this.failures.push(error);
+      } finally {
+        this.pendingCandidates -= batch.length;
+        const waiters = this.waiters.splice(0);
+        waiters.forEach((wake) => wake());
+      }
+    });
+  }
+
+  async drain(): Promise<{
+    resolved: TOutput[];
+    failures: unknown[];
+    failedBatchCount: number;
+  }> {
+    await this.tail;
+    return {
+      resolved: [...this.resolved],
+      failures: [...this.failures],
+      failedBatchCount: this.failedBatchCount,
+    };
+  }
+}
+
 export interface DeepbridProbeBatchResult<T> {
   playable: T[];
   rejected: number;
@@ -878,6 +943,13 @@ export async function searchDeepbridFinderPages(
     deadline: number;
     signal?: AbortSignal;
     now?: () => number;
+    /** Called for each page's newly discovered results, before the next page is fetched. */
+    onPage?: (page: {
+      offset: number;
+      results: DeepbridFinderResult[];
+      rawCount: number;
+      invalidCount: number;
+    }) => void | Promise<void>;
     onOutcome?: (outcome: DeepbridFinderPaginationOutcome) => void;
   }
 ): Promise<DeepbridFinderResult[]> {
@@ -888,7 +960,7 @@ export async function searchDeepbridFinderPages(
   let pagesFetched = 0;
   let pageRetries = 0;
   let invalidResultCount = 0;
-  let consecutiveFullyInvalidPages = 0;
+  let consecutiveRepeatedPages = 0;
   let termination: DeepbridFinderPaginationTermination = 'no-more-results';
   let pageError: unknown;
   for (let offset = 0; !options.signal?.aborted; offset += pageSize) {
@@ -972,31 +1044,49 @@ export async function searchDeepbridFinderPages(
     pagesFetched++;
     invalidResultCount += page.invalidCount;
     let added = 0;
+    const newlyDiscovered: DeepbridFinderResult[] = [];
     for (const result of page.results) {
       if (seenTokens.has(result.token)) continue;
       seenTokens.add(result.token);
       results.push(result);
+      newlyDiscovered.push(result);
       added += 1;
     }
-    // Pagination is defined by the provider's raw page size, not by how many
-    // records survive local validation. A malformed row must not hide later
-    // valid rows from the next page.
-    if (page.rawCount < pageSize) {
+    if (newlyDiscovered.length > 0) {
+      await options.onPage?.({
+        offset,
+        results: newlyDiscovered,
+        rawCount: page.rawCount,
+        invalidCount: page.invalidCount,
+      });
+    }
+
+    // Finder does not provide a documented total/has-more contract. A short
+    // non-empty page is therefore not authoritative EOF: ask for the next
+    // offset and stop only when the provider returns an empty page. This costs
+    // at most one extra request for the final partial page and avoids hiding
+    // valid later rows.
+    if (page.rawCount === 0) {
       termination = 'no-more-results';
       break;
     }
+    // Malformed rows are not evidence of exhaustion. Keep walking until the
+    // request deadline or an empty page, while the deadline remains the hard
+    // safety bound.
     if (page.invalidCount === page.rawCount) {
-      consecutiveFullyInvalidPages++;
-      if (consecutiveFullyInvalidPages >= 3) {
-        termination = 'invalid-page-limit';
-        break;
-      }
       continue;
     }
-    consecutiveFullyInvalidPages = 0;
     if (added === 0) {
-      termination = 'repeated-page';
-      break;
+      // A single overlapping page can occur with unstable provider ordering.
+      // Allow later offsets to contribute, but stop an endpoint that ignores
+      // offsets after repeated duplicate-only pages and report incomplete.
+      consecutiveRepeatedPages++;
+      if (consecutiveRepeatedPages >= 3) {
+        termination = 'repeated-page';
+        break;
+      }
+    } else {
+      consecutiveRepeatedPages = 0;
     }
   }
   if (options.signal?.aborted) termination = 'aborted';
@@ -1138,6 +1228,20 @@ export function summarizeDeepbridPagination(
   };
 }
 
+export function deepbridCoverageStatus(input: {
+  failedSearches?: number;
+  incompleteQueries?: number;
+  resolutionFailures?: number;
+  aborted?: boolean;
+}): 'partial' | 'complete' {
+  return input.aborted ||
+    (input.failedSearches ?? 0) > 0 ||
+    (input.incompleteQueries ?? 0) > 0 ||
+    (input.resolutionFailures ?? 0) > 0
+    ? 'partial'
+    : 'complete';
+}
+
 export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
   readonly id = 'deepbrid-usenet';
   readonly name = 'Deepbrid Usenet';
@@ -1156,6 +1260,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
   private bothFinderDataPromise?: Promise<{
     resolved: Awaited<ReturnType<typeof resolveDeepbridFiles>>;
     deadline: number;
+    coverage: 'partial' | 'complete';
   }>;
   private bothOnResolved?: (
     streams: Stream[],
@@ -1304,65 +1409,25 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     )
       return [];
     const paginationOutcomes: DeepbridFinderPaginationOutcome[] = [];
-    const searched = await Promise.allSettled(
-      queries.map((query) =>
-        deepbridNetworkLimit(() =>
-          searchDeepbridFinderPages(client, query, {
-            category: categoryFor(media, metadata.isAnime),
-            deadline,
-            signal,
-            onOutcome: (outcome) => paginationOutcomes.push(outcome),
-          })
-        )
-      )
-    );
-    const finderResults = searched.flatMap((entry) =>
-      entry.status === 'fulfilled' ? entry.value : []
-    );
-    if (searched.every((entry) => entry.status === 'rejected')) {
-      throw searched[0].reason;
-    }
-    const seen = new Set<string>();
-    const ranked = finderResults
-      .filter((item) => !seen.has(item.token) && seen.add(item.token))
-      .map((result) => ({ result, ...rankResult(result, media, metadata) }))
-      .filter((item) => item.confirmed && item.score > 0)
-      .sort(
-        (a, b) =>
-          b.score - a.score ||
-          b.result.sources - a.result.sources ||
-          b.result.size - a.result.size
-      );
-    const candidates = prioritizeDeepbridSeasonPacks(
-      ranked,
-      media,
-      this.userData.maxContentResolves
-    );
-    const pagination = summarizeDeepbridPagination(paginationOutcomes);
-
-    this.logger.info(
-      {
-        type,
-        queryCount: queries.length,
-        successfulQueries: searched.filter(
-          (entry) => entry.status === 'fulfilled'
-        ).length,
-        finderResults: finderResults.length,
-        confirmedResults: ranked.length,
-        contentCandidates: candidates.length,
-        seasonPackCandidates: candidates.filter(
-          (item) => parseNewshostingRelease(item.result.title).seasonPack
-        ).length,
-        pagesFetched: pagination.pagesFetched,
-        paginationPageRetries: pagination.pageRetries,
-        paginationIncompleteQueries: pagination.incompleteQueries,
-        paginationTerminations: pagination.terminationCounts,
-      },
-      'Deepbrid Finder search completed'
-    );
-
-    // Older generated addon configs defaulted to three workers. Keep those
-    // configs fast after an upgrade while retaining the hard safety cap.
+    // In progressive mode, start Finder content lookups as each search page
+    // arrives instead of waiting for the slowest query to finish. The resolver
+    // below consumes the same promises, so this is useful overlap rather than
+    // duplicate API traffic. Keep it request-local and strictly bounded.
+    const progressiveContent = new Map<
+      string,
+      Promise<DeepbridFinderContent>
+    >();
+    const progressiveSeenTokens = new Set<string>();
+    const canPrefetchProgressively =
+      Boolean(onResolved) &&
+      this.userData.maxResults === 0 &&
+      this.userData.maxContentResolves === 0;
+    const earlyResolutionQueue = new DeepbridProgressiveResolutionQueue<
+      RankedDeepbridResult,
+      ResolvedDeepbridFile
+    >();
+    let resolutionHadFailures = false;
+    let earlyCandidateOffset = 0;
     const resolveConcurrency = Math.max(
       1,
       Math.min(
@@ -1372,7 +1437,11 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           : this.userData.resolveConcurrency
       )
     );
-    const toStreams = (files: ResolvedDeepbridFile[]): Stream[] =>
+    const probeCache = new Map<string, Promise<boolean>>();
+    const toStreams = (
+      files: ResolvedDeepbridFile[],
+      resolutionCoverage: 'progressive' | 'partial' | 'complete' = 'progressive'
+    ): Stream[] =>
       files.flatMap(({ result, file, archiveExpanded }) => {
         const target = validateDeepbridDownloadUrl(file.link);
         const playbackVariants = createDeepbridPlaybackVariants(
@@ -1384,62 +1453,49 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           },
           this.userData.playbackMode
         );
-        return playbackVariants.map(({ mode, label, url }) => {
-          return {
-            name: `[DB⚡] Deepbrid Usenet · ${label}`,
-            title: result.title,
-            description: `${result.title}\n${file.name}\n📺 ${label} · 🔍 Deepbrid Usenet${result.sources ? ` · ${result.sources} sources` : ''}`,
-            url,
-            type: 'usenet',
-            idMatched: true,
-            age: ageHours(result.date),
-            behaviorHints: {
-              notWebReady: false,
-              filename: file.name,
-              videoSize: file.size || result.size || undefined,
-              bingeGroup: `deepbrid-usenet|${file.name.toLowerCase()}`,
-              deepbridPlaybackMode: mode,
-              deepbridSeasonPack:
-                parseNewshostingRelease(result.title).seasonPack === true,
-              deepbridReleaseTitle: result.title,
-              deepbridReleaseSize: result.size || undefined,
-              deepbridNzbHash: file.nzbUrl
-                ? hashNzbUrl(file.nzbUrl)
-                : undefined,
-              deepbridArchiveExpanded: archiveExpanded,
-            },
-          } satisfies Stream;
-        });
+        return playbackVariants.map(
+          ({ mode, label, url }) =>
+            ({
+              name: `[DB⚡] Deepbrid Usenet · ${label}`,
+              title: result.title,
+              description: `${result.title}\n${file.name}\n📺 ${label} · 🔍 Deepbrid Usenet${result.sources ? ` · ${result.sources} sources` : ''}`,
+              url,
+              type: 'usenet',
+              idMatched: true,
+              age: ageHours(result.date),
+              behaviorHints: {
+                notWebReady: false,
+                filename: file.name,
+                videoSize: file.size || result.size || undefined,
+                bingeGroup: `deepbrid-usenet|${file.name.toLowerCase()}`,
+                deepbridPlaybackMode: mode,
+                deepbridSeasonPack:
+                  parseNewshostingRelease(result.title).seasonPack === true,
+                deepbridReleaseTitle: result.title,
+                deepbridReleaseSize: result.size || undefined,
+                deepbridNzbHash: file.nzbUrl
+                  ? hashNzbUrl(file.nzbUrl)
+                  : undefined,
+                deepbridArchiveExpanded: archiveExpanded,
+                deepbridResolutionCoverage: resolutionCoverage,
+              },
+            }) satisfies Stream
+        );
       });
-    const resolved = await resolveDeepbridFiles(candidates, media, {
-      concurrency: resolveConcurrency,
-      maxResults: this.userData.maxResults,
-      deadline,
-      requireCompleteResolution:
-        Boolean(onResolved) && this.userData.maxResults === 0,
-      signal,
-      getContent: (token, archives, requestOptions) =>
-        runQueuedDeepbridRequest(
-          deadline,
-          Date.now,
-          signal,
-          deepbridNetworkLimit,
-          (remainingMs) =>
-            client.getContent(token, archives, {
-              ...requestOptions,
-              timeoutMs: Math.min(requestOptions.timeoutMs, remainingMs),
-              deadlineAtMs: deadline,
-              signal,
-            })
-        ),
-      probeFile: (() => {
-        // Finder can return the same CDN link under multiple releases. A
-        // single preflight is sufficient for that URL; retaining the
-        // individual resolved entries still preserves every distinct stream.
-        const probeCache = new Map<string, Promise<boolean>>();
-        return (file, requestOptions) => {
-          // The byte signature check also uses the filename extension, so
-          // keep that part of the key to avoid cross-extension false sharing.
+    const resolveCandidates = (
+      batch: RankedDeepbridResult[],
+      candidateOffset = 0
+    ): Promise<ResolvedDeepbridFile[]> =>
+      resolveDeepbridFiles(batch, media, {
+        concurrency: resolveConcurrency,
+        maxResults: canPrefetchProgressively ? 0 : this.userData.maxResults,
+        deadline,
+        requireCompleteResolution:
+          Boolean(onResolved) && this.userData.maxResults === 0,
+        signal,
+        getContent: (token, archives, requestOptions) =>
+          getFinderContent(token, archives, requestOptions),
+        probeFile: (file, requestOptions) => {
           const extension =
             file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
           const cacheKey = `${file.link}\u0000${extension}`;
@@ -1466,50 +1522,254 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           });
           probeCache.set(cacheKey, probe);
           return probe;
-        };
-      })(),
-      onResolved:
-        onResolved && this.userData.maxResults === 0
-          ? async (files, candidateIndex) => {
-              await onResolved(toStreams(files), candidateIndex);
-            }
-          : undefined,
-      onSummary: (summary) => {
-        const accounting = {
-          requestTraceId: this.requestTraceId,
-          ...summary,
-          api: client.getRequestMetrics(),
-        };
-        if (summary.stopReason === 'complete') {
-          this.logger.info(
-            accounting,
-            'Deepbrid Finder content resolution accounting'
-          );
-        } else {
-          // Keep incomplete resolution counters visible even when ordinary
-          // informational logging is disabled. The payload is numeric and
-          // contains no titles, URLs, IDs, or provider credentials.
-          this.logger.warn(
-            accounting,
-            'Deepbrid Finder content resolution incomplete'
-          );
+        },
+        onResolved:
+          onResolved && this.userData.maxResults === 0
+            ? async (files, candidateIndex) => {
+                await onResolved(
+                  toStreams(files),
+                  candidateOffset + candidateIndex
+                );
+              }
+            : undefined,
+        onSummary: (summary) => {
+          if (
+            summary.resolutionFailures > 0 ||
+            summary.stopReason !== 'complete'
+          ) {
+            resolutionHadFailures = true;
+          }
+          const accounting = {
+            requestTraceId: this.requestTraceId,
+            ...summary,
+            api: client.getRequestMetrics(),
+          };
+          if (summary.stopReason === 'complete') {
+            this.logger.info(
+              accounting,
+              'Deepbrid Finder content resolution accounting'
+            );
+          } else {
+            this.logger.warn(
+              accounting,
+              'Deepbrid Finder content resolution incomplete'
+            );
+          }
+        },
+      });
+    const getFinderContent = (
+      token: string,
+      archives: boolean,
+      requestOptions: { timeoutMs: number; signal?: AbortSignal }
+    ): Promise<DeepbridFinderContent> => {
+      const key = `${token}:${archives ? 'archives' : 'files'}`;
+      const existing = progressiveContent.get(key);
+      if (existing) return existing;
+      const request = runQueuedDeepbridRequest<DeepbridFinderContent>(
+        deadline,
+        Date.now,
+        signal,
+        deepbridNetworkLimit,
+        (remainingMs) =>
+          client.getContent(token, archives, {
+            ...requestOptions,
+            timeoutMs: Math.min(requestOptions.timeoutMs, remainingMs),
+            deadlineAtMs: deadline,
+            signal,
+          })
+      );
+      progressiveContent.set(key, request);
+      void request.catch(() => {
+        if (progressiveContent.get(key) === request) {
+          progressiveContent.delete(key);
         }
-      },
-    });
-    this.logger.info(
+      });
+      return request;
+    };
+    const searched = await Promise.allSettled(
+      queries.map((query) =>
+        deepbridNetworkLimit(() =>
+          searchDeepbridFinderPages(client, query, {
+            category: categoryFor(media, metadata.isAnime),
+            deadline,
+            signal,
+            onPage: canPrefetchProgressively
+              ? async ({ results }) => {
+                  const fresh = results.filter((result) => {
+                    if (progressiveSeenTokens.has(result.token)) return false;
+                    progressiveSeenTokens.add(result.token);
+                    return true;
+                  });
+                  const pageCandidates = prioritizeDeepbridSeasonPacks(
+                    fresh
+                      .map((result) => ({
+                        result,
+                        ...rankResult(result, media, metadata),
+                      }))
+                      .filter((item) => item.confirmed && item.score > 0)
+                      .sort(
+                        (a, b) =>
+                          b.score - a.score ||
+                          b.result.sources - a.result.sources ||
+                          b.result.size - a.result.size
+                      ),
+                    media,
+                    0
+                  );
+                  if (pageCandidates.length > 0) {
+                    const candidateOffset = earlyCandidateOffset;
+                    earlyCandidateOffset += pageCandidates.length;
+                    await earlyResolutionQueue.enqueue(
+                      pageCandidates,
+                      (batch) => resolveCandidates(batch, candidateOffset),
+                      signal
+                    );
+                  }
+                  for (const candidate of pageCandidates) {
+                    if (signal?.aborted) break;
+                    if (progressiveContent.size >= 128) break;
+                    if (
+                      remainingRequestBudget(deadline, Date.now) <
+                      DEEPBRID_MIN_REQUEST_BUDGET_MS
+                    )
+                      break;
+                    const seasonPack =
+                      media.type === 'series' &&
+                      media.season !== undefined &&
+                      parseNewshostingRelease(candidate.result.title).season ===
+                        media.season &&
+                      parseNewshostingRelease(candidate.result.title)
+                        .seasonPack === true;
+                    const timeoutMs = remainingRequestBudget(
+                      deadline,
+                      Date.now
+                    );
+                    void getFinderContent(candidate.result.token, seasonPack, {
+                      timeoutMs,
+                      signal,
+                    }).catch(() => {
+                      // The final resolver records the failure in its normal
+                      // accounting path; prefetch is deliberately best-effort.
+                    });
+                  }
+                }
+              : undefined,
+            onOutcome: (outcome) => paginationOutcomes.push(outcome),
+          })
+        )
+      )
+    );
+    const finderResults = searched.flatMap((entry) =>
+      entry.status === 'fulfilled' ? entry.value : []
+    );
+    if (searched.every((entry) => entry.status === 'rejected')) {
+      throw searched[0].reason;
+    }
+    const earlyResolution = canPrefetchProgressively
+      ? await earlyResolutionQueue.drain()
+      : { resolved: [], failures: [], failedBatchCount: 0 };
+    if (earlyResolution.failures.length > 0) {
+      this.logger.warn(
+        {
+          requestTraceId: this.requestTraceId,
+          failedBatches: earlyResolution.failedBatchCount,
+          failureClasses: earlyResolution.failures.map(
+            classifyDeepbridResolutionFailure
+          ),
+        },
+        'Deepbrid progressive resolution retained successful batches with partial failures'
+      );
+    }
+    const earlyResolved = earlyResolution.resolved;
+    const seen = new Set<string>();
+    const ranked = finderResults
+      .filter((item) => !seen.has(item.token) && seen.add(item.token))
+      .map((result) => ({ result, ...rankResult(result, media, metadata) }))
+      .filter((item) => item.confirmed && item.score > 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.result.sources - a.result.sources ||
+          b.result.size - a.result.size
+      );
+    const candidates = prioritizeDeepbridSeasonPacks(
+      ranked,
+      media,
+      this.userData.maxContentResolves
+    );
+    const pagination = summarizeDeepbridPagination(paginationOutcomes);
+    const failedSearches = searched.filter(
+      (entry) => entry.status === 'rejected'
+    ).length;
+    const partialSearch =
+      deepbridCoverageStatus({
+        failedSearches,
+        incompleteQueries: pagination.incompleteQueries,
+      }) === 'partial';
+
+    (partialSearch ? this.logger.warn : this.logger.info)(
       {
         type,
+        queryCount: queries.length,
+        successfulQueries: searched.filter(
+          (entry) => entry.status === 'fulfilled'
+        ).length,
+        finderResults: finderResults.length,
         confirmedResults: ranked.length,
-        resolvedFiles: resolved.length,
-        elapsedMs:
-          this.userData.timeout -
-          DEEPBRID_DEADLINE_MARGIN_MS -
-          Math.max(0, deadline - Date.now()),
+        contentCandidates: candidates.length,
+        seasonPackCandidates: candidates.filter(
+          (item) => parseNewshostingRelease(item.result.title).seasonPack
+        ).length,
+        pagesFetched: pagination.pagesFetched,
+        paginationPageRetries: pagination.pageRetries,
+        paginationIncompleteQueries: pagination.incompleteQueries,
+        paginationTerminations: pagination.terminationCounts,
+        status: partialSearch ? 'partial' : 'complete',
       },
-      'Deepbrid Finder resolution completed'
+      'Deepbrid Finder search completed'
     );
 
-    return toStreams(resolved);
+    // Older generated addon configs defaulted to three workers. Keep those
+    // configs fast after an upgrade while retaining the hard safety cap.
+    const resolved = canPrefetchProgressively
+      ? earlyResolved.sort(
+          (a, b) =>
+            candidates.findIndex(
+              (item) => item.result.token === a.result.token
+            ) -
+            candidates.findIndex((item) => item.result.token === b.result.token)
+        )
+      : await resolveCandidates(candidates);
+    const resolutionCoverage = deepbridCoverageStatus({
+      failedSearches,
+      incompleteQueries: pagination.incompleteQueries,
+      resolutionFailures:
+        Number(resolutionHadFailures) + earlyResolution.failedBatchCount,
+      aborted: Boolean(signal?.aborted),
+    });
+    const partialResolution = resolutionCoverage === 'partial';
+    const finalSummary = {
+      type,
+      confirmedResults: ranked.length,
+      resolvedFiles: resolved.length,
+      searchFailures: failedSearches,
+      failedProgressiveBatches: earlyResolution.failedBatchCount,
+      status: resolutionCoverage,
+      elapsedMs:
+        this.userData.timeout -
+        DEEPBRID_DEADLINE_MARGIN_MS -
+        Math.max(0, deadline - Date.now()),
+    };
+    if (partialResolution) {
+      this.logger.warn(
+        finalSummary,
+        'Deepbrid Finder resolution finished with partial coverage'
+      );
+    } else {
+      this.logger.info(finalSummary, 'Deepbrid Finder resolution completed');
+    }
+
+    return toStreams(resolved, resolutionCoverage);
   }
 
   private async getBothDirectStreams(
@@ -1520,13 +1780,37 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     const parsedId = IdParser.parse(id, type);
     if (!parsedId || !this.supportedIdTypes.includes(parsedId.type))
       throw new Error(`Unsupported ID: ${id}`);
-    const { deadline } = await this.getBothFinderData(parsedId);
+    const { deadline, coverage } = await this.getBothFinderData(parsedId);
     await this.bothDirectProbeQueue?.drain(
       deadline,
       this.bothOnResolved !== undefined
     );
     if (signal?.aborted) return [];
-    return this.bothProgressiveStreams.mergeFinal([], signal);
+    const finalCoverage = deepbridCoverageStatus({
+      failedSearches: Number(coverage === 'partial'),
+      resolutionFailures:
+        this.bothProbeStats.errors + this.bothProbeStats.aborted,
+      aborted: Boolean(signal?.aborted),
+    });
+    if (finalCoverage === 'partial' && coverage === 'complete') {
+      this.logger.warn(
+        {
+          requestTraceId: this.requestTraceId,
+          probeErrors: this.bothProbeStats.errors,
+          probeAborted: this.bothProbeStats.aborted,
+          status: finalCoverage,
+          mode: 'both',
+        },
+        'Deepbrid both-mode playback probes finished with partial coverage'
+      );
+    }
+    return this.bothProgressiveStreams.mergeFinal([], signal).map((stream) => ({
+      ...stream,
+      behaviorHints: {
+        ...(stream.behaviorHints ?? {}),
+        deepbridResolutionCoverage: finalCoverage,
+      },
+    }));
   }
 
   private closeBothDirectProbeQueue(): void {
@@ -1638,6 +1922,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
   private getBothFinderData(parsedId: ParsedId): Promise<{
     resolved: Awaited<ReturnType<typeof resolveDeepbridFiles>>;
     deadline: number;
+    coverage: 'partial' | 'complete';
   }> {
     if (this.bothFinderDataPromise) return this.bothFinderDataPromise;
     this.bothFinderDataPromise = (async () => {
@@ -1653,7 +1938,8 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       const metadata = metadataForSearch(await this.getSearchMetadata());
       const media = mediaForSearch(parsedId);
       const queries = buildDeepbridQueries(metadata, media);
-      if (!queries.length) return { resolved: [], deadline };
+      if (!queries.length)
+        return { resolved: [], deadline, coverage: 'complete' };
       const progressiveNotifier = this.bothOnResolved;
       const requestSignal = this.bothSignal;
       this.bothDirectProbeQueue = new ValidatedFinderResolutionQueue(
@@ -1696,6 +1982,9 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       if (searched.every((entry) => entry.status === 'rejected')) {
         throw searched[0].reason;
       }
+      const failedSearches = searched.filter(
+        (entry) => entry.status === 'rejected'
+      ).length;
       const seen = new Set<string>();
       const ranked = finderResults
         .filter((item) => !seen.has(item.token) && seen.add(item.token))
@@ -1713,7 +2002,12 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         this.userData.maxContentResolves
       );
       const pagination = summarizeDeepbridPagination(paginationOutcomes);
-      this.logger.info(
+      const partialSearch =
+        deepbridCoverageStatus({
+          failedSearches,
+          incompleteQueries: pagination.incompleteQueries,
+        }) === 'partial';
+      (partialSearch ? this.logger.warn : this.logger.info)(
         {
           requestTraceId: this.requestTraceId,
           type: parsedId.type,
@@ -1728,10 +2022,13 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           paginationPageRetries: pagination.pageRetries,
           paginationIncompleteQueries: pagination.incompleteQueries,
           paginationTerminations: pagination.terminationCounts,
+          failedSearches,
+          status: partialSearch ? 'partial' : 'complete',
           mode: 'both',
         },
         'Deepbrid Finder both-mode search completed'
       );
+      let resolutionHadFailures = false;
       const resolved = await resolveDeepbridFiles(candidates, media, {
         concurrency: Math.max(
           1,
@@ -1768,6 +2065,12 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         // results when direct validation is slow or unavailable.
         onResolved: this.bothDirectProbeQueue.schedule,
         onSummary: (summary) => {
+          if (
+            summary.resolutionFailures > 0 ||
+            summary.stopReason !== 'complete'
+          ) {
+            resolutionHadFailures = true;
+          }
           const accounting = {
             requestTraceId: this.requestTraceId,
             ...summary,
@@ -1786,7 +2089,27 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           }
         },
       });
-      return { resolved, deadline };
+      const coverage = deepbridCoverageStatus({
+        failedSearches,
+        incompleteQueries: pagination.incompleteQueries,
+        resolutionFailures: Number(resolutionHadFailures),
+        aborted: Boolean(this.bothSignal?.aborted),
+      });
+      if (coverage === 'partial') {
+        this.logger.warn(
+          {
+            requestTraceId: this.requestTraceId,
+            resolvedFiles: resolved.length,
+            failedSearches,
+            paginationIncompleteQueries: pagination.incompleteQueries,
+            resolutionHadFailures,
+            status: coverage,
+            mode: 'both',
+          },
+          'Deepbrid Finder both-mode resolution finished with partial coverage'
+        );
+      }
+      return { resolved, deadline, coverage };
     })();
     return this.bothFinderDataPromise;
   }
@@ -1797,7 +2120,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
 
   protected async _searchNzbs(parsedId: ParsedId): Promise<NZB[]> {
     if (this.userData.mode === 'both') {
-      const { resolved } = await this.getBothFinderData(parsedId);
+      const { resolved, coverage } = await this.getBothFinderData(parsedId);
       const nzbs = resolved.flatMap(({ result, file }) => {
         if (!file.nzbUrl) return [];
         return [
@@ -1818,6 +2141,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
           requestTraceId: this.requestTraceId,
           finderResolvedFiles: resolved.length,
           finderFilesWithNzb: nzbs.length,
+          status: coverage,
         },
         'Deepbrid Finder NZBs prepared for external Usenet services'
       );
@@ -1860,6 +2184,9 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
     if (searched.every((entry) => entry.status === 'rejected')) {
       throw searched[0].reason;
     }
+    const failedSearches = searched.filter(
+      (entry) => entry.status === 'rejected'
+    ).length;
     const seen = new Set<string>();
     const ranked = finderResults
       .filter((item) => !seen.has(item.token) && seen.add(item.token))
@@ -1877,8 +2204,13 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       this.userData.maxContentResolves
     );
     const pagination = summarizeDeepbridPagination(paginationOutcomes);
+    const partialSearch =
+      deepbridCoverageStatus({
+        failedSearches,
+        incompleteQueries: pagination.incompleteQueries,
+      }) === 'partial';
 
-    this.logger.info(
+    (partialSearch ? this.logger.warn : this.logger.info)(
       {
         type: parsedId.type,
         queryCount: queries.length,
@@ -1892,6 +2224,8 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         paginationPageRetries: pagination.pageRetries,
         paginationIncompleteQueries: pagination.incompleteQueries,
         paginationTerminations: pagination.terminationCounts,
+        failedSearches,
+        status: partialSearch ? 'partial' : 'complete',
       },
       'Deepbrid Finder indexer search completed'
     );
@@ -1900,6 +2234,7 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       1,
       Math.min(10, this.userData.resolveConcurrency)
     );
+    let resolutionHadFailures = false;
     const resolved = await resolveDeepbridFiles(candidates, media, {
       concurrency: resolveConcurrency,
       maxResults: this.userData.maxResults,
@@ -1919,6 +2254,14 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         ),
       // Indexer mode does NOT preflight actual video streams. We just want the NZBs.
       probeFile: () => Promise.resolve(true),
+      onSummary: (summary) => {
+        if (
+          summary.resolutionFailures > 0 ||
+          summary.stopReason !== 'complete'
+        ) {
+          resolutionHadFailures = true;
+        }
+      },
     });
 
     const indexedNzbs: NZB[] = [];
@@ -1936,6 +2279,26 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
         confirmed: true,
         age: ageHours(result.date),
       });
+    }
+    const coverage = deepbridCoverageStatus({
+      failedSearches,
+      incompleteQueries: pagination.incompleteQueries,
+      resolutionFailures: Number(resolutionHadFailures),
+    });
+    if (coverage === 'partial') {
+      this.logger.warn(
+        {
+          requestTraceId: this.requestTraceId,
+          resolvedFiles: resolved.length,
+          indexedNzbs: indexedNzbs.length,
+          failedSearches,
+          paginationIncompleteQueries: pagination.incompleteQueries,
+          resolutionHadFailures,
+          status: coverage,
+          mode: 'indexer',
+        },
+        'Deepbrid Finder indexer resolution finished with partial coverage'
+      );
     }
     return indexedNzbs;
   }

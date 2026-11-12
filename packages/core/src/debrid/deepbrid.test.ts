@@ -70,6 +70,50 @@ test('Deepbrid upload selection prefers the requested video over archives', () =
   assert.equal(selected?.name, 'Show.S01E01.720p.mkv');
 });
 
+test('Deepbrid upload selection never returns an exact non-video filename', () => {
+  const files = [
+    {
+      name: 'release.rar',
+      link: 'https://cdn.deepbrid.com/release.rar',
+      size: 2_000,
+    },
+    {
+      name: 'Show.S01E01.720p.mkv',
+      link: 'https://cdn.deepbrid.com/episode.mkv',
+      size: 700,
+    },
+  ];
+
+  assert.equal(
+    selectDeepbridUploadFile(files, 'release.rar')?.name,
+    'Show.S01E01.720p.mkv'
+  );
+  assert.equal(
+    selectDeepbridUploadFile(files.slice(0, 1), 'release.rar'),
+    undefined
+  );
+  assert.equal(
+    selectDeepbridUploadFile(
+      [
+        files[0],
+        {
+          name: 'Show.S01E01.720p.mkv',
+          link: 'https://cdn.deepbrid.com/episode-1.mkv',
+          size: 700,
+        },
+        {
+          name: 'Show.S01E02.720p.mkv',
+          link: 'https://cdn.deepbrid.com/episode-2.mkv',
+          size: 700,
+        },
+      ],
+      'release.rar',
+      { season: 1, episode: 9 }
+    ),
+    undefined
+  );
+});
+
 test('Deepbrid upload selection falls back to the largest playable video', () => {
   const selected = selectDeepbridUploadFile(
     [
@@ -281,7 +325,9 @@ test('Deepbrid torrent library is read-only and matches only account torrents', 
   assert.equal(match.id, 'torrent-1');
   assert.equal(match.library, true);
   assert.equal(match.status, 'cached');
-  await assert.rejects(() => service.addMagnet('magnet:?xt=urn:btih:not-owned'));
+  await assert.rejects(() =>
+    service.addMagnet('magnet:?xt=urn:btih:not-owned')
+  );
 });
 
 test('Deepbrid library catalog items can be opened through authenticated torrent info', async () => {
@@ -301,7 +347,10 @@ test('Deepbrid library catalog items can be opened through authenticated torrent
     ],
   });
 
-  const service = new DeepbridService({ token: 'torrent-library-open' }, client);
+  const service = new DeepbridService(
+    { token: 'torrent-library-open' },
+    client
+  );
   const result = await service.getMagnet('torrent-1');
 
   assert.equal(result.id, 'torrent-1');
@@ -398,6 +447,72 @@ test('Deepbrid pre-cache mode emits only verified external NZBs', async () => {
   assert.equal(receivedSignal, true);
 });
 
+test('Deepbrid pre-cache verifies files returned with upload id zero without polling it', async () => {
+  const client = fakeDeepbridApi();
+  let infoCalls = 0;
+  let probed = 0;
+  client.listUploads = async () => [];
+  client.addNzbUrl = async () => ({
+    id: '0',
+    title: 'Instant release',
+    files: [
+      {
+        name: 'Instant.Release.S01E04.1080p.mkv',
+        link: 'https://usenet.myfast.link/id-zero',
+        size: 1_000_000_000,
+        sizeHuman: '1 GB',
+      },
+    ],
+  });
+  client.getUploadInfo = async () => {
+    infoCalls++;
+    throw new DeepbridApiError('id zero is not a library upload', 404, 'api_1');
+  };
+
+  const service = new DeepbridService(
+    { token: 'pre-cache-id-zero', preCache: true, preCacheLimit: 1 },
+    client,
+    async () => {
+      probed++;
+      return true;
+    }
+  );
+  const [result] = await service.checkNzbs([
+    {
+      name: 'Instant release',
+      hash: 'id-zero-hash',
+      nzb: 'https://indexer.example/id-zero.nzb',
+    },
+  ]);
+
+  assert.equal(result.id, '0');
+  assert.equal(result.status, 'cached');
+  assert.equal(result.library, false);
+  assert.equal(result.files?.[0]?.name, 'Instant.Release.S01E04.1080p.mkv');
+  const playbackUrl = await service.resolve(
+    {
+      type: 'usenet',
+      hash: 'id-zero-hash',
+      nzb: 'https://indexer.example/id-zero.nzb',
+      serviceItemId: '0',
+      metadata: {
+        titles: ['Instant release'],
+        season: 1,
+        episode: 4,
+        airDates: [],
+      },
+    },
+    'Instant.Release.S01E04.1080p.mkv',
+    true
+  );
+  assert.equal(
+    proxiedDeepbridTarget(playbackUrl),
+    'https://usenet.myfast.link/id-zero'
+  );
+  assert.equal(infoCalls, 0);
+  assert.equal(probed, 1);
+});
+
 test('Deepbrid pre-cache omits failed candidates while retaining verified ones', async () => {
   const client = fakeDeepbridApi();
   client.listUploads = async () => [];
@@ -438,7 +553,10 @@ test('Deepbrid pre-cache omits failed candidates while retaining verified ones',
     },
   ]);
 
-  assert.deepEqual(results.map((result) => result.status), ['cached']);
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ['cached']
+  );
   assert.equal(results[0]?.library, true);
   assert.equal(results.length, 1);
 });
@@ -631,10 +749,7 @@ test('Deepbrid service uses playable files returned directly by NZB add', async 
     'Tower Prep S01',
     true
   );
-  assert.equal(
-    proxiedDeepbridTarget(url),
-    'https://usenet.myfast.link/e9-1'
-  );
+  assert.equal(proxiedDeepbridTarget(url), 'https://usenet.myfast.link/e9-1');
   assert.equal(addCalls, 1);
   assert.equal(infoCalls, 0);
 });
@@ -693,6 +808,104 @@ test('Deepbrid service recovers the canonical upload id after a missing-id respo
   );
   assert.equal(proxiedDeepbridTarget(url), 'https://usenet.myfast.link/e9');
   assert.equal(listCalls, 1);
+});
+
+test('Deepbrid upload-id cache is isolated between accounts for the same NZB', async () => {
+  const nzbUrl = 'https://indexer.example/shared-release.nzb';
+  const firstClient = fakeDeepbridApi();
+  firstClient.addNzbUrl = async () => ({
+    id: 'account-a-upload',
+    title: 'Shared release',
+    files: [],
+  });
+  firstClient.getUploadInfo = async () => {
+    throw new DeepbridApiError('not found', 404, 'api_1');
+  };
+  const first = new DeepbridService(
+    { token: 'profile-a-cache-isolation-token' },
+    firstClient
+  );
+  await assert.rejects(
+    first.resolve(
+      { type: 'usenet', hash: 'shared', nzb: nzbUrl },
+      'Shared.Release.1080p.mkv',
+      true
+    )
+  );
+
+  const secondClient = fakeDeepbridApi();
+  let secondAddCalls = 0;
+  secondClient.addNzbUrl = async () => {
+    secondAddCalls++;
+    return {
+      id: 'account-b-upload',
+      title: 'Shared release',
+      files: [
+        {
+          name: 'Shared.Release.1080p.mkv',
+          link: 'https://usenet.myfast.link/account-b',
+          size: 1_000_000_000,
+          sizeHuman: '1 GB',
+        },
+      ],
+    };
+  };
+  const second = new DeepbridService(
+    { token: 'profile-b-cache-isolation-token' },
+    secondClient
+  );
+  const url = await second.resolve(
+    { type: 'usenet', hash: 'shared', nzb: nzbUrl },
+    'Shared.Release.1080p.mkv',
+    true
+  );
+
+  assert.equal(secondAddCalls, 1);
+  assert.equal(
+    proxiedDeepbridTarget(url),
+    'https://usenet.myfast.link/account-b'
+  );
+});
+
+test('Deepbrid does not cache an empty playable result after a rejected probe', async () => {
+  const client = fakeDeepbridApi();
+  let probeCalls = 0;
+  client.getUploadInfo = async (id) => ({
+    id,
+    title: 'Transient probe release',
+    files: [
+      {
+        name: 'Transient.Probe.Release.1080p.mkv',
+        link: 'https://usenet.myfast.link/transient-probe',
+        size: 1_000_000_000,
+        sizeHuman: '1 GB',
+      },
+    ],
+  });
+  const service = new DeepbridService(
+    { token: 'probe-cache-recovery-token' },
+    client,
+    async () => {
+      probeCalls++;
+      if (probeCalls === 1) throw new Error('temporary network failure');
+      return true;
+    }
+  );
+  const url = await service.resolve(
+    {
+      type: 'usenet',
+      hash: 'probe-retry',
+      serviceItemId: 'probe-upload',
+    },
+    'Transient.Probe.Release.1080p.mkv',
+    true
+  );
+
+  assert.equal(
+    proxiedDeepbridTarget(url),
+    'https://usenet.myfast.link/transient-probe'
+  );
+  assert.ok(probeCalls >= 2);
 });
 
 test('Deepbrid service rejects generated error videos as retryable playback failures', async () => {

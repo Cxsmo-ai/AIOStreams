@@ -40,6 +40,10 @@ const playableUploadInfoCache = new Map<
   string,
   { value: DeepbridUploadInfo; expiresAt: number }
 >();
+const verifiedDirectFilesCache = new Map<
+  string,
+  { value: DeepbridAddResult['files']; expiresAt: number }
+>();
 const MIN_DEEPBRID_PLAYABLE_BYTES = 16 * 1024 * 1024;
 const UPLOAD_INFO_CACHE_TTL_MS = 10 * 60_000;
 const DEFAULT_DEEPBRID_PRECACHE_LIMIT = 24;
@@ -48,6 +52,48 @@ const DEEPBRID_PRECACHE_INTERVAL_MS = 1_000;
 const DEEPBRID_PRECACHE_TOTAL_BUDGET_MS = 10_000;
 const DEEPBRID_UPLOAD_LOOKUP_BUDGET_MS = 2_500;
 const DEEPBRID_PRECACHE_CONCURRENCY = 3;
+const DEEPBRID_CACHE_MAX_ENTRIES = 4_096;
+
+function setBoundedCache<T>(
+  cache: Map<string, { value: T; expiresAt: number }>,
+  key: string,
+  value: T,
+  ttlMs: number
+): void {
+  cache.delete(key);
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  const now = Date.now();
+  for (const [candidateKey, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(candidateKey);
+  }
+  while (cache.size > DEEPBRID_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
+}
+
+function setBoundedUploadId(key: string, id: string): void {
+  uploadCache.delete(key);
+  uploadCache.set(key, { id, expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS });
+  const now = Date.now();
+  for (const [candidateKey, entry] of uploadCache) {
+    if (entry.expiresAt <= now) uploadCache.delete(candidateKey);
+  }
+  while (uploadCache.size > DEEPBRID_CACHE_MAX_ENTRIES) {
+    const oldest = uploadCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    uploadCache.delete(oldest);
+  }
+}
+
+function profileScopedNzbKey(credentialKey: string, nzbUrl: string): string {
+  return createHash('sha256')
+    .update(credentialKey)
+    .update('\0')
+    .update(nzbUrl)
+    .digest('hex');
+}
 
 export interface DeepbridResolvedFile {
   name: string;
@@ -110,7 +156,7 @@ export function selectDeepbridUploadFile(
   const requested = normalizedFilename(requestedFilename);
   const videos = files.filter((file) => isDeepbridVideoName(file.name));
   const exact =
-    files.find((file) => file.name === requestedFilename) ??
+    videos.find((file) => file.name === requestedFilename) ??
     videos.find((file) => normalizedFilename(file.name) === requested);
   if (exact) return exact;
 
@@ -169,7 +215,9 @@ function toDebridError(message: string, error: unknown): DebridError {
   );
 }
 
-export class DeepbridService implements UsenetDebridService, TorrentDebridService {
+export class DeepbridService
+  implements UsenetDebridService, TorrentDebridService
+{
   readonly serviceName = constants.DEEPBRID_SERVICE;
   readonly capabilities = { torrents: true, usenet: true } as const;
   private readonly credentialKey: string;
@@ -201,11 +249,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     await this.client.getUser();
   }
 
-  private playbackUrl(
-    link: string,
-    filename: string,
-    size?: number
-  ): string {
+  private playbackUrl(link: string, filename: string, size?: number): string {
     return createDeepbridPlaybackUrl({
       apiKey: this.apiKey,
       url: link,
@@ -227,19 +271,22 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       const files = torrent.files.filter((file) =>
         isLikelyDeepbridVideoName(file.name)
       );
-      const ready = /^(completed|complete|finished|downloaded|cached|seeding)$/i.test(
-        torrent.status.trim()
-      ) || (torrent.progress ?? 0) >= 100;
+      const ready =
+        /^(completed|complete|finished|downloaded|cached|seeding)$/i.test(
+          torrent.status.trim()
+        ) || (torrent.progress ?? 0) >= 100;
       if (!ready || files.length === 0) return [];
-      return [{
-        id: torrent.id,
-        hash: torrent.hash,
-        name: torrent.title,
-        size: torrent.size,
-        status: 'cached' as const,
-        library: true,
-        files: torrent.files.map((file, index) => ({ ...file, index })),
-      }];
+      return [
+        {
+          id: torrent.id,
+          hash: torrent.hash,
+          name: torrent.title,
+          size: torrent.size,
+          status: 'cached' as const,
+          library: true,
+          files: torrent.files.map((file, index) => ({ ...file, index })),
+        },
+      ];
     });
   }
 
@@ -313,8 +360,12 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
 
   async addMagnet(_magnet: string): Promise<DebridDownload> {
     throw new DebridError('Deepbrid torrent library is read-only', {
-      statusCode: 400, statusText: 'Bad Request', code: 'BAD_REQUEST',
-      headers: {}, body: null, type: 'api_error',
+      statusCode: 400,
+      statusText: 'Bad Request',
+      code: 'BAD_REQUEST',
+      headers: {},
+      body: null,
+      type: 'api_error',
     });
   }
 
@@ -324,8 +375,12 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
 
   async removeMagnet(_magnetId: string): Promise<void> {
     throw new DebridError('Deepbrid torrent library is read-only', {
-      statusCode: 400, statusText: 'Bad Request', code: 'BAD_REQUEST',
-      headers: {}, body: null, type: 'api_error',
+      statusCode: 400,
+      statusText: 'Bad Request',
+      code: 'BAD_REQUEST',
+      headers: {},
+      body: null,
+      type: 'api_error',
     });
   }
 
@@ -340,16 +395,12 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     if (!force && pending) return pending;
 
     const request = this.client.listUploads().then((value) => {
-      uploadListCache.set(this.credentialKey, {
+      setBoundedCache(
+        uploadListCache,
+        this.credentialKey,
         value,
-        expiresAt: Date.now() + UPLOAD_LIST_TTL_MS,
-      });
-      if (uploadListCache.size > 1_000) {
-        const oldest = uploadListCache.keys().next().value as
-          | string
-          | undefined;
-        if (oldest) uploadListCache.delete(oldest);
-      }
+        UPLOAD_LIST_TTL_MS
+      );
       return value;
     });
     uploadListInFlight.set(this.credentialKey, request);
@@ -368,19 +419,14 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     const cached = uploadInfoCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
     const value = await this.client.getUploadInfo(id, { signal });
-    uploadInfoCache.set(key, {
+    // Processing uploads need to be polled again; completed metadata is
+    // stable enough to reuse across later scrapes.
+    setBoundedCache(
+      uploadInfoCache,
+      key,
       value,
-      // Processing uploads need to be polled again; completed metadata is
-      // stable enough to reuse across later scrapes.
-      expiresAt:
-        Date.now() + (value.files.length > 0 ? UPLOAD_INFO_CACHE_TTL_MS : 500),
-    });
-    if (uploadInfoCache.size > 4_096) {
-      const now = Date.now();
-      for (const [candidateKey, entry] of uploadInfoCache) {
-        if (entry.expiresAt <= now) uploadInfoCache.delete(candidateKey);
-      }
-    }
+      value.files.length > 0 ? UPLOAD_INFO_CACHE_TTL_MS : 500
+    );
     return value;
   }
 
@@ -400,33 +446,37 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     );
     const playable: DeepbridUploadInfo['files'] = [];
     let nextFile = 0;
-    await Promise.allSettled(
-      Array.from(
-        { length: Math.min(3, candidates.length) },
-        async () => {
-          while (!signal?.aborted) {
-            const file = candidates[nextFile++];
-            if (!file) return;
-            if (
-              await this.probeVideo(file, this.apiKey, {
-                timeoutMs: 4_000,
-                signal,
-              })
-            ) {
-              playable.push(file);
-            }
+    let probeFailed = false;
+    const probeOutcomes = await Promise.allSettled(
+      Array.from({ length: Math.min(3, candidates.length) }, async () => {
+        while (!signal?.aborted) {
+          const file = candidates[nextFile++];
+          if (!file) return;
+          if (
+            await this.probeVideo(file, this.apiKey, {
+              timeoutMs: 4_000,
+              signal,
+            })
+          ) {
+            playable.push(file);
           }
         }
-      )
+      })
+    );
+    probeFailed = probeOutcomes.some(
+      (outcome) => outcome.status === 'rejected'
     );
     const verified = { ...info, files: playable };
     // A completed upload whose links resolve to tiny generated videos is a
-    // stable negative result. Do not cache an upload that is still processing.
-    if (info.files.length > 0) {
-      playableUploadInfoCache.set(key, {
-        value: verified,
-        expiresAt: Date.now() + UPLOAD_INFO_CACHE_TTL_MS,
-      });
+    // stable negative result. Do not cache an upload that is still processing,
+    // whose probe worker failed transiently, or whose caller was aborted.
+    if (info.files.length > 0 && !probeFailed && !signal?.aborted) {
+      setBoundedCache(
+        playableUploadInfoCache,
+        key,
+        verified,
+        UPLOAD_INFO_CACHE_TTL_MS
+      );
     }
     return verified;
   }
@@ -537,9 +587,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     // bolt, and resolve through the normal add-on-click path.
     const queued = this.preCache
       ? []
-      : nzbs
-          .filter((nzb) => !findOwned(nzb))
-          .map((nzb) => resultForOwned(nzb));
+      : nzbs.filter((nzb) => !findOwned(nzb)).map((nzb) => resultForOwned(nzb));
     const verified: DebridDownload[] = [];
     const work = [
       ...ownedCandidates.map((item) => ({ type: 'owned' as const, ...item })),
@@ -598,7 +646,60 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     if (!nzb.nzb) return undefined;
     try {
       const added = await this.client.addNzbUrl(nzb.nzb, { signal });
-      if (!added.id) return undefined;
+      // Deepbrid documents successful add responses whose upload id is `0`
+      // while the response itself already contains usable files. Do not treat
+      // that sentinel as a pollable upload record, and do not discard those
+      // files merely because the identifier is not a normal library id.
+      if (added.id === '0' && added.files.length > 0) {
+        const candidates = added.files.filter(
+          (file) =>
+            isDeepbridVideoName(file.name) &&
+            (!file.size || file.size >= MIN_DEEPBRID_PLAYABLE_BYTES)
+        );
+        const playable: DeepbridUploadInfo['files'] = [];
+        let nextFile = 0;
+        await Promise.allSettled(
+          Array.from({ length: Math.min(3, candidates.length) }, async () => {
+            while (!signal?.aborted) {
+              const file = candidates[nextFile++];
+              if (!file) return;
+              if (
+                await this.probeVideo(file, this.apiKey, {
+                  timeoutMs: 4_000,
+                  signal,
+                })
+              ) {
+                playable.push(file);
+              }
+            }
+          })
+        );
+        if (playable.length === 0) return undefined;
+        const cacheKey = profileScopedNzbKey(this.credentialKey, nzb.nzb);
+        setBoundedCache(
+          verifiedDirectFilesCache,
+          cacheKey,
+          playable,
+          UPLOAD_INFO_CACHE_TTL_MS
+        );
+        return {
+          id: added.id,
+          name: nzb.name ?? added.title,
+          hash: nzb.hash,
+          status: 'cached',
+          // ID 0 is not a library record. The verified direct file is retained
+          // briefly for playback resolution, but must not masquerade as one.
+          library: false,
+          size: playable.reduce((sum, file) => sum + (file.size || 0), 0),
+          files: playable.map((file, index) => ({
+            index,
+            name: file.name,
+            size: file.size || 0,
+            link: file.link,
+          })),
+        };
+      }
+      if (!added.id || added.id === '0') return undefined;
 
       for (let attempt = 0; attempt < DEEPBRID_PRECACHE_ATTEMPTS; attempt++) {
         if (signal?.aborted) return undefined;
@@ -786,8 +887,8 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       const file =
         requested !== undefined
           ? torrent.files[requested]
-          : torrent.files.find((item) => item.name === filename) ??
-            torrent.files.find((item) => isLikelyDeepbridVideoName(item.name));
+          : (torrent.files.find((item) => item.name === filename) ??
+            torrent.files.find((item) => isLikelyDeepbridVideoName(item.name)));
       return file?.link
         ? this.playbackUrl(file.link, file.name, file.size)
         : undefined;
@@ -814,8 +915,23 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
     }
 
     const cacheKey = createHash('sha256')
+      .update(this.credentialKey)
+      .update('\0')
       .update(playbackInfo.nzb || `upload:${playbackInfo.serviceItemId}`)
       .digest('hex');
+    if (playbackInfo.nzb) {
+      const direct = verifiedDirectFilesCache.get(cacheKey);
+      if (direct && direct.expiresAt > Date.now()) {
+        const link = this.selectResolvedFile(
+          { id: '0', title: '', files: direct.value },
+          playbackInfo,
+          filename
+        );
+        if (link) return this.playbackUrl(link, filename);
+      } else if (direct) {
+        verifiedDirectFilesCache.delete(cacheKey);
+      }
+    }
     const cached = uploadCache.get(cacheKey);
     let uploadId =
       playbackInfo.serviceItemId ||
@@ -829,14 +945,10 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
           playbackInfo,
           filename
         );
-        if (directLink)
-          return this.playbackUrl(directLink, filename);
+        if (directLink) return this.playbackUrl(directLink, filename);
         uploadId = added.id;
         if (uploadId) {
-          uploadCache.set(cacheKey, {
-            id: uploadId,
-            expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS,
-          });
+          setBoundedUploadId(cacheKey, uploadId);
         }
         uploadListCache.delete(this.credentialKey);
       }
@@ -848,10 +960,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
       try {
         uploadId = await this.recoverUploadId(playbackInfo, filename, signal);
         if (uploadId) {
-          uploadCache.set(cacheKey, {
-            id: uploadId,
-            expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS,
-          });
+          setBoundedUploadId(cacheKey, uploadId);
         }
       } catch (error) {
         throw toDebridError('Deepbrid could not locate the NZB upload', error);
@@ -888,10 +997,7 @@ export class DeepbridService implements UsenetDebridService, TorrentDebridServic
           );
           if (recoveredId && recoveredId !== uploadId) {
             uploadId = recoveredId;
-            uploadCache.set(cacheKey, {
-              id: uploadId,
-              expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS,
-            });
+            setBoundedUploadId(cacheKey, uploadId);
             continue;
           }
         }
