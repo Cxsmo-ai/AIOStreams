@@ -42,6 +42,12 @@ try {
 } catch {
   tag = `v${version}`;
 }
+// A clean container build excludes .git, so the piped `git tag | head` can
+// succeed with empty output instead of throwing. Keep stable metadata useful
+// in that case rather than publishing a blank tag.
+if (!tag || !tag.trim()) {
+  tag = `v${version}`;
+}
 
 // Get the current Git commit hash
 let commitHash;
