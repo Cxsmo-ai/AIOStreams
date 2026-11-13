@@ -2803,6 +2803,141 @@ test('progressive page resolution completes while a later Finder page is still b
   assert.deepEqual(failures, []);
 });
 
+test('progressive acceptance emits fast discoveries early, retains delayed results, deduplicates overlap, and completes after resolution drain', async () => {
+  let releaseSlowBatch!: () => void;
+  const slowBatch = new Promise<void>((resolve) => {
+    releaseSlowBatch = resolve;
+  });
+  const queue = new DeepbridProgressiveResolutionQueue<string>();
+  const makeResult = (token: string): DeepbridFinderResult => ({
+    token,
+    title: token,
+    category: '',
+    categoryName: '',
+    kind: '',
+    size: 1,
+    sizeHuman: '',
+    date: '',
+    sources: 1,
+  });
+  const pages = new Map<number, DeepbridFinderResult[]>([
+    [0, [makeResult('A-slow'), makeResult('B-fast')]],
+    [50, [makeResult('C-fast'), makeResult('D-late')]],
+    [
+      100,
+      [makeResult('B-fast'), makeResult('E-late'), makeResult('F-invalid')],
+    ],
+    [150, []],
+  ]);
+  const emitted: string[] = [];
+  const progressivelyEmitted: string[] = [];
+  let completion: DeepbridFinderPaginationOutcome | undefined;
+  let responseCompleted = false;
+  let markFastEmitted!: () => void;
+  const fastEmitted = new Promise<void>((resolve) => {
+    markFastEmitted = resolve;
+  });
+  const resultByToken = new Map<string, DeepbridFinderResult>();
+  const client = {
+    searchPage: async (_query: string, options: { offset?: number }) => {
+      const offset = options.offset ?? 0;
+      const results = pages.get(offset) ?? [];
+      return { results, rawCount: results.length, invalidCount: 0 };
+    },
+  } as unknown as DeepbridFinderClient;
+
+  const discovered = await searchDeepbridFinderPages(client, 'fixture', {
+    deadline: Date.now() + 10_000,
+    onOutcome: (outcome) => (completion = outcome),
+    onPage: ({ results }) => {
+      for (const result of results) resultByToken.set(result.token, result);
+      return queue.enqueue(
+        results.map((result) => result.token),
+        async (batch) => {
+          const candidates = batch.map((token, index) => ({
+            result: resultByToken.get(token)!,
+            score: batch.length - index,
+            confirmed: true,
+          }));
+          const resolved = await resolveDeepbridFiles(
+            candidates,
+            { type: 'movie' },
+            {
+              concurrency: 2,
+              maxResults: 0,
+              deadline: Date.now() + 10_000,
+              getContent: async (token) => {
+                if (token === 'A-slow') await slowBatch;
+                return {
+                  title: token,
+                  files: [
+                    {
+                      name: `${token}.mkv`,
+                      link: `https://storage.example/${token}.mkv`,
+                      size: 1,
+                      sizeHuman: '',
+                    },
+                  ],
+                  hasPassword: false,
+                  password: '',
+                };
+              },
+              probeFile: async (file) => !file.name.startsWith('F-invalid'),
+              onResolved: (files) => {
+                const token = files[0]?.result.token;
+                if (!token) return;
+                progressivelyEmitted.push(token);
+                if (token === 'B-fast') markFastEmitted();
+              },
+            }
+          );
+          return resolved.map((item) => item.result.token);
+        }
+      );
+    },
+  });
+
+  assert.deepEqual(
+    discovered.map((result) => result.token),
+    ['A-slow', 'B-fast', 'C-fast', 'D-late', 'E-late', 'F-invalid']
+  );
+  assert.equal(completion?.termination, 'no-more-results');
+  await fastEmitted;
+  assert.deepEqual(progressivelyEmitted, ['B-fast']);
+  assert.equal(responseCompleted, false);
+  const finalResponse = queue.drain().then((result) => {
+    responseCompleted = true;
+    return result;
+  });
+  const beforeDrain = await Promise.race([
+    finalResponse.then(() => 'drained' as const),
+    new Promise<'waiting'>((resolve) =>
+      setTimeout(() => resolve('waiting'), 0)
+    ),
+  ]);
+  assert.equal(
+    beforeDrain,
+    'waiting',
+    'completion must await outstanding resolution'
+  );
+  assert.equal(responseCompleted, false);
+
+  releaseSlowBatch();
+  const resolved = await finalResponse;
+  assert.equal(responseCompleted, true);
+  emitted.push(...resolved.resolved);
+  assert.deepEqual(progressivelyEmitted, [
+    'B-fast',
+    'A-slow',
+    'C-fast',
+    'D-late',
+    'E-late',
+  ]);
+  assert.deepEqual(emitted, ['A-slow', 'B-fast', 'C-fast', 'D-late', 'E-late']);
+  assert.equal(new Set(emitted).size, emitted.length);
+  assert.deepEqual(resolved.failures, []);
+});
+
 test('progressive resolution keeps earlier results after a later batch fails', async () => {
   const queue = new DeepbridProgressiveResolutionQueue<string>();
   queue.enqueue(['first'], async () => ['resolved:first']);

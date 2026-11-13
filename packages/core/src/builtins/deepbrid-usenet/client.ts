@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import pLimit, { type LimitFunction } from 'p-limit';
-import { Response as UndiciResponse } from 'undici';
+import { FormData as UndiciFormData, Response as UndiciResponse } from 'undici';
 import { z } from 'zod';
 import { createLogger, makeRequest } from '../../utils/index.js';
 import {
@@ -17,6 +17,11 @@ const finderSearchResponseCache = new DeepbridFinderResponseCache<
   staleMs: 120_000,
   maxEntries: 512,
 });
+
+const DEEPBRID_OFFICIAL_APPS_CACHE_MS = 6 * 60 * 60 * 1_000;
+let officialAppsCache:
+  { expiresAtMs: number; catalog: DeepbridOfficialApps } | undefined;
+let officialAppsInFlight: Promise<DeepbridOfficialApps> | undefined;
 
 interface InflightFinderSearch {
   controller: AbortController;
@@ -1263,6 +1268,174 @@ export interface DeepbridAddResult {
   files: DeepbridFinderFile[];
 }
 
+const MAX_DEEPBRID_NZB_FILE_BYTES = 128 * 1024 * 1024;
+
+/** Validate the untrusted NZB file before forwarding it to Deepbrid. */
+export function validateDeepbridNzbFile(
+  filename: string,
+  file: Uint8Array
+): string {
+  const safeName = filename.replace(/\\/g, '/').split('/').at(-1)?.trim() ?? '';
+  if (!/^[^\u0000-\u001f]{1,255}\.nzb$/i.test(safeName)) {
+    throw new DeepbridApiError(
+      'Choose a valid .nzb file.',
+      undefined,
+      'invalid-nzb-file'
+    );
+  }
+  if (file.byteLength < 1 || file.byteLength > MAX_DEEPBRID_NZB_FILE_BYTES) {
+    throw new DeepbridApiError(
+      'The NZB file is empty or exceeds the supported size.',
+      undefined,
+      'invalid-nzb-file'
+    );
+  }
+
+  let header: string;
+  try {
+    header = new TextDecoder('utf-8', { fatal: true })
+      .decode(file.subarray(0, 64 * 1024))
+      .replace(/^\uFEFF/, '');
+  } catch {
+    throw new DeepbridApiError(
+      'The selected file is not valid UTF-8 NZB XML.',
+      undefined,
+      'invalid-nzb-file'
+    );
+  }
+  if (
+    !/<nzb(?:\s|>)/i.test(header) ||
+    /<!\s*(?:DOCTYPE|ENTITY)\b/i.test(header)
+  ) {
+    throw new DeepbridApiError(
+      'The selected file is not a supported NZB document.',
+      undefined,
+      'invalid-nzb-file'
+    );
+  }
+  return safeName;
+}
+
+const MAX_DEEPBRID_TORRENT_FILE_BYTES = 16 * 1024 * 1024;
+
+/** Bounded bencode validation before forwarding a torrent to Deepbrid. */
+export function validateDeepbridTorrentFile(
+  filename: string,
+  file: Uint8Array
+): string {
+  const safeName = filename.replace(/\\/g, '/').split('/').at(-1)?.trim() ?? '';
+  if (!/^[^\u0000-\u001f]{1,255}\.torrent$/i.test(safeName)) {
+    throw new DeepbridApiError(
+      'Choose a valid .torrent file.',
+      undefined,
+      'invalid-torrent-file'
+    );
+  }
+  if (
+    file.byteLength < 1 ||
+    file.byteLength > MAX_DEEPBRID_TORRENT_FILE_BYTES
+  ) {
+    throw new DeepbridApiError(
+      'The torrent file is empty or exceeds the supported size.',
+      undefined,
+      'invalid-torrent-file'
+    );
+  }
+
+  let offset = 0;
+  let nodes = 0;
+  const fail = (): never => {
+    throw new DeepbridApiError(
+      'The selected file is not a valid torrent document.',
+      undefined,
+      'invalid-torrent-file'
+    );
+  };
+  const parseBytes = (): { kind: 'bytes'; value?: string } => {
+    if (++nodes > 100_000) return fail();
+    const start = offset;
+    while (
+      offset < file.byteLength &&
+      file[offset]! >= 0x30 &&
+      file[offset]! <= 0x39
+    )
+      offset++;
+    if (start === offset || file[offset] !== 0x3a) return fail();
+    const rawLength = new TextDecoder().decode(file.subarray(start, offset));
+    if (rawLength.length > 1 && rawLength.startsWith('0')) return fail();
+    const length = Number(rawLength);
+    offset++;
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > file.byteLength - offset
+    ) {
+      return fail();
+    }
+    const value =
+      length <= 256
+        ? new TextDecoder('utf-8', { fatal: false }).decode(
+            file.subarray(offset, offset + length)
+          )
+        : undefined;
+    offset += length;
+    return { kind: 'bytes', value };
+  };
+  const parseValue = (
+    depth: number
+  ): { kind: 'dict' | 'list' | 'bytes' | 'integer'; infoIsDict?: boolean } => {
+    if (++nodes > 100_000 || depth > 64 || offset >= file.byteLength)
+      return fail();
+    const marker = file[offset]!;
+    if (marker >= 0x30 && marker <= 0x39) return parseBytes();
+    if (marker === 0x69) {
+      offset++;
+      const start = offset;
+      while (offset < file.byteLength && file[offset] !== 0x65) offset++;
+      if (offset === file.byteLength) return fail();
+      const integer = new TextDecoder().decode(file.subarray(start, offset));
+      if (!/^(?:0|-?[1-9]\d*)$/.test(integer)) return fail();
+      offset++;
+      return { kind: 'integer' };
+    }
+    if (marker === 0x6c) {
+      offset++;
+      while (offset < file.byteLength && file[offset] !== 0x65)
+        parseValue(depth + 1);
+      if (file[offset] !== 0x65) return fail();
+      offset++;
+      return { kind: 'list' };
+    }
+    if (marker === 0x64) {
+      offset++;
+      let infoIsDict: boolean | undefined;
+      while (offset < file.byteLength && file[offset] !== 0x65) {
+        const key = parseBytes().value;
+        if (key === undefined) return fail();
+        const value = parseValue(depth + 1);
+        if (depth === 0 && key === 'info') {
+          if (infoIsDict !== undefined || value.kind !== 'dict') return fail();
+          infoIsDict = true;
+        }
+      }
+      if (file[offset] !== 0x65) return fail();
+      offset++;
+      return { kind: 'dict', infoIsDict };
+    }
+    return fail();
+  };
+
+  const root = parseValue(0);
+  if (
+    root.kind !== 'dict' ||
+    root.infoIsDict !== true ||
+    offset !== file.byteLength
+  ) {
+    return fail();
+  }
+  return safeName;
+}
+
 export interface DeepbridUpload {
   id: string;
   title: string;
@@ -1328,6 +1501,45 @@ function normalizeDeepbridHistoryIdList(value: unknown): string[] {
   });
 }
 
+function validateDeepbridMagnetLink(value: string): URL {
+  if (typeof value !== 'string' || value.length > 8_192) {
+    throw new DeepbridApiError(
+      'Enter a valid torrent magnet link.',
+      undefined,
+      'invalid-magnet-link'
+    );
+  }
+  let magnet: URL;
+  try {
+    magnet = new URL(value.trim());
+  } catch {
+    throw new DeepbridApiError(
+      'Enter a valid torrent magnet link.',
+      undefined,
+      'invalid-magnet-link'
+    );
+  }
+  const validTopic = magnet.searchParams
+    .getAll('xt')
+    .some((topic) =>
+      /^urn:(?:btih:[a-f\d]{40}|btih:[a-z2-7]{32}|btmh:1220[a-f\d]{64})$/i.test(
+        topic
+      )
+    );
+  if (
+    magnet.protocol !== 'magnet:' ||
+    /[\u0000-\u001f\u007f]/.test(value) ||
+    !validTopic
+  ) {
+    throw new DeepbridApiError(
+      'Enter a valid torrent magnet link.',
+      undefined,
+      'invalid-magnet-link'
+    );
+  }
+  return magnet;
+}
+
 export interface DeepbridTorrent {
   id: string;
   hash?: string;
@@ -1335,7 +1547,13 @@ export interface DeepbridTorrent {
   status: string;
   progress?: number;
   size?: number;
+  seeders?: number;
+  speed?: string;
   files: DeepbridFinderFile[];
+}
+
+export interface DeepbridTorrentAddResult {
+  id?: string;
 }
 
 export interface DeepbridUser {
@@ -1343,7 +1561,359 @@ export interface DeepbridUser {
   username?: string;
   email?: string;
   premium?: boolean;
-  raw: Record<string, unknown>;
+  expiration?: string;
+  maxDownloads?: number;
+  maxConnections?: number;
+  fidelityPoints?: number;
+}
+
+export interface DeepbridUserStats {
+  downloads?: number;
+  bandwidthBytes?: number;
+  bandwidthDisplay?: string;
+  torrents?: number;
+  remote?: number;
+}
+
+export interface DeepbridApiKeyInfo {
+  totalRequests?: number;
+  totalLinks?: number;
+  lastUsedAt?: string;
+  createdAt?: string;
+  regeneratedAt?: string;
+}
+
+export interface DeepbridApiKeyDevice {
+  deviceName?: string;
+  userAgent?: string;
+  firstSeenAt?: string;
+  lastSeenAt?: string;
+  requestCount?: number;
+}
+
+export interface DeepbridApiKeyDevices {
+  total?: number;
+  devices: DeepbridApiKeyDevice[];
+  truncated: boolean;
+}
+
+export interface DeepbridUserHostLimit {
+  domain: string;
+  type: 'bandwidth' | 'links';
+  limit: number;
+  used: number;
+  remaining: number;
+  limitDisplay?: string;
+  usedDisplay?: string;
+  remainingDisplay?: string;
+}
+
+export interface DeepbridUserLimits {
+  enabled?: boolean;
+  reset?: string;
+  hosters: DeepbridUserHostLimit[];
+  /** True when the provider returned more rows than the safe projection cap. */
+  hostersTruncated: boolean;
+}
+
+export interface DeepbridHostStatus {
+  domain: string;
+  status: string;
+  online: boolean;
+}
+
+export interface DeepbridHosts {
+  hosts: DeepbridHostStatus[];
+  truncated: boolean;
+}
+
+export interface DeepbridOfficialApp {
+  id: string;
+  name: string;
+  version?: string;
+  date?: string;
+}
+
+export interface DeepbridOfficialApps {
+  apps: DeepbridOfficialApp[];
+  truncated: boolean;
+}
+
+function deepbridAccountRecord(value: Record<string, unknown>) {
+  const nested = value.data;
+  return nested && typeof nested === 'object' && !Array.isArray(nested)
+    ? (nested as Record<string, unknown>)
+    : value;
+}
+
+function nonNegativeSafeInteger(value: unknown): number | undefined {
+  if (typeof value === 'string' && !/^\d+$/.test(value.trim())) {
+    return undefined;
+  }
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function boundedDisplay(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clean = value
+    .trim()
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .slice(0, 48);
+  return clean || undefined;
+}
+
+function boundedApiDate(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clean = value.trim();
+  return /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?)?$/.test(
+    clean
+  )
+    ? clean.slice(0, 32)
+    : undefined;
+}
+
+/** Project only documented aggregate usage fields; never retain raw API data. */
+export function parseDeepbridUserStats(
+  value: Record<string, unknown>
+): DeepbridUserStats {
+  const source = deepbridAccountRecord(value);
+  const downloads = nonNegativeSafeInteger(source.downloads);
+  const bandwidthBytes = nonNegativeSafeInteger(source.bandwidth_bytes);
+  const bandwidthDisplay = boundedDisplay(source.bandwidth);
+  const torrents = nonNegativeSafeInteger(source.torrents);
+  const remote = nonNegativeSafeInteger(source.remote);
+  return {
+    ...(downloads !== undefined ? { downloads } : {}),
+    ...(bandwidthBytes !== undefined ? { bandwidthBytes } : {}),
+    ...(bandwidthDisplay !== undefined ? { bandwidthDisplay } : {}),
+    ...(torrents !== undefined ? { torrents } : {}),
+    ...(remote !== undefined ? { remote } : {}),
+  };
+}
+
+/** Project aggregate API-key activity; deliberately drops the key and IP. */
+export function parseDeepbridApiKeyInfo(
+  value: Record<string, unknown>
+): DeepbridApiKeyInfo {
+  const source = deepbridAccountRecord(value);
+  const totalRequests = nonNegativeSafeInteger(source.total_requests);
+  const totalLinks = nonNegativeSafeInteger(source.total_links);
+  const lastUsedAt = boundedApiDate(source.last_used_at);
+  const createdAt = boundedApiDate(source.created_at);
+  const regeneratedAt = boundedApiDate(source.regenerated_at);
+  return {
+    ...(totalRequests !== undefined ? { totalRequests } : {}),
+    ...(totalLinks !== undefined ? { totalLinks } : {}),
+    ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
+    ...(createdAt !== undefined ? { createdAt } : {}),
+    ...(regeneratedAt !== undefined ? { regeneratedAt } : {}),
+  };
+}
+
+/** Project API device activity without retaining IP addresses or raw fields. */
+export function parseDeepbridApiKeyDevices(
+  value: Record<string, unknown>
+): DeepbridApiKeyDevices {
+  const source = deepbridAccountRecord(value);
+  const rawDevices = Array.isArray(source.devices)
+    ? source.devices
+    : Array.isArray(source.items)
+      ? source.items
+      : [];
+  const total = nonNegativeSafeInteger(source.total);
+  const devices: DeepbridApiKeyDevice[] = [];
+  for (const raw of rawDevices.slice(0, 50)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const item = raw as Record<string, unknown>;
+    const deviceName = boundedDisplay(item.device_name);
+    const userAgent = boundedDisplay(item.user_agent);
+    const firstSeenAt = boundedApiDate(item.first_seen_at);
+    const lastSeenAt = boundedApiDate(item.last_seen_at);
+    const requestCount = nonNegativeSafeInteger(item.request_count);
+    devices.push({
+      ...(deviceName ? { deviceName } : {}),
+      ...(userAgent ? { userAgent } : {}),
+      ...(firstSeenAt ? { firstSeenAt } : {}),
+      ...(lastSeenAt ? { lastSeenAt } : {}),
+      ...(requestCount !== undefined ? { requestCount } : {}),
+    });
+  }
+  return {
+    ...(total !== undefined ? { total } : {}),
+    devices,
+    truncated:
+      rawDevices.length > 50 ||
+      (total !== undefined && total > rawDevices.length),
+  };
+}
+
+/**
+ * Project documented per-hoster limits into a bounded, display-safe shape.
+ * Unknown fields (including any credentials or links) are intentionally lost.
+ */
+export function parseDeepbridUserLimits(
+  value: Record<string, unknown>
+): DeepbridUserLimits {
+  const source = deepbridAccountRecord(value);
+  const hosters = Array.isArray(source.hosters) ? source.hosters : [];
+  const safeHosters: DeepbridUserHostLimit[] = [];
+  for (const value of hosters.slice(0, 300)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const item = value as Record<string, unknown>;
+    const domain =
+      typeof item.domain === 'string' ? item.domain.trim().toLowerCase() : '';
+    if (
+      !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)
+    ) {
+      continue;
+    }
+    if (item.type !== 'bandwidth' && item.type !== 'links') continue;
+    const limit = nonNegativeSafeInteger(item.limit);
+    const used = nonNegativeSafeInteger(item.used);
+    if (limit === undefined || used === undefined) continue;
+    const remaining =
+      nonNegativeSafeInteger(item.remaining) ?? Math.max(0, limit - used);
+    const limitDisplay = boundedDisplay(item.limit_str);
+    const usedDisplay = boundedDisplay(item.used_str);
+    const remainingDisplay = boundedDisplay(item.remaining_str);
+    safeHosters.push({
+      domain,
+      type: item.type,
+      limit,
+      used,
+      remaining,
+      ...(limitDisplay !== undefined ? { limitDisplay } : {}),
+      ...(usedDisplay !== undefined ? { usedDisplay } : {}),
+      ...(remainingDisplay !== undefined ? { remainingDisplay } : {}),
+    });
+  }
+  const reset = boundedDisplay(source.reset);
+  return {
+    ...(typeof source.limits_enabled === 'boolean'
+      ? { enabled: source.limits_enabled }
+      : {}),
+    ...(reset !== undefined ? { reset } : {}),
+    hosters: safeHosters,
+    hostersTruncated: hosters.length > 300,
+  };
+}
+
+/**
+ * Project the public `/hosts` endpoint into bounded host/status rows. The
+ * provider returns one `{domain: status}` object per row; unknown fields are
+ * discarded so this projection is safe to send to the configuration UI.
+ */
+export function parseDeepbridHosts(value: unknown): DeepbridHosts {
+  const record =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const raw = Array.isArray(value)
+    ? value
+    : Array.isArray(record?.hosts)
+      ? record.hosts
+      : Array.isArray(record?.data)
+        ? record.data
+        : [];
+  const MAX_HOSTS = 500;
+  const MAX_RAW_ENTRIES = 1_000;
+  const hosts: DeepbridHostStatus[] = [];
+  const seen = new Set<string>();
+  let validCount = 0;
+  for (const entry of raw.slice(0, MAX_RAW_ENTRIES)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    for (const [rawDomain, rawStatus] of Object.entries(entry).slice(0, 5)) {
+      const domain = rawDomain.trim().toLowerCase();
+      if (
+        !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(
+          domain
+        ) ||
+        typeof rawStatus !== 'string' ||
+        seen.has(domain)
+      ) {
+        continue;
+      }
+      const status = rawStatus
+        .trim()
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .slice(0, 80);
+      if (!status) continue;
+      seen.add(domain);
+      validCount++;
+      if (hosts.length < MAX_HOSTS) {
+        hosts.push({
+          domain,
+          status,
+          online: /^up(?:\b|\s|$)/i.test(status),
+        });
+      }
+    }
+  }
+  return {
+    hosts,
+    truncated: validCount > MAX_HOSTS || raw.length > MAX_RAW_ENTRIES,
+  };
+}
+
+/**
+ * Project the public `/addons` catalog to display-safe version metadata.
+ * Never retain install URLs or provider-added fields, and omit WebDAV entirely.
+ */
+export function parseDeepbridOfficialApps(
+  value: unknown
+): DeepbridOfficialApps {
+  const root =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const nested = root?.addons ?? root?.data;
+  const source =
+    nested && typeof nested === 'object' && !Array.isArray(nested)
+      ? (nested as Record<string, unknown>)
+      : root;
+  const rows: Array<[string, unknown]> = Array.isArray(source)
+    ? source.flatMap((row, index) => [
+        [String(index), row] as [string, unknown],
+      ])
+    : source
+      ? Object.entries(source)
+      : [];
+  const apps: DeepbridOfficialApp[] = [];
+  const seen = new Set<string>();
+  let validCount = 0;
+  for (const [rawId, rawValue] of rows.slice(0, 200)) {
+    const id = rawId.trim().toLowerCase();
+    if (
+      id === 'error' ||
+      id === 'success' ||
+      id === 'count' ||
+      !/^[a-z0-9][a-z0-9-]{0,79}$/.test(id) ||
+      /webdav/i.test(id) ||
+      !rawValue ||
+      typeof rawValue !== 'object' ||
+      Array.isArray(rawValue) ||
+      seen.has(id)
+    ) {
+      continue;
+    }
+    const record = rawValue as Record<string, unknown>;
+    const name = boundedDisplay(record.name);
+    if (!name || /webdav/i.test(name)) continue;
+    seen.add(id);
+    validCount++;
+    if (apps.length >= 100) continue;
+    const version = boundedDisplay(record.version);
+    const date = boundedDisplay(record.date);
+    apps.push({
+      id,
+      name,
+      ...(version ? { version } : {}),
+      ...(date ? { date } : {}),
+    });
+  }
+  return { apps, truncated: validCount > apps.length || rows.length > 200 };
 }
 
 export interface DeepbridRequestOptions {
@@ -1810,7 +2380,7 @@ export class DeepbridOfficialClient {
     path: string,
     options: DeepbridRequestOptions & {
       method?: 'GET' | 'POST' | 'DELETE';
-      body?: URLSearchParams;
+      body?: URLSearchParams | UndiciFormData;
     } = {}
   ): Promise<Record<string, unknown>> {
     const timeoutMs = Math.max(
@@ -1870,7 +2440,7 @@ export class DeepbridOfficialClient {
               Accept: 'application/json',
               Authorization: `Bearer ${this.apiKey}`,
               'User-Agent': DEEPBRID_AIOSTREAMS_USER_AGENT,
-              ...(options.body
+              ...(options.body instanceof URLSearchParams
                 ? { 'Content-Type': 'application/x-www-form-urlencoded' }
                 : {}),
             },
@@ -1962,6 +2532,28 @@ export class DeepbridOfficialClient {
       json.user && typeof json.user === 'object'
         ? (json.user as Record<string, unknown>)
         : json;
+    const planType =
+      typeof source.type === 'string' ? source.type.trim().toLowerCase() : '';
+    const premium =
+      typeof source.premium === 'boolean'
+        ? source.premium
+        : typeof source.is_premium === 'boolean'
+          ? source.is_premium
+          : planType === 'premium'
+            ? true
+            : planType === 'free'
+              ? false
+              : undefined;
+    const expiration = boundedApiDate(source.expiration);
+    const maxDownloads = nonNegativeSafeInteger(
+      source.maxDownloads ?? source.max_downloads
+    );
+    const maxConnections = nonNegativeSafeInteger(
+      source.maxConnections ?? source.max_connections
+    );
+    const fidelityPoints = nonNegativeSafeInteger(
+      source.fidelity_points ?? source.fidelityPoints
+    );
     return {
       id:
         typeof source.id === 'string' || typeof source.id === 'number'
@@ -1970,14 +2562,126 @@ export class DeepbridOfficialClient {
       username:
         typeof source.username === 'string' ? source.username : undefined,
       email: typeof source.email === 'string' ? source.email : undefined,
-      premium:
-        typeof source.premium === 'boolean'
-          ? source.premium
-          : typeof source.is_premium === 'boolean'
-            ? source.is_premium
-            : undefined,
-      raw: source,
+      premium,
+      ...(expiration ? { expiration } : {}),
+      ...(maxDownloads !== undefined ? { maxDownloads } : {}),
+      ...(maxConnections !== undefined ? { maxConnections } : {}),
+      ...(fidelityPoints !== undefined ? { fidelityPoints } : {}),
     };
+  }
+
+  async getUserStats(
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridUserStats> {
+    return parseDeepbridUserStats(
+      await this.requestJson('/user/stats', options)
+    );
+  }
+
+  async getApiKeyInfo(
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridApiKeyInfo> {
+    return parseDeepbridApiKeyInfo(
+      await this.requestJson('/apikey/info', options)
+    );
+  }
+
+  async getApiKeyDevices(
+    options: DeepbridRequestOptions = {},
+    limit = 50
+  ): Promise<DeepbridApiKeyDevices> {
+    const safeLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(50, Math.floor(limit)))
+      : 50;
+    const query = new URLSearchParams({ limit: String(safeLimit) });
+    return parseDeepbridApiKeyDevices(
+      await this.requestJson(`/apikey/devices?${query}`, options)
+    );
+  }
+
+  async getUserLimits(
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridUserLimits> {
+    return parseDeepbridUserLimits(
+      await this.requestJson('/user/limits', options)
+    );
+  }
+
+  async getHosts(options: DeepbridRequestOptions = {}): Promise<DeepbridHosts> {
+    return parseDeepbridHosts(await this.requestJson('/hosts', options));
+  }
+
+  /** Load public official-app versions without sending the profile API key. */
+  async getOfficialApps(
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridOfficialApps> {
+    const now = Date.now();
+    if (officialAppsCache && officialAppsCache.expiresAtMs > now) {
+      return structuredClone(officialAppsCache.catalog);
+    }
+    if (!officialAppsInFlight) {
+      const remainingMs =
+        options.deadlineAtMs === undefined
+          ? this.timeoutMs
+          : options.deadlineAtMs - now;
+      if (remainingMs < 250) {
+        throw new DeepbridApiError(
+          'Deepbrid official app catalog deadline expired before request start.',
+          undefined,
+          'retry-exhausted'
+        );
+      }
+      const timeoutMs = Math.max(
+        250,
+        Math.min(this.timeoutMs, options.timeoutMs ?? 8_000, remainingMs)
+      );
+      officialAppsInFlight = (async () => {
+        const response = await makeRequest(`${DEEPBRID_API_BASE}/addons`, {
+          timeout: timeoutMs,
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { Accept: 'application/json' },
+        });
+        if (!response.ok) {
+          throw new DeepbridApiError(
+            'Deepbrid official app catalog is unavailable.',
+            response.status,
+            'official-app-catalog-unavailable'
+          );
+        }
+        let parsed: unknown;
+        try {
+          parsed = await response.json();
+        } catch {
+          throw new DeepbridApiError(
+            'Deepbrid official app catalog returned invalid JSON.',
+            response.status,
+            'official-app-catalog-invalid-json'
+          );
+        }
+        if (
+          parsed &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed) &&
+          Number((parsed as Record<string, unknown>).error ?? 0) !== 0
+        ) {
+          throw new DeepbridApiError(
+            'Deepbrid official app catalog reported an error.',
+            response.status,
+            'official-app-catalog-error'
+          );
+        }
+        const projected = parseDeepbridOfficialApps(parsed);
+        officialAppsCache = {
+          expiresAtMs: Date.now() + DEEPBRID_OFFICIAL_APPS_CACHE_MS,
+          catalog: projected,
+        };
+        return projected;
+      })().finally(() => {
+        officialAppsInFlight = undefined;
+      });
+    }
+    const apps = await officialAppsInFlight;
+    return structuredClone(apps);
   }
 
   async listUploads(
@@ -2106,8 +2810,62 @@ export class DeepbridOfficialClient {
     return this.deleteSelectedHistory('/downloads/delete', ids, options);
   }
 
+  /** Deletes only explicitly selected cloud torrents; whole-account deletion is unsupported. */
+  async deleteTorrents(
+    ids: readonly (string | number)[],
+    options: DeepbridRequestOptions & { confirm?: boolean } = {}
+  ): Promise<DeepbridHistoryDeletionResult> {
+    return this.deleteSelectedHistory('/torrents/delete', ids, options);
+  }
+
+  /** Submit one validated magnet to this profile's Deepbrid cloud account. */
+  async addTorrentMagnet(
+    value: string,
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridTorrentAddResult> {
+    const magnet = validateDeepbridMagnetLink(value);
+    const response = await this.requestJson('/torrents/add', {
+      ...options,
+      method: 'POST',
+      body: new URLSearchParams({ magnet: magnet.toString() }),
+    });
+    const id = responseValue(response, ['id', 'torrent_id', 'torrentId']);
+    return {
+      ...(validDeepbridHistoryId(id)
+        ? { id: normalizeDeepbridHistoryId(id) }
+        : {}),
+    };
+  }
+
+  /** Upload one validated .torrent using Deepbrid's documented multipart API. */
+  async addTorrentFile(
+    filename: string,
+    file: Uint8Array,
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridTorrentAddResult> {
+    const safeName = validateDeepbridTorrentFile(filename, file);
+    const body = new UndiciFormData();
+    body.append(
+      'torrent_file',
+      new Blob([new Uint8Array(file)], { type: 'application/x-bittorrent' }),
+      safeName
+    );
+    const response = await this.requestJson('/torrents/add', {
+      ...options,
+      method: 'POST',
+      body,
+    });
+    const id = responseValue(response, ['id', 'torrent_id', 'torrentId']);
+    return {
+      ...(validDeepbridHistoryId(id)
+        ? { id: normalizeDeepbridHistoryId(id) }
+        : {}),
+    };
+  }
+
   private async deleteSelectedHistory(
-    endpoint: '/usenet/uploads/delete' | '/downloads/delete',
+    endpoint:
+      '/usenet/uploads/delete' | '/downloads/delete' | '/torrents/delete',
     rawIds: readonly (string | number)[],
     options: DeepbridRequestOptions & { confirm?: boolean }
   ): Promise<DeepbridHistoryDeletionResult> {
@@ -2165,6 +2923,28 @@ export class DeepbridOfficialClient {
       body: new URLSearchParams({ nzb_url: parsed.toString() }),
     });
     return parseDeepbridAddResponse(json);
+  }
+
+  /** Upload one validated NZB file using Deepbrid's documented multipart API. */
+  async addNzbFile(
+    filename: string,
+    file: Uint8Array,
+    options: DeepbridRequestOptions = {}
+  ): Promise<DeepbridAddResult> {
+    const safeName = validateDeepbridNzbFile(filename, file);
+    const body = new UndiciFormData();
+    body.append(
+      'nzb_file',
+      new Blob([new Uint8Array(file)], { type: 'application/x-nzb' }),
+      safeName
+    );
+    return parseDeepbridAddResponse(
+      await this.requestJson('/usenet/add', {
+        ...options,
+        method: 'POST',
+        body,
+      })
+    );
   }
 
   async getUploadInfo(
@@ -2270,6 +3050,11 @@ export class DeepbridOfficialClient {
       typeof rawStatus === 'string' ? rawStatus : String(rawStatus);
     const progress = Number(item.progress ?? item.percentage ?? 0);
     const size = Number(item.size ?? item.total_size ?? 0);
+    const seeders = Number(item.seeders);
+    const speed =
+      typeof item.speed === 'string'
+        ? item.speed.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 80)
+        : undefined;
     const links = Array.isArray(item.links)
       ? item.links.flatMap((link) => {
           if (typeof link !== 'string' || !link) return [];
@@ -2296,6 +3081,9 @@ export class DeepbridOfficialClient {
         status,
         progress: Number.isFinite(progress) ? progress : undefined,
         size: Number.isFinite(size) && size > 0 ? size : undefined,
+        seeders:
+          Number.isSafeInteger(seeders) && seeders >= 0 ? seeders : undefined,
+        speed: speed || undefined,
         files: parsedFiles.length ? parsedFiles : links,
       },
     ];

@@ -546,6 +546,71 @@ export async function getDeepbridProfileHistory(
   }>(`/profiles/${profileId}/deepbrid/history?${query}`);
 }
 
+export interface DeepbridProfileTorrent {
+  id: string;
+  title: string;
+  status:
+    | 'queued'
+    | 'downloading'
+    | 'uploading'
+    | 'downloaded'
+    | 'error'
+    | 'dead'
+    | 'magnet_error'
+    | 'virus'
+    | 'unknown';
+  progress?: number;
+  size?: number;
+  seeders?: number;
+  speed?: string;
+}
+
+export async function getDeepbridProfileTorrents(profileId: string) {
+  return api<{ torrents: DeepbridProfileTorrent[] }>(
+    `/profiles/${profileId}/deepbrid/torrents`
+  );
+}
+
+export async function addDeepbridProfileTorrent(
+  profileId: string,
+  magnet: string
+) {
+  return api<{ id?: string }>(`POST /profiles/${profileId}/deepbrid/torrents`, {
+    body: { magnet },
+  });
+}
+
+export async function addDeepbridProfileTorrentFile(
+  profileId: string,
+  file: File
+) {
+  const body = new FormData();
+  body.append('file', file, file.name);
+  return api<{ id?: string }>(
+    `POST /profiles/${profileId}/deepbrid/torrents/add-file`,
+    { body }
+  );
+}
+
+export async function addDeepbridProfileNzb(profileId: string, file: File) {
+  const body = new FormData();
+  body.append('file', file, file.name);
+  return api<DeepbridUploadDetails>(
+    `POST /profiles/${profileId}/deepbrid/usenet/add-file`,
+    { body }
+  );
+}
+
+export async function deleteDeepbridProfileTorrents(
+  profileId: string,
+  ids: string[]
+) {
+  return api<{ deleted: number; ids: string[]; notFound: string[] }>(
+    `DELETE /profiles/${profileId}/deepbrid/torrents`,
+    { body: { ids, confirm: true } }
+  );
+}
+
 export interface DeepbridUploadDetails {
   id: string;
   title: string;
@@ -626,6 +691,170 @@ export interface DeepbridProfileMetrics {
   queue: { p50Ms: number; p95Ms: number; samples: number };
   rateLimitedResponses: number;
   transportFailures: number;
+}
+
+export interface DeepbridAccountInsights {
+  plan: 'free' | 'premium' | 'unknown';
+  accountDetails:
+    | {
+        status: 'available';
+        data: {
+          expiration?: string;
+          maxDownloads?: number;
+          maxConnections?: number;
+          fidelityPoints?: number;
+        };
+      }
+    | {
+        status: 'unavailable';
+        reason:
+          | 'authentication'
+          | 'rate-limited'
+          | 'premium-required'
+          | 'premium-required-or-forbidden'
+          | 'provider-unavailable';
+      };
+  apiKeyActivity:
+    | {
+        status: 'available';
+        data: {
+          totalRequests?: number;
+          totalLinks?: number;
+          lastUsedAt?: string;
+          createdAt?: string;
+          regeneratedAt?: string;
+        };
+      }
+    | {
+        status: 'unavailable';
+        reason:
+          | 'authentication'
+          | 'rate-limited'
+          | 'premium-required'
+          | 'premium-required-or-forbidden'
+          | 'provider-unavailable';
+      };
+  apiKeyDevices:
+    | {
+        status: 'available';
+        data: {
+          total?: number;
+          truncated: boolean;
+          devices: Array<{
+            deviceName?: string;
+            userAgent?: string;
+            firstSeenAt?: string;
+            lastSeenAt?: string;
+            requestCount?: number;
+          }>;
+        };
+      }
+    | {
+        status: 'unavailable';
+        reason:
+          | 'authentication'
+          | 'rate-limited'
+          | 'premium-required'
+          | 'premium-required-or-forbidden'
+          | 'provider-unavailable';
+      };
+  hostStatus:
+    | {
+        status: 'available';
+        data: {
+          truncated: boolean;
+          hosts: Array<{ domain: string; status: string; online: boolean }>;
+        };
+      }
+    | {
+        status: 'unavailable';
+        reason:
+          | 'authentication'
+          | 'rate-limited'
+          | 'premium-required'
+          | 'premium-required-or-forbidden'
+          | 'provider-unavailable';
+      };
+  officialApps:
+    | {
+        status: 'available';
+        data: {
+          truncated: boolean;
+          apps: Array<{
+            id: string;
+            name: string;
+            version?: string;
+            date?: string;
+          }>;
+        };
+      }
+    | {
+        status: 'unavailable';
+        reason:
+          | 'authentication'
+          | 'rate-limited'
+          | 'premium-required'
+          | 'premium-required-or-forbidden'
+          | 'provider-unavailable';
+      };
+  stats:
+    | {
+        status: 'available';
+        data: {
+          downloads?: number;
+          bandwidthBytes?: number;
+          bandwidthDisplay?: string;
+          torrents?: number;
+          remote?: number;
+        };
+      }
+    | {
+        status: 'unavailable';
+        reason:
+          | 'authentication'
+          | 'rate-limited'
+          | 'premium-required'
+          | 'premium-required-or-forbidden'
+          | 'provider-unavailable';
+      };
+  limits:
+    | {
+        status: 'available';
+        data: {
+          enabled?: boolean;
+          reset?: string;
+          hostersTruncated: boolean;
+          hosters: Array<{
+            domain: string;
+            type: 'bandwidth' | 'links';
+            limit: number;
+            used: number;
+            remaining: number;
+            limitDisplay?: string;
+            usedDisplay?: string;
+            remainingDisplay?: string;
+          }>;
+        };
+      }
+    | {
+        status: 'unavailable';
+        reason:
+          | 'authentication'
+          | 'rate-limited'
+          | 'premium-required'
+          | 'premium-required-or-forbidden'
+          | 'provider-unavailable';
+      };
+}
+
+export async function getDeepbridAccountInsights(
+  profileId: string,
+  options: Pick<RequestOptions, 'signal'> = {}
+) {
+  return api<DeepbridAccountInsights>(
+    `/profiles/${profileId}/deepbrid/insights`,
+    options
+  );
 }
 
 export async function getDeepbridProfileMetrics(profileId: string) {

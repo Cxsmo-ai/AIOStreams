@@ -21,6 +21,9 @@ import {
   getDeepbridFinderRequestReport,
   normalizeDeepbridFinderNzbUrl,
   parseDeepbridFinderResult,
+  parseDeepbridOfficialApps,
+  validateDeepbridNzbFile,
+  validateDeepbridTorrentFile,
   validateDeepbridFolderUrl,
   runDeepbridApiRequest,
   withDeepbridRateLimitRetry,
@@ -45,6 +48,297 @@ test('Deepbrid folder URL validation permits only documented HTTPS host families
     assert.throws(() => validateDeepbridFolderUrl(value), {
       code: 'invalid-folder-url',
     });
+  }
+});
+
+test('official app catalog is allowlisted and excludes URLs and WebDAV', () => {
+  const projected = parseDeepbridOfficialApps({
+    error: 0,
+    'deepbrid-video-player': {
+      name: 'Deepbrid Video Player',
+      version: '1.2.0',
+      date: '18/02/2026',
+      url: 'https://example.invalid/private-download',
+      token: 'synthetic-secret',
+    },
+    'stremio-addon': {
+      name: 'Deepbrid Stremio Addon',
+      version: '2.0',
+      url: 'https://example.invalid/manifest',
+    },
+    webdav: {
+      name: 'Deepbrid WebDAV',
+      version: '1.0',
+      url: 'https://example.invalid/webdav',
+    },
+  });
+
+  assert.deepEqual(projected, {
+    apps: [
+      {
+        id: 'deepbrid-video-player',
+        name: 'Deepbrid Video Player',
+        version: '1.2.0',
+        date: '18/02/2026',
+      },
+      { id: 'stremio-addon', name: 'Deepbrid Stremio Addon', version: '2.0' },
+    ],
+    truncated: false,
+  });
+  assert.doesNotMatch(JSON.stringify(projected), /https?:\/\/|token|webdav/i);
+});
+
+test('official torrent status parser reads documented progress, seeders, and speed fields', async () => {
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({ path: '/api/v1/torrents/info', method: 'GET' })
+    .reply(200, {
+      error: 0,
+      message: 'OK',
+      '17': {
+        filename: 'Example.Show.S01E01.mkv',
+        status: 'downloading',
+        progress: 54,
+        seeders: 9,
+        speed: '4.5 MB/s',
+        size: 1234,
+        links: ['https://www.deepbrid.com/mytorrents/private-link'],
+      },
+    });
+  setGlobalDispatcher(mockAgent);
+  try {
+    await initDb('sqlite::memory:');
+    await initialiseConfig();
+    const result = await new DeepbridOfficialClient(
+      'synthetic-api-key'
+    ).listTorrents();
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.id, '17');
+    assert.equal(result[0]?.progress, 54);
+    assert.equal(result[0]?.seeders, 9);
+    assert.equal(result[0]?.speed, '4.5 MB/s');
+    assert.equal(result[0]?.title, 'Example.Show.S01E01.mkv');
+  } finally {
+    await closeDb();
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+  }
+});
+
+test('official torrent add accepts only a valid magnet and returns a safe ID', async () => {
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  const infoHash = 'a'.repeat(40);
+  const magnet = `magnet:?xt=urn:btih:${infoHash}&dn=Test`;
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: '/api/v1/torrents/add',
+      method: 'POST',
+      body: `magnet=${encodeURIComponent(magnet)}`,
+    })
+    .reply(200, { error: 0, id: 45, link: 'https://signed.example/private' });
+  setGlobalDispatcher(mockAgent);
+  try {
+    await initDb('sqlite::memory:');
+    await initialiseConfig();
+    const client = new DeepbridOfficialClient('synthetic-api-key');
+    await assert.rejects(client.addTorrentMagnet('https://example.invalid'), {
+      code: 'invalid-magnet-link',
+    });
+    await assert.rejects(client.addTorrentMagnet('magnet:?dn=missing-hash'), {
+      code: 'invalid-magnet-link',
+    });
+    assert.deepEqual(await client.addTorrentMagnet(magnet), { id: '45' });
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    await closeDb();
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+  }
+});
+
+test('NZB upload validation rejects non-NZB, malformed XML, and entity declarations', () => {
+  const valid = new TextEncoder().encode(
+    '<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><file /></nzb>'
+  );
+  assert.equal(
+    validateDeepbridNzbFile('folder\\sample.nzb', valid),
+    'sample.nzb'
+  );
+  for (const [name, text] of [
+    ['sample.txt', '<nzb/>'],
+    ['sample.nzb', 'not xml'],
+    [
+      'sample.nzb',
+      '<!DOCTYPE nzb [<!ENTITY x SYSTEM "file:///etc/passwd">]><nzb/>',
+    ],
+  ] as const) {
+    assert.throws(
+      () => validateDeepbridNzbFile(name, new TextEncoder().encode(text)),
+      { code: 'invalid-nzb-file' }
+    );
+  }
+  assert.throws(() => validateDeepbridNzbFile('empty.nzb', new Uint8Array()), {
+    code: 'invalid-nzb-file',
+  });
+});
+
+test('official NZB file upload uses multipart and parses results server-side', async () => {
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: '/api/v1/usenet/add',
+      method: 'POST',
+      headers: (headers) =>
+        String(headers['content-type'] ?? '').startsWith(
+          'multipart/form-data;'
+        ),
+    })
+    .reply(200, {
+      error: 0,
+      id: 66,
+      title: 'Example release',
+      files: [
+        {
+          filename: 'Example.mkv',
+          filesize: 1024,
+          download_url: 'https://signed.example/private',
+        },
+      ],
+      password: 'provider-secret',
+    });
+  setGlobalDispatcher(mockAgent);
+  try {
+    await initDb('sqlite::memory:');
+    await initialiseConfig();
+    const result = await new DeepbridOfficialClient(
+      'synthetic-api-key'
+    ).addNzbFile(
+      'Example.nzb',
+      new TextEncoder().encode('<nzb><file /></nzb>')
+    );
+    assert.equal(result.id, '66');
+    assert.equal(result.files.length, 1);
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    await closeDb();
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+  }
+});
+
+test('torrent file validation requires bounded bencode with an info dictionary', () => {
+  const validTorrent = new TextEncoder().encode('d4:infod4:name4:testee');
+  assert.equal(
+    validateDeepbridTorrentFile('folder\\sample.torrent', validTorrent),
+    'sample.torrent'
+  );
+  for (const [name, value] of [
+    ['sample.nzb', 'd4:infod4:name4:testee'],
+    ['sample.torrent', 'd4:infoi1ee'],
+    ['sample.torrent', 'd4:infod4:name4:test'],
+  ] as const) {
+    assert.throws(
+      () => validateDeepbridTorrentFile(name, new TextEncoder().encode(value)),
+      { code: 'invalid-torrent-file' }
+    );
+  }
+});
+
+test('official torrent file upload is multipart and returns only a safe ID', async () => {
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: '/api/v1/torrents/add',
+      method: 'POST',
+      headers: (headers) =>
+        String(headers['content-type'] ?? '').startsWith(
+          'multipart/form-data;'
+        ),
+    })
+    .reply(200, {
+      error: 0,
+      id: 88,
+      link: 'https://signed.example/private-file',
+    });
+  setGlobalDispatcher(mockAgent);
+  try {
+    await initDb('sqlite::memory:');
+    await initialiseConfig();
+    const result = await new DeepbridOfficialClient(
+      'synthetic-api-key'
+    ).addTorrentFile(
+      'Example.torrent',
+      new TextEncoder().encode('d4:infod4:name4:testee')
+    );
+    assert.deepEqual(result, { id: '88' });
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    await closeDb();
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+  }
+});
+
+test('official app catalog uses the public endpoint without an API key header', async () => {
+  const originalDispatcher = getGlobalDispatcher();
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  mockAgent
+    .get('https://www.deepbrid.com')
+    .intercept({
+      path: '/api/v1/addons',
+      method: 'GET',
+      headers: (headers) =>
+        !Object.keys(headers).some(
+          (name) => name.toLowerCase() === 'authorization'
+        ),
+    })
+    .reply(() => ({
+      statusCode: 200,
+      data: {
+        error: 0,
+        'stremio-addon': {
+          name: 'Deepbrid Stremio Addon',
+          version: '2.0',
+        },
+        webdav: { name: 'Deepbrid WebDAV', version: '1.0' },
+      },
+    }));
+  setGlobalDispatcher(mockAgent);
+
+  try {
+    await initDb('sqlite::memory:');
+    await initialiseConfig();
+    const result = await new DeepbridOfficialClient(
+      'synthetic-test-api-key'
+    ).getOfficialApps();
+    const cached = await new DeepbridOfficialClient(
+      'synthetic-other-profile-key'
+    ).getOfficialApps();
+    assert.deepEqual(result, {
+      apps: [
+        { id: 'stremio-addon', name: 'Deepbrid Stremio Addon', version: '2.0' },
+      ],
+      truncated: false,
+    });
+    assert.deepEqual(cached, result);
+    mockAgent.assertNoPendingInterceptors();
+  } finally {
+    setGlobalDispatcher(originalDispatcher);
+    await mockAgent.close();
+    await closeDb();
   }
 });
 
@@ -600,9 +894,14 @@ test('local retry budget expires while waiting in a shared account cooldown', as
     assert.ok(outcome.error instanceof Error);
     assert.notEqual(outcome.error.message, 'local-budget-timeout');
     assert.equal((outcome.error as DeepbridApiError).code, 'retry-exhausted');
-    assert.equal(
-      (outcome.error as DeepbridApiError).retryExhaustionReason,
-      'wrapper_budget_before_attempt'
+    // Both timers represent the same effective local deadline: the retry
+    // wrapper's budget and the shared account gate's queue deadline. Which
+    // abort callback wins is scheduler-dependent, so assert the invariant
+    // (bounded retry exhaustion before any network request), not timer order.
+    assert.ok(
+      ['wrapper_budget_before_attempt', 'request_gate_deadline'].includes(
+        (outcome.error as DeepbridApiError).retryExhaustionReason ?? ''
+      )
     );
     assert.equal(networkStarts, 0);
   } finally {
@@ -923,6 +1222,17 @@ test('Deepbrid account history lists secret-free rows and only deletes explicitl
       JSON.stringify({ error: 0, deleted: 1, ids: [22], not_found: [] }),
       { headers: { 'content-type': 'application/json' } }
     );
+  pool
+    .intercept({
+      path: '/api/v1/torrents/delete?ids=33',
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+    .reply(
+      200,
+      JSON.stringify({ error: 0, deleted: 1, ids: [33], not_found: [] }),
+      { headers: { 'content-type': 'application/json' } }
+    );
   setGlobalDispatcher(mockAgent);
 
   try {
@@ -956,6 +1266,11 @@ test('Deepbrid account history lists secret-free rows and only deletes explicitl
     assert.deepEqual(await client.deleteUploads([22], { confirm: true }), {
       deleted: 1,
       ids: ['22'],
+      notFound: [],
+    });
+    assert.deepEqual(await client.deleteTorrents([33], { confirm: true }), {
+      deleted: 1,
+      ids: ['33'],
       notFound: [],
     });
     mockAgent.assertNoPendingInterceptors();

@@ -100,3 +100,27 @@ test('projects useful upload file and archive state without leaking provider lin
     /https?:\/\/|secret-token|provider-private-detail/
   );
 });
+
+test('NZB submission response projection excludes Deepbrid file URLs and passwords', () => {
+  const projected = projectDeepbridUploadDetails({
+    id: '42',
+    title: 'Example upload',
+    files: [
+      {
+        name: 'Example.mkv',
+        filename: 'Example.mkv',
+        size: 2048,
+        sizeHuman: '2 KB',
+        link: 'https://signed.example/private-file',
+        password: 'private-nzb-password',
+        download_url: 'https://signed.example/alternate',
+      } as any,
+    ],
+  });
+  const serialized = JSON.stringify(projected);
+  assert.match(serialized, /Example\.mkv/);
+  assert.doesNotMatch(
+    serialized,
+    /signed\.example|private-nzb-password|download_url/i
+  );
+});

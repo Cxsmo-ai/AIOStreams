@@ -3,27 +3,32 @@ import multer, { MulterError } from 'multer';
 import { config as appConfig } from '@aiostreams/core';
 
 /**
- * Multipart middleware for `.nzb` uploads, shared by the dashboard library
- * upload and the SABnzbd `addfile` endpoint. The size limit is read live from
- * `usenet.maxNzbSize` per request (so a settings change applies without a
- * restart) by building a fresh in-memory multer instance each call — NZBs are
- * small enough that buffering in memory is fine.
+ * Generic bounded multipart upload middleware. The size limit is set per
+ * route, and a fresh in-memory multer instance is built for each request.
  *
  * On oversize input multer raises `MulterError('LIMIT_FILE_SIZE')`; callers
  * translate that into their own error envelope. Pass the accepted file field
  * name(s); the first field that carries a file wins.
  */
-export function nzbUpload(fields: string[]): RequestHandler {
+export function boundedFileUpload(
+  fields: string[],
+  maxFileSize: number
+): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     const handler = multer({
       storage: multer.memoryStorage(),
-      limits: { fileSize: appConfig.usenet.maxNzbSize, files: 1 },
+      limits: { fileSize: maxFileSize, files: 1 },
     }).fields(fields.map((name) => ({ name, maxCount: 1 })));
     handler(req, res, next);
   };
 }
 
-/** The single uploaded NZB file across the accepted fields, if any. */
+/** Upload middleware for `.nzb` routes using the live instance setting. */
+export function nzbUpload(fields: string[]): RequestHandler {
+  return boundedFileUpload(fields, appConfig.usenet.maxNzbSize);
+}
+
+/** The single uploaded file across the accepted fields, if any. */
 export function pickUploadedFile(
   req: Request,
   fields: string[]

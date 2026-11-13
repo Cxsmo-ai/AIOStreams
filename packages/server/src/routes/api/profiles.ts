@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import {
   APIError,
   ConfigProfileRepository,
@@ -24,7 +24,15 @@ import {
   projectDeepbridUploadDetails,
 } from '../../utils/deepbrid-upload.js';
 import { projectDeepbridFinderMetrics } from '../../utils/deepbrid-metrics.js';
+import { projectDeepbridTorrentStatus } from '../../utils/deepbrid-torrents.js';
 import { runDeepbridLocalSelfTests } from '../../utils/deepbrid-self-test.js';
+import { loadDeepbridInsights } from '../../utils/deepbrid-insights.js';
+import {
+  boundedFileUpload,
+  isFileTooLargeError,
+  nzbUpload,
+  pickUploadedFile,
+} from '../../middlewares/upload.js';
 
 const router: Router = Router();
 const logger = createLogger('server');
@@ -96,9 +104,51 @@ const historyDeleteBody = z.object({
     .max(100),
   confirm: z.literal(true),
 });
+const torrentDeleteBody = z.object({
+  ids: historyDeleteBody.shape.ids,
+  confirm: z.literal(true),
+});
+const torrentAddBody = z.object({
+  magnet: z.string().trim().min(1).max(8_192),
+});
 const folderResolveBody = z.object({
   link: z.string().trim().min(1).max(2_048),
 });
+
+const deepbridNzbUpload: RequestHandler = (req, res, next) =>
+  nzbUpload(['file'])(req, res, (error) => {
+    if (isFileTooLargeError(error)) {
+      next(
+        new APIError(
+          constants.ErrorCode.BAD_REQUEST,
+          413,
+          'The NZB file exceeds this server’s configured upload limit.'
+        )
+      );
+      return;
+    }
+    next(error);
+  });
+
+const MAX_DEEPBRID_TORRENT_UPLOAD_BYTES = 16 * 1024 * 1024;
+const deepbridTorrentUpload: RequestHandler = (req, res, next) =>
+  boundedFileUpload(['file'], MAX_DEEPBRID_TORRENT_UPLOAD_BYTES)(
+    req,
+    res,
+    (error) => {
+      if (isFileTooLargeError(error)) {
+        next(
+          new APIError(
+            constants.ErrorCode.BAD_REQUEST,
+            413,
+            'The torrent file exceeds the 16 MB upload limit.'
+          )
+        );
+        return;
+      }
+      next(error);
+    }
+  );
 
 /** Resolve this owner's saved config and its own Deepbrid key; never accept a
  * credential from the browser or fall back to another profile's service. */
@@ -477,6 +527,255 @@ router.get('/:id/deepbrid/history', async (req, res, next) => {
   }
 });
 
+router.post('/:id/deepbrid/torrents', async (req, res, next) => {
+  const parsed = torrentAddBody.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    next(
+      new APIError(
+        constants.ErrorCode.BAD_REQUEST,
+        undefined,
+        'Enter a valid torrent magnet link.'
+      )
+    );
+    return;
+  }
+
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const result = await client.addTorrentMagnet(parsed.data.magnet);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res
+      .status(200)
+      .json(createResponse({ success: true, data: { id: result.id } }));
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    if (
+      error &&
+      typeof error === 'object' &&
+      (error as Record<string, unknown>).code === 'invalid-magnet-link'
+    ) {
+      next(
+        new APIError(
+          constants.ErrorCode.BAD_REQUEST,
+          undefined,
+          'Enter a valid torrent magnet link.'
+        )
+      );
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid torrent submission failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not submit the Deepbrid cloud torrent.'
+      )
+    );
+  }
+});
+
+router.post(
+  '/:id/deepbrid/torrents/add-file',
+  deepbridTorrentUpload,
+  async (req, res, next) => {
+    const file = pickUploadedFile(req, ['file']);
+    if (!file || file.buffer.length === 0) {
+      next(
+        new APIError(
+          constants.ErrorCode.BAD_REQUEST,
+          undefined,
+          'Choose a torrent file to submit.'
+        )
+      );
+      return;
+    }
+
+    try {
+      const profileId =
+        typeof req.params.id === 'string'
+          ? req.params.id
+          : (req.params.id[0] ?? '');
+      const client = await deepbridClientForProfile(
+        req.user!.username,
+        profileId
+      );
+      const result = await client.addTorrentFile(
+        file.originalname,
+        file.buffer
+      );
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.status(200).json(createResponse({ success: true, data: result }));
+    } catch (error) {
+      if (error instanceof APIError) {
+        next(error);
+        return;
+      }
+      if (
+        error &&
+        typeof error === 'object' &&
+        (error as Record<string, unknown>).code === 'invalid-torrent-file'
+      ) {
+        next(
+          new APIError(
+            constants.ErrorCode.BAD_REQUEST,
+            undefined,
+            'Choose a valid .torrent file.'
+          )
+        );
+        return;
+      }
+      logDeepbridHistoryFailure(
+        error,
+        'Deepbrid torrent file submission failed'
+      );
+      next(
+        new APIError(
+          constants.ErrorCode.INTERNAL_SERVER_ERROR,
+          undefined,
+          'Could not submit this torrent file to Deepbrid.'
+        )
+      );
+    }
+  }
+);
+
+router.post(
+  '/:id/deepbrid/usenet/add-file',
+  deepbridNzbUpload,
+  async (req, res, next) => {
+    const file = pickUploadedFile(req, ['file']);
+    if (!file || file.buffer.length === 0) {
+      next(
+        new APIError(
+          constants.ErrorCode.BAD_REQUEST,
+          undefined,
+          'Choose an NZB file to submit.'
+        )
+      );
+      return;
+    }
+
+    try {
+      const client = await deepbridClientForProfile(
+        req.user!.username,
+        typeof req.params.id === 'string'
+          ? req.params.id
+          : (req.params.id[0] ?? '')
+      );
+      const result = await client.addNzbFile(file.originalname, file.buffer);
+      const safe = projectDeepbridUploadDetails({
+        id: result.id ?? '',
+        title: result.title || file.originalname.slice(0, 500),
+        files: result.files,
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.status(200).json(createResponse({ success: true, data: safe }));
+    } catch (error) {
+      if (error instanceof APIError) {
+        next(error);
+        return;
+      }
+      if (
+        error &&
+        typeof error === 'object' &&
+        (error as Record<string, unknown>).code === 'invalid-nzb-file'
+      ) {
+        next(
+          new APIError(
+            constants.ErrorCode.BAD_REQUEST,
+            undefined,
+            'Choose a valid .nzb file.'
+          )
+        );
+        return;
+      }
+      logDeepbridHistoryFailure(error, 'Deepbrid NZB file submission failed');
+      next(
+        new APIError(
+          constants.ErrorCode.INTERNAL_SERVER_ERROR,
+          undefined,
+          'Could not submit this NZB file to Deepbrid.'
+        )
+      );
+    }
+  }
+);
+
+router.get('/:id/deepbrid/torrents', async (req, res, next) => {
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const torrents = await client.listTorrents();
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(
+      createResponse({
+        success: true,
+        data: { torrents: projectDeepbridTorrentStatus(torrents) },
+      })
+    );
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid torrent status request failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not load Deepbrid cloud torrent status.'
+      )
+    );
+  }
+});
+
+router.delete('/:id/deepbrid/torrents', async (req, res, next) => {
+  const parsed = torrentDeleteBody.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    next(
+      new APIError(
+        constants.ErrorCode.BAD_REQUEST,
+        undefined,
+        'Select specific cloud torrents and confirm the deletion.'
+      )
+    );
+    return;
+  }
+
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const result = await client.deleteTorrents(parsed.data.ids, {
+      confirm: true,
+    });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.status(200).json(createResponse({ success: true, data: result }));
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(error, 'Deepbrid torrent deletion failed');
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not delete the selected Deepbrid cloud torrents.'
+      )
+    );
+  }
+});
+
 router.get('/:id/deepbrid/uploads/:uploadId', async (req, res, next) => {
   const uploadId = z
     .string()
@@ -607,6 +906,40 @@ router.get('/:id/deepbrid/metrics', async (req, res, next) => {
         constants.ErrorCode.INTERNAL_SERVER_ERROR,
         undefined,
         'Could not load Deepbrid Finder performance metrics.'
+      )
+    );
+  }
+});
+
+router.get('/:id/deepbrid/insights', async (req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  try {
+    const client = await deepbridClientForProfile(
+      req.user!.username,
+      req.params.id
+    );
+    const insights = await loadDeepbridInsights(client);
+
+    res.status(200).json(
+      createResponse({
+        success: true,
+        data: insights,
+      })
+    );
+  } catch (error) {
+    if (error instanceof APIError) {
+      next(error);
+      return;
+    }
+    logDeepbridHistoryFailure(
+      error,
+      'Deepbrid account insights request failed'
+    );
+    next(
+      new APIError(
+        constants.ErrorCode.INTERNAL_SERVER_ERROR,
+        undefined,
+        'Could not load Deepbrid account insights.'
       )
     );
   }
