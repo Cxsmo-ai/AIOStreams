@@ -25,7 +25,12 @@ export function boundedFileUpload(
 
 /** Upload middleware for `.nzb` routes using the live instance setting. */
 export function nzbUpload(fields: string[]): RequestHandler {
-  return boundedFileUpload(fields, appConfig.usenet.maxNzbSize);
+  // Route modules are imported before the persisted configuration is loaded.
+  // Read the validated, possibly DB-overridden limit only when a request is
+  // handled, not while registering the route at module load time.
+  return (req: Request, res: Response, next: NextFunction) => {
+    boundedFileUpload(fields, appConfig.usenet.maxNzbSize)(req, res, next);
+  };
 }
 
 /** The single uploaded file across the accepted fields, if any. */
