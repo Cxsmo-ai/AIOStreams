@@ -53,8 +53,8 @@ import {
   deepbridUsenetFormatPassthrough,
 } from '../../presets/deepbridUsenet.js';
 import type { Addon, ParsedStream, Stream } from '../../db/index.js';
-import type { NZB } from '../../debrid/index.js';
 import type { ParsedId } from '../../utils/id-parser.js';
+import { IdParser } from '../../utils/id-parser.js';
 import type { DeepbridFinderClient, DeepbridFinderResult } from './client.js';
 import {
   DEEPBRID_PROGRESSIVE_OUTER_TIMEOUT_MARGIN_MS,
@@ -160,20 +160,17 @@ test('Deepbrid mode accepts direct, indexer, and combined operation', () => {
 });
 
 test('external-indexer mode never searches Deepbrid Finder', async () => {
-  class FinderCountingAddon extends DeepbridUsenetAddon {
-    finderSearchCalls = 0;
-
+  class IndexerModeAddon extends DeepbridUsenetAddon {
     protected override get needsSearchMetadata() {
       return false;
     }
 
-    protected override async _searchNzbs(_parsedId: ParsedId): Promise<NZB[]> {
-      this.finderSearchCalls++;
-      return [];
+    public searchFinder(parsedId: ParsedId) {
+      return super._searchNzbs(parsedId);
     }
   }
 
-  const addon = new FinderCountingAddon(
+  const addon = new IndexerModeAddon(
     DeepbridUsenetConfigSchema.parse({
       services: [],
       apiKey: fixtureCredential,
@@ -181,10 +178,13 @@ test('external-indexer mode never searches Deepbrid Finder', async () => {
     })
   );
 
-  // Keep this deterministic/offline while proving the base Finder hook is
-  // never reached in external-indexer-only mode.
+  const parsedId = IdParser.parse('tt0133093', 'movie');
+  assert.ok(parsedId);
+
+  // Exercise the protected Finder hook directly as well as the public stream
+  // path, so neither entry point can accidentally revive Finder searching.
+  assert.deepEqual(await addon.searchFinder(parsedId), []);
   assert.deepEqual(await addon.getStreams('movie', 'tt0133093'), []);
-  assert.equal(addon.finderSearchCalls, 0);
 });
 
 test('legacy Deepbrid configs get a bounded progressive concurrency default', () => {
