@@ -8,6 +8,7 @@ import {
   createDeepbridPlaybackToken,
   decodeDeepbridPlaybackToken,
   DeepbridUsenetConfigSchema,
+  DeepbridUsenetAddon,
   classifyDeepbridResolutionFailure,
   deepbridCoverageStatus,
   DeepbridResolutionIncompleteError,
@@ -52,6 +53,8 @@ import {
   deepbridUsenetFormatPassthrough,
 } from '../../presets/deepbridUsenet.js';
 import type { Addon, ParsedStream, Stream } from '../../db/index.js';
+import type { NZB } from '../../debrid/index.js';
+import type { ParsedId } from '../../utils/id-parser.js';
 import type { DeepbridFinderClient, DeepbridFinderResult } from './client.js';
 import {
   DEEPBRID_PROGRESSIVE_OUTER_TIMEOUT_MARGIN_MS,
@@ -154,6 +157,34 @@ test('Deepbrid mode accepts direct, indexer, and combined operation', () => {
   assert.throws(() =>
     DeepbridUsenetConfigSchema.parse({ ...base, mode: 'direct-and-indexer' })
   );
+});
+
+test('external-indexer mode never searches Deepbrid Finder', async () => {
+  class FinderCountingAddon extends DeepbridUsenetAddon {
+    finderSearchCalls = 0;
+
+    protected override get needsSearchMetadata() {
+      return false;
+    }
+
+    protected override async _searchNzbs(_parsedId: ParsedId): Promise<NZB[]> {
+      this.finderSearchCalls++;
+      return [];
+    }
+  }
+
+  const addon = new FinderCountingAddon(
+    DeepbridUsenetConfigSchema.parse({
+      services: [],
+      apiKey: fixtureCredential,
+      mode: 'indexer',
+    })
+  );
+
+  // Keep this deterministic/offline while proving the base Finder hook is
+  // never reached in external-indexer-only mode.
+  assert.deepEqual(await addon.getStreams('movie', 'tt0133093'), []);
+  assert.equal(addon.finderSearchCalls, 0);
 });
 
 test('legacy Deepbrid configs get a bounded progressive concurrency default', () => {

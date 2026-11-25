@@ -1431,9 +1431,11 @@ export class DeepbridUsenetAddon extends BaseDebridAddon<DeepbridUsenetConfig> {
       candidateIndex: number
     ) => Promise<void> | void
   ): Promise<Stream[]> {
-    // If in indexer mode, fallback to BaseDebridAddon processing which handles NZBs
+    // Indexer mode is an external-NZB resolver mode: Deepbrid's own Finder
+    // must stay disabled. External NZBs are resolved by the shared service
+    // wrapper, which keeps this addon available as a playback preference.
     if (this.userData.mode === 'indexer') {
-      return super.getStreams(type, id);
+      return [];
     }
 
     if (this.userData.mode === 'both') {
